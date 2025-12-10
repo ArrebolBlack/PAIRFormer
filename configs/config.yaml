@@ -1,0 +1,23 @@
+# configs/config.yaml
+defaults:
+  - data: miRNA_miRAW        # cfg.data
+  - model: TargetNet          # cfg.model
+  - train: default          # cfg.train  ← 给 Trainer 用
+  - task: binary_classification            # cfg.task   ← problem_type, metrics 设置
+  - run: default      # cfg.run    ← 模式：train / eval / finetune 等
+  - eval: default           # cfg.eval   ← sweep_threshold 等评估策略
+  - logging: default  # cfg.logging.wandb / console 等
+  - paths: default
+  - experiment: miRAW_TargetNet_baseline       # cfg.experiment，具体一次实验的“配方”（可选）
+  - _self_
+
+# 一些全局信息
+# experiment_name: "mirna_TargetNet_baseline"
+# seed: 2020
+# device: "cuda"
+
+
+hydra:
+  run:
+    # 每次运行的“根目录”
+    dir: ${paths.output_root}/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}

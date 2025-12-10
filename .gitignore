@@ -1,0 +1,42 @@
+# Python 编译产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE/编辑器
+.vscode/
+.idea/
+
+# 训练/实验输出（建议全部排除）
+outputs/
+wandb/
+checkpoints/
+cache/
+eval/
+multirun/
+results/
+logs/
+*.log
+*.out
+
+# 数据文件（按自己需求调整）
+data/**
+!data/miRAW_Test0.txt
+!data/miRAW_Test1.txt
+!data/miRAW_Test2.txt
+!data/miRAW_Test3.txt
+!data/miRAW_Test4.txt
+!data/miRAW_Test5.txt
+!data/miRAW_Test6.txt
+!data/miRAW_Test7.txt
+!data/miRAW_Test8.txt
+!data/miRAW_Test9.txt
+!data/miRAW_Test_total.txt
+!data/miRAW_Train_Validation.txt

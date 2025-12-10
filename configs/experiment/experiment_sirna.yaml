@@ -1,0 +1,40 @@
+# 顶层实验配置：一份文件控制 data + model + train + eval
+
+experiment_name: "sirna_huvk_targetnet_baseline"
+
+task:
+  name: "sirna_mrna_interaction"
+  problem_type: "binary_classification"    # or "regression"
+  threshold: 0.5                           # 用于二分类评估
+  # 未来可以扩展: multi_label, ranking 等
+
+data:
+  cache_path: "cache/HUVK_Train_Validation_Test_64_16_20_origin_align"
+  train_config_json: "config/data/siRNA_HUVK_train.json"
+  val_config_json:   "config/data/siRNA_HUVK_eval.json"
+  test_config_json:  "config/data/siRNA_HUVK_eval.json"
+  batch_size: 1024
+  num_workers: 4
+  pin_memory: true
+
+model:
+  name: "targetnet"                        # registry key: targetnet / transformer / dit
+  config_json: "config/model/TargetNet_Optimized.json"
+  # 未来：可以直接写超参数，而不是 JSON 路径
+
+train:
+  num_epochs: 30
+  optimizer: "adamw"
+  lr: 1e-4
+  weight_decay: 1e-5
+  scheduler: "cosine"                      # or "step", "none"
+  grad_clip: 1.0
+  amp: true                                # 混合精度训练
+  seed: 2020
+
+logging:
+  output_dir: "results/sirna_targetnet_baseline"
+  save_best_metric: "f1"
+  use_wandb: false
+  wandb_project: "mirna_sirna"
+  wandb_entity: null

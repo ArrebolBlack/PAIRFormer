@@ -1,0 +1,14 @@
+# configs/model/transformer.yaml
+name: "transformer_baseline"
+arch: "transformer_encoder"   # 对应 registry 里的 key
+
+d_model: 256
+n_heads: 8
+d_ff: 1024
+num_layers: 4
+dropout: 0.1
+ff_activation: "swiglu"
+
+pos_encoding_type: "rope"     # "sinusoidal" / "rope" / "none"
+max_seq_len: 4096
+causal: false                 # true 时就是 decoder-style

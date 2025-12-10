@@ -1,0 +1,12 @@
+model:
+  arch: PairTransformerAggregator
+  name: pair_agg_v0
+  in_dim: 514        # 例如 d_emb=512 + 2 个标量(esa, logit)
+  d_model: 256
+  n_layers: 3
+  n_heads: 8
+  dim_ff: 512
+  dropout: 0.1
+  max_len: 512
+  use_cls_token: true
+  pos_encoding_type: sinusoidal  # 用你已有 TransformerConfig 的选项

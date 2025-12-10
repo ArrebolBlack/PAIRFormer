@@ -1,0 +1,38 @@
+# configs/logging/default.yaml
+# ------- 全局 WandB 配置（train.py / eval.py 的 setup_wandb 使用） ------- #
+wandb:
+  # 是否初始化 WandB 运行（train.py / eval.py 会检查这个）
+  enabled: false
+
+  # 项目名：最好换成你自己的项目名
+  project: "TargetNet"
+
+  # 可选：团队 / 用户名（一般在 web 上能看到）
+  entity: null
+
+  # 模式：
+  #   - "online"   : 正常上传
+  #   - "offline"  : 本地缓存，之后再 sync
+  #   - "disabled" : 完全禁用（但这里通常用 enabled=false 就够了）
+  mode: "online"
+
+  # 分组：比如相同实验系列的 run 放在同一 group
+  group: null
+
+  # 标签：方便在 WandB 面板筛选
+  tags: []
+
+
+# evaluator 用的前缀配置
+eval:
+  use_wandb: false          # 可选：如果不想手动对齐，可以写 ${logging.wandb.enabled}
+  wandb_prefix: "eval"
+
+# logging.use_wandb 专给 evaluator 用，
+# logging.wandb.enabled 控制整个 run 是否 init wandb。
+
+
+# '''
+# import os
+# os.environ['WANDB_API_KEY'] = '52c4efa2e41c6a26cb628748d83f0c02097b619e'
+# '''

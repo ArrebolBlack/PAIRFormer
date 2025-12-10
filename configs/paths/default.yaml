@@ -1,0 +1,14 @@
+# configs/paths/default.yaml
+# 所有「跟文件系统相关」的根路径统一在这里定义，
+# 方便未来迁移 / 重构。
+
+# 每次 run 的输出根目录（相对于 hydra.run.dir）
+# 例如：${hydra:run.dir}/outputs
+output_root: "outputs"
+
+# 数据缓存的根目录
+# ⚠️ 通常希望是「跨 run 共享」的，所以后面会用 original_cwd 来拼。
+cache_root: "cache"
+
+# 日志根目录（可选）
+logs_root: "logs"

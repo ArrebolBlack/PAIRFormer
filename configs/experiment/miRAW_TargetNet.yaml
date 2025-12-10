@@ -1,0 +1,107 @@
+# @package _global_
+
+
+# configs/experiment/miRAW_TargetNet.yaml
+
+# 继承原始 TargetNet baseline 的数据 & 训练大部分设置
+defaults:
+  - miRAW_TargetNet_baseline
+  - _self_
+
+experiment_name: "miRAW_TargetNet"
+
+data:
+  path:
+    train: "data/miRAW_Train_Validation.txt"
+    val:   "data/miRAW_Train_Validation.txt"
+    test: "data/miRAW_Test_total.txt"
+
+run:
+  num_epochs: 50
+  batch_size: 256
+
+  # reduction: "softmax"          # 统一控制
+  reduction: "max"
+  train_reduction: ${run.reduction}
+  eval_reduction:  ${run.reduction}
+  test_reduction:  ${run.reduction}
+
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+
+model:
+  # 模型在实验中的名字（随便起，用于日志）
+  name: targetnet_default
+
+  # 模型架构标识：用于 registry 中选择具体实现
+  arch: TargetNet
+
+  # 以下为 TargetNet 的结构超参（可以按需改）
+  num_channels:      [16, 16, 32]
+  num_blocks:        [2, 1, 1]
+  pool_size:         3
+  stem_kernel_size:  5
+  block_kernel_size: 3
+  skip_connection:   true
+  dropout:           0.5
+
+train:
+  # --- 优化器 & 学习率 ---
+  optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
+  lr: 0.001
+  weight_decay: 0.01
+  momentum: 0.9                # 仅对 SGD 有效
+
+  # --- 学习率调度器 ---
+  scheduler: plateau              # ["none", "plateau", "cosine", "step"]
+  scheduler_factor: 0.2        # for ReduceLROnPlateau
+  scheduler_patience: 5
+  scheduler_t_max: 10          # for CosineAnnealingLR
+  scheduler_step_size: 10      # for StepLR
+  scheduler_gamma: 0.1
+
+  # --- 损失 & 数值稳定 ---
+  # === Stage 0.1: class weighting + label smoothing ===
+  pos_weight: 1.0       # 1.0 = 不加权
+  label_smoothing: false
+  smooth_pos: 0.95       # label_smoothing=false 时不生效
+  smooth_neg: 0.05
+  # === Stage 0.2: Focal Loss ===
+  loss_type: bce          # ["bce", "focal", "bce_focal"]
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1
+  bce_lambda: 0.01 # bce_loss 数值一般在focal_loss的十倍
+  # bce_focal = bce_lambda * bce_loss + focal_lambda * focal_loss
+  # === Stage 0.3: esa weight(window-size) ===
+  esa_weighting: false
+  esa_scale: 10.0     # ESA 归一化尺度，esa_norm = clamp(score / esa_scale, 0..1)
+  esa_lambda_pos: 1.0 # 正样本 ESA 权重系数
+  esa_lambda_neg: 0.5 # 负样本 ESA 权重系数（一般从 0 或 0.5 小试）
+  
+
+
+
+  amp: true                    # 是否使用混合精度
+  grad_clip: 1.0               # None 或 float
+
+  # --- EMA（可选） ---
+  ema:
+    enabled: false
+    decay: 0.999
+
+  # --- 监控指标（决定 best.pt 保存逻辑） ---
+  monitor: loss                # "loss" / "f1" / "roc_auc" / ...
+  greater_is_better: false     # 对 loss 应设为 false，对 F1/AUC 设为 true
+
+logging:
+  wandb:
+    enabled: true
+    project: "TargetNet"
+    group: "miRAW_TargetNet_final"
+    tags: ["TargetNet", "final"]

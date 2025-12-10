@@ -1,0 +1,22 @@
+# configs/data/siRNA_HUVK.yaml
+name: "sirna_huvk"
+
+# 原始 txt 文件路径（可以是相对路径，或通过 paths 组控制前缀）
+path:
+  train: "data/siRNA_raw_data/Dataset_HUVK/TrainValidationTest641620/siRNA_mRNA_HUVK_total_Train_Validation_64-16_20250903_000045.txt"
+  val:   "data/siRNA_raw_data/Dataset_HUVK/TrainValidationTest641620/siRNA_mRNA_HUVK_total_Train_Validation_64-16_20250903_000045.txt"
+  test: "data/siRNA_raw_data/Dataset_HUVK/TrainValidationTest641620/siRNA_mRNA_HUVK_total_Test_20250903_000045.txt"
+    
+
+with_esa: true     # 你的 encode_RNA 相关开关
+
+
+alignment: "extended_seed_alignment"
+
+
+# 6 列：mirna_id, mirna_seq, mrna_id, mrna_seq, label, split
+split_column: 5
+split_map:
+  train: "train"
+  val:   "val"
+  # test: 不写，表示 test 这条 path 没有 split 列，全文件都属于 test

@@ -1,0 +1,20 @@
+# configs/experiment/experiment_my_transformer.yaml
+data:
+  name: mirna_miraw
+  path:
+    train: data/miRAW_Train_Validation.txt
+    val: data/miRAW_Train_Validation.txt
+    test: data/miRAW/Test0.txt
+  with_esa: true
+
+model:
+  arch: MyTransformer1D
+  name: my_transformer_baseline
+  d_model: 256
+  n_layers: 4
+  n_heads: 8
+  dim_ff: 1024
+  dropout: 0.2
+  max_len: 64   # 可不写，默认跟 with_esa 推 50
+
+# 其他 train / task / run 部分沿用现有默认即可

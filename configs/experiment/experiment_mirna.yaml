@@ -1,0 +1,11 @@
+# configs/experiment/miRAW_TargetNet_tuned.yaml
+# 继承 baseline，然后只改一小部分字段
+defaults:
+  - miRAW_TargetNet_baseline
+  - _self_
+
+train:
+  lr: 5e-4   # 覆盖 baseline 里的 lr
+
+model:
+  dropout: 0.3

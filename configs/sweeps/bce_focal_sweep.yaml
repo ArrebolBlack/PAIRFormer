@@ -1,0 +1,29 @@
+# configs/sweeps/bce_focal_sweep.yaml
+
+program: src.launch.train     # 对应 python -m src.launch.train
+name: bce_focal_sweep
+method: bayes                 # 也可以先改成 random，后面解释
+metric:
+  name: val/pr_auc            # 对应你 WandB summary 里写入的 key
+  goal: maximize
+
+parameters:
+  train.bce_lambda:
+    values: [0.001,0.01,0.05,0.1] 
+  train.focal_alpha:
+    values: [0.10,0.25,0.40] 
+  train.focal_gamma:
+    values: [1.0,2.0,3.0] 
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - src.launch.train
+  - experiment=miRAW_TargetNet_baseline
+  - run.train_reduction=none 
+  - logging.wandb.enabled=true
+  - logging.wandb.project=TargetNet
+  - logging.wandb.group=bce_focal_sweep
+  - train.loss_type=bce_focal 
+  - ${args_no_hyphens}   # ⭐ 关键修改

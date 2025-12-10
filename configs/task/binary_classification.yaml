@@ -1,0 +1,8 @@
+# configs/task/binary_classification.yaml
+problem_type: "binary_classification"
+
+# 模型输出是 logit 还是概率？
+from_logits: true   # 模型最后一层不做 sigmoid → 这里 true
+
+# 评估时的默认阈值（可以被 sweep 改写）
+threshold: 0.5

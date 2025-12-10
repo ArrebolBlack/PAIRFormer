@@ -1,0 +1,4 @@
+# configs/task/regression.yaml
+problem_type: "regression"
+
+# 回归不需要 threshold / from_logits，这两个字段会被忽略

@@ -1,0 +1,36 @@
+# configs/model/targetnet_optimized.yaml
+# 优化版 TargetNet 的配置示例
+
+name: "targetnet_opt_default"
+arch: "TargetNet_Optimized"   # 必须与 @register_model 名字一致
+
+# 以下字段会进入 ModelConfig.params，并在 TargetNet_Optimized.__init__ 里解析
+
+# 每一段的通道数（stem, stage1, stage2, ...）
+num_channels: [16, 32, 64]
+
+# 每一段包含多少个 block
+num_blocks: [3, 2, 2]
+
+# 卷积核大小
+stem_kernel_size: 5
+block_kernel_size: 3
+
+# ResNet Block 选项
+skip_connection: true
+multi_scale: true
+
+# Dropout 概率
+dropout: 0.3
+
+# 自适应池化输出长度
+target_output_length: 10
+
+# SE 模块类型：
+#   - "basic"    : SEBlock（默认）
+#   - "enhanced" : SEBlockEnhanced
+se_type: "basic"
+se_reduction: 16
+
+# 若暂时不从 DataConfig 控制 ESA，可在这里兜底：
+# with_esa: true

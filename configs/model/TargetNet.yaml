@@ -1,0 +1,33 @@
+# configs/model/targetnet.yaml
+# TargetNet 的 Hydra 配置示范
+
+name: "targetnet_default"
+arch: "TargetNet"   # 必须与 @register_model("TargetNet") 保持一致
+
+# == 下面这些字段会被收集到 ModelConfig.params 里 ==
+#    并在 TargetNet.__init__ 内部读取
+
+# 每一段的通道数（示例：stem=64, stage1=128, stage2=256）
+num_channels: [16, 16, 32]
+
+# 每一段包含多少个 block（示例：每段 2 个 block）
+num_blocks: [2, 1, 1]
+
+# 池化核大小（=stride），与旧代码的 model_cfg.pool_size 一致
+pool_size: 3
+
+# stem 卷积核大小
+stem_kernel_size: 5
+
+# ResNet block 卷积核大小
+block_kernel_size: 3
+
+# 是否启用残差连接
+skip_connection: true
+
+# Dropout 概率；等价于旧的 dropout_rate
+dropout: 0.5
+
+# 可选：如果没有 DataConfig，可以在这里兜底设置 with_esa
+# 通常建议直接在数据 config 里控制（DataConfig.with_esa）
+# with_esa: true

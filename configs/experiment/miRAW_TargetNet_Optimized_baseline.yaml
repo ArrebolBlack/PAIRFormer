@@ -1,0 +1,82 @@
+# @package _global_
+
+
+# configs/experiment/miRAW_TargetNet_tuned.yaml
+# 继承 baseline，然后只改一小部分字段
+defaults:
+  - miRAW_TargetNet_baseline
+  - _self_
+
+
+experiment_name: "miRAW_TargetNet_Optimized_baseline"
+
+model:
+  name: targetnet_optimized
+
+  arch: TargetNet_Optimized
+
+  num_channels:      [16, 32, 64, 128]
+  num_blocks:        [3, 2, 2, 2]
+  pool_size:         3
+  stem_kernel_size:  5
+  block_kernel_size: 3
+  skip_connection:   true
+  dropout:           0.3
+
+  multi_scale:       true 
+
+
+
+train:
+  # --- 优化器 & 学习率 ---
+  optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
+  lr: 0.00003
+  weight_decay: 0.01
+  momentum: 0.9                # 仅对 SGD 有效
+
+  # --- 学习率调度器 ---
+  scheduler: plateau              # ["none", "plateau", "cosine", "step"]
+  scheduler_factor: 0.2        # for ReduceLROnPlateau
+  scheduler_patience: 5
+  scheduler_t_max: 10          # for CosineAnnealingLR
+  scheduler_step_size: 10      # for StepLR
+  scheduler_gamma: 0.1
+
+  # --- 损失 & 数值稳定 ---
+  loss_type: bce               # "bce" or "mse" or "custom"
+  amp: true                    # 是否使用混合精度
+  grad_clip: 1.0               # None 或 float
+
+  # --- EMA（可选） ---
+  ema:
+    enabled: false
+    decay: 0.999
+
+  # --- 监控指标（决定 best.pt 保存逻辑） ---
+  monitor: loss                # "loss" / "f1" / "roc_auc" / ...
+  greater_is_better: false     # 对 loss 应设为 false，对 F1/AUC 设为 true
+
+
+run:
+  
+  num_epochs: 40
+  batch_size: 128
+
+
+# ============================================================
+# 7. 日志 & WandB 配置 logging
+# ============================================================
+logging:
+  # 训练 & eval 统一使用的 WandB 基本设置
+  wandb:
+    enabled: true                  # 打开后 train/eval 都会 init wandb
+    project: "TargetNet"
+    entity: null
+    mode: "online"                  # "online" / "offline" / "disabled"
+    group: miRAW_baseline
+    tags: ["TargetNet_Optimized"]
+
+  # evaluator 内部使用的前缀设置（写 summary 时可以加上 eval/）
+  eval:
+    use_wandb: false                # 是否在 evaluator 中额外写 wandb summary
+    wandb_prefix: "eval"

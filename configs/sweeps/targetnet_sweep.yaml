@@ -1,0 +1,44 @@
+# configs/sweeps/targetnet_sweep.yaml
+
+program: src.launch.train     # 对应 python -m src.launch.train
+name: targetnet_sweep
+method: bayes                 # 也可以先改成 random，后面解释
+metric:
+  name: test/test_sweep/pr_auc            # 对应你 WandB summary 里写入的 key
+  goal: maximize
+
+parameters:
+  train.label_smoothing:
+    values: [true, false] 
+  train.loss_type:
+    values: [bce, focal, bce_focal] 
+  train.esa_weighting:
+    values: [true, false]
+  train.amp:
+    values: [true, false]
+  train.ema:
+    values: [true, false]
+  train.optimizer:
+    values: [adam, adamw, sgd, rmsprop]
+  train.lr:
+    values: [0.001, 0.005, 0.0001]
+  train.weight_decay:
+    values: [0.0, 0.01]
+  train.scheduler:
+    values: [none, plateau, cosine, step]
+  run.batch_size:
+    values: [256, 512, 1024, 128]
+  run.num_epochs:
+    values: [40, 50, 60, 100]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - src.launch.train
+  - experiment=miRAW_TargetNet
+  - run.train_reduction=none 
+  - logging.wandb.enabled=true
+  - logging.wandb.project=TargetNet
+  - logging.wandb.group=targetnet_sweep
+  - ${args_no_hyphens}   # ⭐ 关键修改

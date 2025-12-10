@@ -1,0 +1,74 @@
+# configs/train/default.yaml
+
+# -------- Optimizer -------- #
+# 支持："adamw"（默认） / "adam" / "sgd" / "rmsprop"
+optimizer: "adamw"
+
+# 学习率 —— 注意 Trainer 里访问的是 train_cfg.lr（不是 learning_rate）
+lr: 1e-3
+
+# L2 正则 / weight decay
+weight_decay: 1e-2
+
+# 仅在 optimizer == "sgd" 时使用
+momentum: 0.9
+
+# -------- Scheduler -------- #
+# 支持：
+#   - "none"    : 不用 scheduler
+#   - "plateau" : ReduceLROnPlateau
+#   - "cosine"  : CosineAnnealingLR
+#   - "step"    : StepLR
+scheduler: "none"
+
+# ReduceLROnPlateau 参数
+scheduler_factor: 0.2        # 每次降低到原来的多少倍
+scheduler_patience: 5        # 若 metric 连续多少个 epoch 没改善就降 lr
+
+# CosineAnnealingLR 参数
+scheduler_t_max: 10          # 一个周期的 epoch 数
+
+# StepLR 参数
+scheduler_step_size: 10      # 每多少个 epoch 降一次 lr
+scheduler_gamma: 0.1         # 降多少倍
+
+# -------- Loss -------- #
+# 对于二分类："bce"（BCEWithLogitsLoss）
+# 对于回归："mse"（MSELoss）
+# 也可以定义 "custom" 并在 Trainer 外面传入 custom_loss_fn
+# loss_type: "bce"
+
+# === Stage 0.1: class weighting + label smoothing ===
+pos_weight: 1.0       # 1.0 = 不加权
+label_smoothing: false
+smooth_pos: 1.0       # label_smoothing=false 时不生效
+smooth_neg: 0.0
+# === Stage 0.2: Focal Loss ===
+loss_type: bce          # ["bce", "focal", "bce_focal"]
+focal_gamma: 1.0
+focal_alpha: 0.4
+focal_lambda: 1
+bce_lambda: 0.01 # bce_loss 数值一般在focal_loss的十倍
+# bce_focal = bce_lambda * bce_loss + focal_lambda * focal_loss
+# === Stage 0.3: esa weight(window-size) ===
+esa_weighting: false
+esa_scale: 10.0     # ESA 归一化尺度，esa_norm = clamp(score / esa_scale, 0..1)
+esa_lambda_pos: 0.5 # 正样本 ESA 权重系数
+esa_lambda_neg: 0.0 # 负样本 ESA 权重系数（一般从 0 或 0.5 小试）
+ 
+# -------- Training tricks -------- #
+# 是否启用混合精度（torch.cuda.amp）
+amp: true
+
+# 梯度裁剪阈值；<=0 或 null 表示不裁剪
+grad_clip: 1.0
+
+# EMA 设置
+ema:
+  enabled: false     # 开关
+  decay: 0.999       # 指数滑动平均的衰减系数
+
+# -------- Metric to monitor -------- #
+# 用来选 best checkpoint / 调用 Plateau scheduler 的指标
+monitor: "f1"        # 例如："loss" / "f1" / "roc_auc"
+greater_is_better: true   # loss: false；F1/AUC: true

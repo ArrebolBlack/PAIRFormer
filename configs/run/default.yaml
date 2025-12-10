@@ -1,0 +1,52 @@
+# configs/run/default.yaml
+
+# 当前运行模式（代码暂时没用到，但留作语义标记）
+mode: "train"   # "train" / "eval"
+
+# 训练轮数（只在 train.py 中用）
+num_epochs: 30
+
+# DataLoader 超参数（train.py & eval.py 共用）
+batch_size: 1024
+num_workers: 4
+pin_memory: true
+
+# 数据缓存路径（相对于项目根目录，而不是 hydra.run.dir）
+
+# 这里：cache_root + data.name
+cache_path: "${paths.cache_root}/${data.name}"
+
+# checkpoint / resume 策略（train.py & eval.py 共用）
+resume: false               # train.py: 是否尝试从 checkpoint 恢复
+checkpoint: null            # train.py: 默认 ckpt_dir/best.pt；eval.py：必须指定要评估的 ckpt 
+# e.g. "/abs/path/to/best.pt" 或 "outputs/exp1/checkpoints/best.pt"
+
+
+# train_reduction: "none" 代表训练时还是之前的windows，聚合不加入计算图
+# 作用于Trainer
+# 决定train_one_epoch
+
+
+reduction: "max"          # 统一控制
+train_reduction: ${run.reduction}
+eval_reduction:  ${run.reduction}
+test_reduction:  ${run.reduction}
+
+train_softmax_temp: 1.0
+eval_softmax_temp: 1.0
+test_softmax_temp: 1.0
+
+train_topk: 3
+eval_topk: 3
+test_topk: 3
+
+
+ckpt_subdir: "checkpoints"
+eval_subdir: "eval"
+
+# 方便代码里直接用绝对路径
+ckpt_dir: ${hydra:run.dir}/${run.ckpt_subdir}
+eval_dir: ${hydra:run.dir}/${run.eval_subdir}
+
+eval_test_after_train: false
+test_splits: ["test"]
