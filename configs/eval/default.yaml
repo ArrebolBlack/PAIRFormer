@@ -1,0 +1,41 @@
+# configs/eval/default.yaml
+# evaluator/evaluator.py 的参数由 eval.py 读取并传入
+
+# 所有评估结果的根目录，相对于 hydra.run.dir 或你自己配置的 output_root
+save_dir: "eval_outputs"
+
+# 是否在评估时做阈值扫描，自动找 best threshold
+do_threshold_sweep: true
+sweep_num_thresholds: 101  # 对应 np.linspace(0,1,101)
+
+
+# configs/eval/default.yaml
+
+# 是否在评估阶段使用训练时在 val 上选出的 best_threshold
+# 如果为 true 且找得到 best_threshold.json，就会覆盖 cfg.task.threshold.value
+# 并在 test 上用固定阈值评估。
+use_val_best_threshold: false
+
+# 手工指定 best_threshold.json 的路径（可为空）
+# - 若为空，会默认去当前 run_dir/eval/val/best_threshold.json 里找
+best_threshold_path: null
+
+
+
+
+# 下面这些 flag 目前 evaluator.py 还没用到（只要给了 output_dir 就会全保存），
+# 保留是为了未来有精细控制时使用。
+save_metrics_json: true
+save_report_txt: true
+save_threshold_csv: true
+save_curves_png: true
+
+# 将来如果想用自定义文件名，可以在 evaluator 里改：现在是写死的:
+# - metrics.json
+# - report.txt
+# - roc_curve.png
+# - pr_curve.png
+# - confusion_matrix.png
+# - probability_distribution.png
+roc_curve_file: "roc_curve.png"
+pr_curve_file: "pr_curve.png"

@@ -19,7 +19,7 @@ outputs/
 wandb/
 checkpoints/
 cache/
-eval/
+/eval/
 multirun/
 results/
 logs/
