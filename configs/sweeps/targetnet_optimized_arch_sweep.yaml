@@ -9,47 +9,47 @@ metric:
 
 parameters:
   model.arch_variant:
-    values: ["opt3_tiny", "opt3_base", "opt3_ms", "opt3_deep", "opt4_tiny", "opt4_base", "opt4_ms", "opt4_deep"]
+    values: ["opt4_tiny"]
 
   model.stem_kernel_size:
-    values: [3, 5, 7]
+    values: [5]
 
   model.block_kernel_size:
-    values: [3, 5, 7]
+    values: [3]
 
   model.target_output_length:
-    values: [12, 16]
+    values: [12]
 
   model.dropout:
-    values: [0.0, 0.1, 0.2, 0.3, 0.5]
+    values: [0.0]
 
   model.se_type:
-    values: ["none", "basic", "enhanced"]
+    values: ["basic"]
 
   model.se_reduction:
-    values: [4, 8, 16]
-  # train.label_smoothing:
-  #   values: [true, false] 
-  # train.loss_type:
-  #   values: [bce, focal, bce_focal] 
-  # train.esa_weighting:
-  #   values: [true, false]
-  # train.amp:
-  #   values: [true, false]
-  # train.ema:
-  #   values: [true, false]
-  # train.optimizer:
-  #   values: [adam, adamw, sgd, rmsprop]
-  # train.lr:
-  #   values: [0.001, 0.005, 0.0001]
-  # train.weight_decay:
-  #   values: [0.0, 0.01]
-  # train.scheduler:
-  #   values: [none, plateau, cosine, step]
-  # run.batch_size:
-  #   values: [64, 128, 256, 512, 1024]
-  # run.num_epochs:
-  #   values: [40, 50, 60, 100]
+    values: [8]
+  train.label_smoothing:
+    values: [true] 
+  train.loss_type:
+    values: [bce_focal] 
+  train.esa_weighting:
+    values: [true]
+  train.amp:
+    values: [true]
+  train.ema:
+    values: [true]
+  train.optimizer:
+    values: [adamw]
+  train.lr:
+    values: [0.001, 0.005, 0.0001]
+  train.weight_decay:
+    values: [0.0, 0.01]
+  train.scheduler:
+    values: [cosine]
+  run.batch_size:
+    values: [128, 256, 512, 1024]
+  run.num_epochs:
+    values: [40, 60, 100]
 
 command:
   - ${env}

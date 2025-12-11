@@ -2,7 +2,7 @@
 
 program: src.launch.train     # 对应 python -m src.launch.train
 name: targetnet_sweep
-method: bayes                 # 也可以先改成 random，后面解释
+method: random                # 也可以先改成 random，后面解释
 metric:
   name: test/test_sweep/pr_auc            # 对应你 WandB summary 里写入的 key
   goal: maximize
@@ -15,21 +15,21 @@ parameters:
   train.esa_weighting:
     values: [true]
   train.amp:
-    values: [false]
+    values: [true]
   train.ema:
-    values: [true, false]
+    values: [true]
   train.optimizer:
-    values: [adam, adamw, sgd, rmsprop]
+    values: [adamw]
   train.lr:
-    values: [0.001, 0.005, 0.0001]
+    values: [0.005]
   train.weight_decay:
-    values: [0.0, 0.01]
+    values: [0.0]
   train.scheduler:
-    values: [none, plateau, cosine, step]
+    values: [cosine]
   run.batch_size:
-    values: [256, 512, 1024, 128]
+    values: [512]
   run.num_epochs:
-    values: [40, 50, 60, 100]
+    values: [100]
 
 command:
   - ${env}

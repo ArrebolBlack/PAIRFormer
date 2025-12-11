@@ -59,7 +59,9 @@ class PairTransformerAggregator(nn.Module):
 
         # 是否使用 pair 内连续位置（v1 用）
         self.use_rel_pos: bool = bool(p.get("use_rel_pos", False))
+        self.rel_pos_type: str = str(p.get("rel_pos_encoding_type", "mlp")).lower()
         rel_pos_hidden_dim: int = int(p.get("rel_pos_hidden_dim", 32))
+
 
         # -------- 2) 输入投影 -------- #
         # x: [B, L, D_in] -> proj -> [B, L, d_model]
@@ -67,12 +69,20 @@ class PairTransformerAggregator(nn.Module):
 
         # -------- 3) 可选的相对位置编码 MLP（v1 用） -------- #
         if self.use_rel_pos:
-            # 假设 pos 是 [0, 1] 的标量，先映射到 d_model，然后加到 token 表示上
-            self.rel_pos_mlp = nn.Sequential(
-                nn.Linear(1, rel_pos_hidden_dim),
-                nn.ReLU(),
-                nn.Linear(rel_pos_hidden_dim, d_model),
-            )
+            if self.rel_pos_type == "mlp":
+                self.rel_pos_mlp = nn.Sequential(
+                    nn.Linear(1, rel_pos_hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(rel_pos_hidden_dim, d_model),
+                )
+            elif self.rel_pos_type in ("sinusoidal", "rope_emb"):
+                # 不需要 MLP，用纯函数在 forward 里构造
+                self.rel_pos_mlp = None
+            else:
+                raise ValueError(
+                    f"Unknown rel_pos_encoding_type={self.rel_pos_type}, "
+                    f"expected one of ['mlp', 'sinusoidal', 'rope_emb']"
+                )
         else:
             self.rel_pos_mlp = None
 
@@ -111,6 +121,71 @@ class PairTransformerAggregator(nn.Module):
             nn.Linear(d_model, 1),
         )
 
+
+
+    # === 连续位置 → embedding 的 helper ===
+    def _build_rel_pos_emb(self, pos: torch.Tensor, d_model: int) -> torch.Tensor:
+        """
+        pos: [B, L] in [0, 1]
+        return: [B, L, d_model]
+        """
+        if not self.use_rel_pos:
+            return 0.0
+
+        if self.rel_pos_type == "mlp":
+            pos_feat = pos.unsqueeze(-1).float()      # [B, L, 1]
+            return self.rel_pos_mlp(pos_feat)         # [B, L, d_model]
+
+        B, L = pos.shape
+        device = pos.device
+        pos = pos.float()                             # [B, L]
+
+        # 统一扩展到 [B, L, 1]
+        pos_ = pos.unsqueeze(-1)                      # [B, L, 1]
+
+        if self.rel_pos_type == "sinusoidal":
+            # 标准 transformer sinusoidal，但把 index 替换成连续 pos_
+            # 这里可以适当 rescale pos，比如乘以 1000.
+            div_term = torch.exp(
+                torch.arange(0, d_model, 2, device=device, dtype=torch.float32)
+                * (-torch.log(torch.tensor(10000.0)) / d_model)
+            )  # [d_model/2]
+            # [B, L, d_model/2]
+            angles = pos_ * div_term  # broadcasting
+            sin = torch.sin(angles)
+            cos = torch.cos(angles)
+            # interleave sin, cos -> [B, L, d_model]
+            pe = torch.zeros(B, L, d_model, device=device, dtype=torch.float32)
+            pe[..., 0::2] = sin
+            pe[..., 1::2] = cos
+            return pe
+
+        elif self.rel_pos_type == "rope_emb":
+            # “RoPE 风格”的 embedding：先用 sin/cos 生成一个旋转相位向量，
+            # 然后直接当作 additive embedding 加到 token 上。
+            # 注意：这不是正牌 RoPE，只是用同一组频率构造的 phase embedding。
+            half_dim = d_model // 2
+            div_term = torch.exp(
+                torch.arange(0, half_dim, 2, device=device, dtype=torch.float32)
+                * (-torch.log(torch.tensor(10000.0)) / half_dim)
+            )
+            theta = pos_ * div_term   # [B, L, half_dim/2]
+            sin = torch.sin(theta)
+            cos = torch.cos(theta)
+            emb_half = torch.zeros(B, L, half_dim, device=device, dtype=torch.float32)
+            emb_half[..., 0::2] = sin
+            emb_half[..., 1::2] = cos
+            # 拼成 d_model 维，可以简单复制一份或补零
+            pe = torch.zeros(B, L, d_model, device=device, dtype=torch.float32)
+            pe[..., :half_dim] = emb_half
+            pe[..., half_dim:] = emb_half
+            return pe
+
+        else:
+            raise RuntimeError(f"Unknown rel_pos_type={self.rel_pos_type}")
+
+
+
     def forward(
         self,
         x: torch.Tensor,
@@ -133,6 +208,16 @@ class PairTransformerAggregator(nn.Module):
                 f"but got x.shape[-1]={Din}"
             )
 
+        if self.use_rel_pos and pos is None:
+            raise ValueError(
+                "use_rel_pos=True, but forward() is called without pos."
+            )
+        if self.use_rel_pos and pos.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                f"pos shape {pos.shape} is incompatible with x shape {x.shape}."
+            )
+
+
         if self.use_cls_token:
             # 预留一个位置给 CLS
             if L + 1 > self.max_len + 1:
@@ -149,11 +234,10 @@ class PairTransformerAggregator(nn.Module):
         h = self.input_proj(x)
 
         # -------- 2) 可选：加连续位置编码 (v1) -------- #
-        if self.use_rel_pos and pos is not None:
-            # pos: [B, L] -> [B, L, 1]
-            pos_feat = pos.unsqueeze(-1).float()
-            pos_emb = self.rel_pos_mlp(pos_feat)  # [B, L, d_model]
-            h = h + pos_emb
+        if self.use_rel_pos:
+            rel_pe = self._build_rel_pos_emb(pos, h.size(-1))  # [B, L, d_model]
+            h = h + rel_pe
+
 
         # -------- 3) 拼 CLS token（如果启用） -------- #
         if self.use_cls_token:

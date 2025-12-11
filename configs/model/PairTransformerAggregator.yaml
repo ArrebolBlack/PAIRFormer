@@ -7,6 +7,9 @@ model:
   n_heads: 8
   dim_ff: 512
   dropout: 0.1
+  ff_activation: gelu
   max_len: 512
   use_cls_token: true
   pos_encoding_type: sinusoidal  # 用你已有 TransformerConfig 的选项
+  causal: false 
+  

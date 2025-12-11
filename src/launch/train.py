@@ -80,6 +80,8 @@ from src.evaluator.evaluator import evaluate_with_trainer
 from src.utils import set_seeds 
 
 from src.config.arch_space import ARCH_SPACE
+from src.data.pair_level_dataset import PairLevelDataset, pair_level_collate_fn
+
 
 def apply_arch_variant(cfg):
     v = cfg.model.get("arch_variant", None)
@@ -236,29 +238,80 @@ def main(cfg: DictConfig):
     num_workers = int(cfg.run.get("num_workers", 4))
     pin_memory = bool(cfg.run.get("pin_memory", True))
 
-    train_ds, train_loader = build_dataset_and_loader(
-        data_cfg=data_cfg,
-        split_idx="train",
-        cache_data_path=cache_root,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        shuffle=True,
-        drop_last=False,
-    )
-    val_ds, val_loader = build_dataset_and_loader(
-        data_cfg=data_cfg,
-        split_idx="val",
-        cache_data_path=cache_root,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        shuffle=False,
-        drop_last=False,
-    )
+    # 安全读取 experiment.task（老实验没有 experiment 字段）
+    experiment_cfg = cfg.get("experiment", None)
+    task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
+    
+    if task_mode == "pair_level_train":
+        # ===================== Pair-level 分支 =====================
+        pair_cfg = cfg.data.pair
 
-    # set-level 标签（保持与你旧代码一致）
-    val_set_labels = get_set_labels(data_cfg, "val")
+        train_ds = PairLevelDataset(
+            cache_root=pair_cfg.cache_root,
+            split=pair_cfg.train_split,
+            max_cts_per_pair=pair_cfg.max_cts_per_pair,
+            selection_mode=pair_cfg.selection_mode,
+            pos_in_token=pair_cfg.pos_in_token,
+            order_mode=pair_cfg.order_mode,
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=pair_level_collate_fn,
+        )
+
+        val_ds = PairLevelDataset(
+            cache_root=pair_cfg.cache_root,
+            split=pair_cfg.val_split,
+            max_cts_per_pair=pair_cfg.max_cts_per_pair,
+            selection_mode=pair_cfg.selection_mode,
+            pos_in_token=pair_cfg.pos_in_token,
+            order_mode=pair_cfg.order_mode,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=pair_level_collate_fn,
+        )
+
+        # pair-level: 每个 sample 就是一个 pair，不需要额外 set 聚合
+        val_set_labels = None
+        aggregate_sets = False
+
+    else:
+        # ===================== 原有 window-level 分支 =====================
+        train_ds, train_loader = build_dataset_and_loader(
+            data_cfg=data_cfg,
+            split_idx="train",
+            cache_data_path=cache_root,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            shuffle=True,
+            drop_last=False,
+        )
+        val_ds, val_loader = build_dataset_and_loader(
+            data_cfg=data_cfg,
+            split_idx="val",
+            cache_data_path=cache_root,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            shuffle=False,
+            drop_last=False,
+        )
+
+
+        val_set_labels = get_set_labels(data_cfg, "val")
+        aggregate_sets = True
+
+
 
     # ---- 构建模型 ----
     # model_name 通常用 cfg.model.arch 或 cfg.model.name 作为 registry key
@@ -299,7 +352,7 @@ def main(cfg: DictConfig):
         val_metrics = trainer.validate_one_epoch(
             loader=val_loader,
             set_labels=val_set_labels,
-            aggregate_sets=True,
+            aggregate_sets=aggregate_sets,
             use_ema=True,
         )
         val_loss = val_metrics["loss"]
@@ -357,7 +410,7 @@ def main(cfg: DictConfig):
         logging_cfg=cfg.logging,
         output_dir=str(val_eval_dir),
         set_labels=val_set_labels,
-        aggregate_sets=True,
+        aggregate_sets=aggregate_sets,
         tag="val",
         do_threshold_sweep=cfg.eval.do_threshold_sweep,
         sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
@@ -425,19 +478,58 @@ def main(cfg: DictConfig):
 
         # 1) 构建 test Dataset + DataLoader
         test_splits = cfg.run.get("test_splits", ["test"])
+        # 安全读取 experiment.task（老实验没有 experiment 字段）
+        experiment_cfg = cfg.get("experiment", None)
+        task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
+        pair_cfg = cfg.data.get("pair", None)
+
         for split_idx in test_splits:
             print(f"[Train] Building test loader for split='{split_idx}'")
-            test_ds, test_loader = build_dataset_and_loader(
-                data_cfg=data_cfg,
-                split_idx=split_idx,
-                cache_data_path=cache_root,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                shuffle=False,
-                drop_last=False,
-            )
-            test_set_labels = get_set_labels(data_cfg, split_idx)
+
+            # ===================== 按 task 分支构建 test dataset =====================
+            if task_mode == "pair_level_train":
+                if pair_cfg is None:
+                    raise ValueError("[Train] experiment.task='pair_level_train' but cfg.data.pair is missing.")
+
+                # 对 pair-level，一般就一个 test split：pair_cfg.test_split
+                test_ds = PairLevelDataset(
+                    cache_root=pair_cfg.cache_root,
+                    split=pair_cfg.test_split,
+                    max_cts_per_pair=pair_cfg.max_cts_per_pair,
+                    selection_mode=pair_cfg.selection_mode,
+                    pos_in_token=pair_cfg.pos_in_token,
+                    order_mode=pair_cfg.order_mode,
+                )
+                test_loader = DataLoader(
+                    test_ds,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory,
+                    collate_fn=pair_level_collate_fn,
+                )
+
+                # pair-level：每个 sample 就是一个 pair，不需要 set-level label
+                test_set_labels = None
+
+            else:
+                # 原有 window-level 模式
+                test_ds, test_loader = build_dataset_and_loader(
+                    data_cfg=data_cfg,
+                    split_idx=split_idx,
+                    cache_data_path=cache_root,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory,
+                    shuffle=False,
+                    drop_last=False,
+                )
+
+                if aggregate_sets:
+                    test_set_labels = get_set_labels(data_cfg, split_idx)
+                else:
+                    test_set_labels = None
+
 
             # 为 test 结果单独建一个子目录：eval/test/<split_idx>/
             test_root = eval_dir / "test" / str(split_idx)
@@ -460,7 +552,7 @@ def main(cfg: DictConfig):
                 logging_cfg=cfg.logging,
                 output_dir=str(out_dir_fixed),
                 set_labels=test_set_labels,
-                aggregate_sets=True,
+                aggregate_sets=aggregate_sets,
                 tag=f"{split_idx}_thr0.5",
                 do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
                 sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
@@ -486,7 +578,7 @@ def main(cfg: DictConfig):
                     logging_cfg=cfg.logging,
                     output_dir=str(out_dir_valbest),
                     set_labels=test_set_labels,
-                    aggregate_sets=True,
+                    aggregate_sets=aggregate_sets,
                     tag=f"{split_idx}_valbest",
                     do_threshold_sweep=False,           # ✅ 固定 val best 阈值
                     sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
@@ -511,7 +603,7 @@ def main(cfg: DictConfig):
                 logging_cfg=cfg.logging,
                 output_dir=str(out_dir_sweep),
                 set_labels=test_set_labels,
-                aggregate_sets=True,
+                aggregate_sets=aggregate_sets,
                 tag=f"{split_idx}_sweep",
                 do_threshold_sweep=True,               # ✅ 在 test 上扫阈值
                 sweep_num_thresholds=cfg.eval.sweep_num_thresholds,

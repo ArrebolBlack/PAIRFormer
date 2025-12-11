@@ -1,0 +1,206 @@
+# @package _global_
+
+# configs/experiment/miRAW_pair_agg_baseline.yaml
+
+# ===================== 实验基本信息 =====================
+experiment:
+  name: miRAW_pair_agg_baseline
+  task: pair_level_train      # 在 src/launch/train.py 里用这个分支创建 PairLevelDataset / PairAggregator
+
+seed: 2020                    # 或者 42，看你想和之前实验是否对齐
+
+device: cuda                  # 统一和旧实验一样
+
+# ===================== 路径相关 =====================
+paths:
+  output_root: outputs        # 总输出根目录：outputs/...
+  cache_root: cache           # 通用 cache 根目录
+  logs_root: logs             # 日志根目录
+
+# ===================== 运行配置（对应 wandb 里 run.* 那一块） =====================
+run:
+  mode: train                 # train / eval / test
+  resume: false               # 是否从 ckpt 恢复
+  seed: ${seed}
+
+  # dataloader / epoch
+  batch_size: 64
+  num_workers: 4
+  pin_memory: true
+  num_epochs: 30              # 和 train.max_epochs 对齐；二者有一个即可，你可以只用这个
+
+  # MIL 聚合（pair-level 这边不再需要 bag-level MIL）
+  train_reduction: none       # Stage-1: window-level TargetNet 的 bag 聚合方式（这里不启用）
+  eval_reduction: none        # pair-level 一般就 none；如果你还想对 pair 再做 max，可以改成 max
+  test_reduction: none
+
+  # softmax 温度 / topk（如果后面 eval/test 想做 top-k 聚合可以继续用）
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+
+  # 输出子目录（相对于 paths.output_root）
+  ckpt_subdir: checkpoints
+  eval_subdir: eval
+
+  # # 运行时自动填充的绝对路径，一般不用在 yaml 里手动改
+  ckpt_dir: ${hydra:run.dir}/${run.ckpt_subdir}
+  eval_dir: ${hydra:run.dir}/${run.eval_subdir}
+
+  # cache 路径（旧代码有 run.cache_path，这里保持兼容）
+  cache_path: ${paths.cache_root}
+
+  # 测试集 split 名称（如果你以后想在一个 config 里评多个 test split，可以在这里扩展）
+  test_splits: [test]
+
+  # 训练完是否自动在 test 上评估
+  eval_test_after_train: true
+
+
+# ===================== 数据配置：pair-level aggregator =====================
+data:
+  # 仅作为标识用，对应 wandb 里的 data.name
+  name: mirna_miraw_pair_level
+
+  path:
+    train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    test: "data/miRAW_Test0.txt"
+    # test: "data/miRAW_Test_0,6-9.txt"
+
+  # PairLevelDataset 的配置（你 Stage-1 导出的 cache）
+  pair:
+    cache_root: cache/cts_cache/TargetNet_miRAW   # dump_cts_embeddings.py 的 out-root
+    train_split: train
+    val_split: val
+    test_split: test
+
+    max_cts_per_pair: 512
+
+    # 选择哪些 miRNA-CTS token
+    selection_mode: topk_logit       # [topk_logit, topk_abs_logit, topk_esa, random]
+    order_mode: score                # [score, original]
+
+    # 位置是否直接拼进 token：
+    pos_in_token: true               # true: token 最后一维是 pos；false: pos 单独传给模型
+
+# ===================== 任务配置（metrics / evaluator 用） =====================
+task:
+  problem_type: binary_classification
+  threshold: 0.5
+  from_logits: true
+
+# ===================== 模型：Pair Transformer Aggregator =====================
+model:
+  arch: PairTransformerAggregator
+  name: pair_agg_v0
+
+  # IMPORTANT: in_dim 必须等于 PairLevelDataset.token_dim
+  #   token_dim = emb_dim + 2(+1 if pos_in_token)
+  #   比如 emb_dim=512:
+  #     pos_in_token = true  -> in_dim = 515
+  #     pos_in_token = false -> in_dim = 514
+  in_dim: 515
+
+  d_model: 256
+  n_layers: 3
+  n_heads: 8
+  dim_ff: 512
+  dropout: 0.1
+  ff_activation: gelu
+
+  max_len: 512
+  use_cls_token: true
+  pos_encoding_type: sinusoidal   # 用你的 TransformerEncoder 支持的类型
+  causal: false
+
+  # 连续位置编码（只在 pos_in_token=false 时真正起作用）
+  use_rel_pos: false              # base: 不用连续位置编码
+  rel_pos_encoding_type: sinusoidal # [mlp, rope, sinusoidal]
+  rel_pos_hidden_dim: 32
+
+
+
+# ===================== 训练配置（对应 trainer 里的 train_cfg） =====================
+train:
+  # --- 损失相关 ---
+  loss_type: bce_focal            # 或 bce / focal（与你现有 trainer 支持的类型一致）
+  esa_weighting: false            # Stage-2 不使用 ESA 加权
+
+  # Focal / Label smoothing 等参数（沿用你 miRAW_TargetNet_Optimized 的那套）
+  focal_alpha: 0.4
+  focal_gamma: 1.0
+  focal_lambda: 1.0
+  label_smoothing: false          # pair-level 先关闭，有需要再打开
+  bce_lambda: 0.01
+  pos_weight: 1.0                 # if 用在 BCE
+  bce_pos_weight: 1.0             # 若你在代码里用的是这个字段，两个都保留不会出问题
+  smooth_neg: 0.05
+  smooth_pos: 0.95
+
+  # --- 优化器与学习率调度 ---
+  optimizer: adamw                # trainer 里是 train_cfg.optimizer: "adamw" / ...
+  lr: 3e-4
+  weight_decay: 1e-2
+
+  scheduler: cosine               # ["none","plateau","cosine","step"] 等
+  scheduler_t_max: 10             # 对应 cosine
+  scheduler_factor: 0.2           # 对应 plateau / step 时可用
+  scheduler_patience: 5           # 对应 plateau
+  scheduler_step_size: 10         # 对应 step
+
+  momentum: 0.9                   # 若用 sgd 时生效
+
+  # --- 训练细节 ---
+  amp: true                       # 混合精度
+  grad_clip: 1.0
+
+  ema:
+    enabled: false
+    decay: 0.999
+
+  monitor: loss                   # 早停/保存最佳模型时监控的指标名
+  greater_is_better: false        # 对 loss 来说是 False；如果你以后改成监控 roc_auc，要改成 True
+
+
+# ===================== 评估配置（对应 evaluator.py / metrics.py） =====================
+eval:
+  # 文件输出
+  save_dir: eval_outputs          # 相对于单次 run 的 output 根目录
+  pr_curve_file: pr_curve.png
+  roc_curve_file: roc_curve.png
+  save_curves_png: true
+  save_report_txt: true
+  save_metrics_json: true
+
+  # 阈值扫描
+  do_threshold_sweep: true
+  sweep_num_thresholds: 101
+  save_threshold_csv: true
+  best_threshold_path: null       # 如果你想在 test 用 val 的 best thr，可以把 val 的 best_threshold.txt 路径填进来
+
+  # 早停 / 保存 best ckpt
+  metric:
+    primary: auroc
+    others: [auprc, f1, accuracy]
+
+  val_interval: 1
+  save_best_by: auroc
+  use_val_best_threshold: false   # 先让 test 自己扫一遍；如果要复用 val best，就设成 true 并提供 best_threshold_path
+
+
+# ===================== 日志 / WandB 配置 =====================
+logging:
+  wandb:
+    enabled: true
+    mode: online            # online / offline / disabled
+    project: TargetNet
+    group: pair_agg_baseline
+    tags: ["PairAggregator", "miRAW"]
+    entity: null            # 如果你在个人空间，就留 null 或填你的 entity
+  eval:
+    use_wandb: false
+    wandb_prefix: "eval"

@@ -39,6 +39,8 @@ class PairLevelDataset(Dataset):
         split: str,
         max_cts_per_pair: int = 512,
         selection_mode: str = "topk_logit",
+        pos_in_token: bool = True,
+        order_mode: str = "score",    # "score" 或 "original"
     ):
         """
         参数
@@ -66,6 +68,8 @@ class PairLevelDataset(Dataset):
         self.split = split
         self.max_cts_per_pair = int(max_cts_per_pair)
         self.selection_mode = selection_mode
+        self.pos_in_token = bool(pos_in_token)
+        self.order_mode = order_mode  # "score" = 按得分顺序；"original" = 保留原始顺序
 
         path = os.path.join(cache_root, f"{split}.pt")
         if not os.path.exists(path):
@@ -95,17 +99,31 @@ class PairLevelDataset(Dataset):
                 f"expected 2D tensor, got shape {emb.shape}"
             )
         self.emb_dim = emb.shape[-1]
-        # d_token = d_emb + 2 (logit, esa)
-        self.token_dim = self.emb_dim + 2
+
+        # v0：dump_cts_embeddings 里的 "pos" 可能为 None
+        raw_pos = any_entry.get("pos", None)
+        self.has_cached_pos = isinstance(raw_pos, torch.Tensor)
+
+        # token 维度：
+        #   emb_dim
+        #   + 2 (logit, esa)
+        #   + 1 (pos，如果 pos_in_token=True)
+        if self.pos_in_token:
+            self.token_dim = self.emb_dim + 3   # emb + logit + esa + pos
+        else:
+            self.token_dim = self.emb_dim + 2   # emb + logit + esa
 
         print(
             f"[PairLevelDataset] Loaded split='{split}' from {path} "
             f"with {len(self.pair_ids)} pairs. "
             f"Embedding dim = {self.emb_dim}, token dim = {self.token_dim}, "
             f"max_cts_per_pair = {self.max_cts_per_pair}, "
-            f"selection_mode = {self.selection_mode}."
+            f"selection_mode = {self.selection_mode}, "
+            f"order_mode = {self.order_mode}, "
+            f"has_cached_pos = {self.has_cached_pos}, "
+            f"pos_in_token = {self.pos_in_token}."
         )
-
+        
     def __len__(self) -> int:
         return len(self.pair_ids)
 
@@ -155,14 +173,15 @@ class PairLevelDataset(Dataset):
 
     # ------- Dataset 主接口 ------- #
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, int, torch.Tensor]:
         """
         返回一个 pair 的 token 序列及其 label。
 
         返回
         ----
-        tokens : Tensor [M, d_token]
-            token_i = concat(emb_i, logit_i, esa_i)
+        tokens : [M, d_token]
+            - 如果 pos_in_token=True : concat(emb, logit, esa, pos)，pos 单独返回
+            - 如果 pos_in_token=False: concat(emb, logit, esa)，pos 单独返回
 
         label  : Tensor [] (float32)
             pair 级别的标签（0./1.），统一成 float32，方便 BCEWithLogitsLoss 等。
@@ -172,6 +191,8 @@ class PairLevelDataset(Dataset):
 
         pair_id: int
             原始 pair id（set_idx），便于 debug / 分析。
+
+        pos_seq: [M]，归一化位置（0~1），用于 direct position encoding / ablation
         """
         pair_id = self.pair_ids[idx]
         entry = self.data[pair_id]
@@ -179,82 +200,135 @@ class PairLevelDataset(Dataset):
         emb = entry["embeddings"]          # [N_i, d_emb]
         logits = entry["logits"].view(-1)  # [N_i]
         esa = entry["esa"].view(-1)        # [N_i]
-        pos = entry["pos"].view(-1)        # [N_i]
+        raw_pos = entry.get("pos", None)   # 可能是 None 或 Tensor
         label_val = float(entry["label"])  # scalar
 
-        # 安全检查
-        if emb.shape[0] != logits.shape[0] or emb.shape[0] != esa.shape[0]:
+        # 基本安全检查
+        N = emb.shape[0]
+        if N != logits.shape[0] or N != esa.shape[0]:
             raise ValueError(
                 f"[PairLevelDataset] Inconsistent lengths for pair {pair_id}: "
-                f"embeddings={emb.shape[0]}, logits={logits.shape[0]}, esa={esa.shape[0]}"
+                f"embeddings={N}, logits={logits.shape[0]}, esa={esa.shape[0]}"
             )
 
-        # 选取 M 个 index
-        idx_keep = self._select_indices(logits, esa)
+        # ---------- 构造 pos 向量 ----------
+        if isinstance(raw_pos, torch.Tensor):
+            pos_full = raw_pos.view(-1).float()     # 用 dump 时存的真实位置
+            if pos_full.shape[0] != N:
+                raise ValueError(
+                    f"[PairLevelDataset] pos length mismatch for pair {pair_id}: "
+                    f"pos={pos_full.shape[0]}, N={N}"
+                )
+        else:
+            # v0：没有显式 pos，用 index 归一化作为“原始顺序位置”
+            if N == 1:
+                pos_full = torch.tensor([0.0], dtype=torch.float32)
+            else:
+                pos_full = torch.linspace(0.0, 1.0, steps=N, dtype=torch.float32)
+
+        # ---------- 选取 M 个 CTS ----------
+        idx_keep = self._select_indices(logits, esa)   # [M]
+
+        if self.order_mode == "original":
+            # 按物理/相对位置排序：pos 越小位置越靠前
+            pos_sub = pos_full[idx_keep]              # [M]
+            sort_pos, sort_idx = torch.sort(pos_sub)  # 升序排序
+            idx_keep = idx_keep[sort_idx]             # 重排 index
+            pos_sel = sort_pos                        # [M] 与 idx_keep 对齐
+        elif self.order_mode == "score":
+            # 保持得分/随机排序
+            pos_sel = pos_full[idx_keep]
+        else:
+            raise ValueError(
+                f"[PairLevelDataset] Unknown order_mode='{self.order_mode}'. "
+                f"支持: 'score', 'original'."
+            )
+
+        # 再据此取 emb/logit/esa
         emb = emb[idx_keep]                          # [M, d_emb]
         logits_sel = logits[idx_keep].unsqueeze(-1)  # [M, 1]
         esa_sel = esa[idx_keep].unsqueeze(-1)        # [M, 1]
-        pos_sel = pos[idx_keep].unsqueeze(-1)        # [M, 1]
 
-        # 拼成 token: [M, d_emb+2]
-        tokens = torch.cat([emb, logits_sel, esa_sel, pos_sel], dim=-1)
+
+        # ---------- 拼 token ----------
+        if self.pos_in_token:
+            # token: [M, d_emb+3]
+            tokens = torch.cat(
+                [emb, logits_sel, esa_sel, pos_sel.unsqueeze(-1)], dim=-1
+            )
+        else:
+            # token 不包含 pos，pos 单独返回
+            tokens = torch.cat(
+                [emb, logits_sel, esa_sel], dim=-1
+            )
 
         length = int(tokens.size(0))
         label = torch.tensor(label_val, dtype=torch.float32)
 
-        return tokens, label, length, pair_id
-
+        return tokens, label, length, pair_id, pos_sel
 
 # ----------------------- #
 # Collate function
 # ----------------------- #
 
 def pair_level_collate_fn(
-    batch: Sequence[Tuple[torch.Tensor, torch.Tensor, int, int]]
+    batch: Sequence[Tuple[torch.Tensor, torch.Tensor, int, int, torch.Tensor]]
 ):
     """
-    collate_fn，把若干 pair 的可变长 token 序列 pad 成一个 batch。
+    输入 batch: list of (tokens, label, length, pair_id, pos_seq)
 
-    输入 batch: list of (tokens, label, length, pair_id)
-      - tokens: [M_i, d_token]
-      - label : scalar tensor
-      - length: int
+      - tokens : [M_i, d_token]
+      - label  : scalar tensor
+      - length : int
       - pair_id: int
+      - pos_seq: [M_i]，归一化位置 (0~1)
 
     输出:
       batch_dict = {
-          "tokens":  FloatTensor [B, K, D],   # K = 当前 batch 内最长的 M_i
-          "mask":    BoolTensor  [B, K],      # True 表示有效 token
-          "labels":  FloatTensor [B],         # pair-level labels
-          "lengths": LongTensor   [B],        # 各 pair 的 token 数
-          "pair_ids":LongTensor   [B],        # pair id，便于 debug
+          "tokens":  [B, K, D],
+          "mask":    [B, K],
+          "labels":  [B],
+          "lengths": [B],
+          "pair_ids":[B],
+          "pos":     [B, K],   # padding 为 0
       }
     """
-    tokens_list, labels_list, lengths_list, pair_ids_list = zip(*batch)
+    tokens_list, labels_list, lengths_list, pair_ids_list, pos_list = zip(*batch)
 
     B = len(batch)
-    # 当前 batch 内的最大长度
     max_len = max(int(l) for l in lengths_list)
     token_dim = tokens_list[0].size(-1)
 
-    # 初始化 padding 容器
     tokens_padded = torch.zeros(B, max_len, token_dim, dtype=tokens_list[0].dtype)
     mask = torch.zeros(B, max_len, dtype=torch.bool)
+    pos_padded = torch.zeros(B, max_len, dtype=torch.float32)
 
-    for i, tokens in enumerate(tokens_list):
+    for i, (tokens, pos_seq) in enumerate(zip(tokens_list, pos_list)):
         L = tokens.size(0)
         tokens_padded[i, :L] = tokens
         mask[i, :L] = True
+
+        # pos_seq: [M_i] -> pad 到 [max_len]
+        pos_padded[i, :L] = pos_seq
 
     labels = torch.stack(labels_list).view(-1)  # [B]
     lengths = torch.tensor(lengths_list, dtype=torch.long)  # [B]
     pair_ids = torch.tensor(pair_ids_list, dtype=torch.long)  # [B]
 
     batch_dict = {
-        "tokens": tokens_padded,  # [B, K, D]
-        "mask": mask,             # [B, K]
-        "labels": labels,         # [B]
-        "lengths": lengths,       # [B]
-        "pair_ids": pair_ids,     # [B]
+        # === 给 PairTransformerAggregator 用的字段 ===
+        "tokens": tokens_padded,      # [B, K, D]
+        "mask": mask,                 # [B, K]  True = valid
+        "pos": pos_padded,            # [B, K]
+        "lengths": lengths,           # [B]
+        "pair_ids": pair_ids,         # [B]  仅用于分析 / debug
+
+        # === 给通用 Trainer._unpack_batch 兼容的 alias ===
+        "inputs": tokens_padded,      # [B, K, D]  -> x
+        "labels": labels,             # [B]        -> y
+        # Stage-2 目前不需要 set-level MIL，先不传 set_idx
+        # 若以后想在 pair 之上再做一层 bag，可以加上：
+        # "set_idx": pair_ids,
     }
     return batch_dict
+

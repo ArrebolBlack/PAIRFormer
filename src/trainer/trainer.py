@@ -706,51 +706,108 @@ class Trainer:
 
         return x, y.float(), set_idx
 
+    def _is_pair_level_batch(self, batch: Any) -> bool:
+        """
+        判断当前 batch 是否来自 PairLevelDataset。
+        约定：pair-level batch 是 dict 且至少包含键 "tokens"。
+        """
+        return isinstance(batch, dict) and ("tokens" in batch)
+
+    # def _binary_focal_loss(
+    #     self,
+    #     logits: torch.Tensor,
+    #     labels: torch.Tensor,
+    #     sample_weight: torch.Tensor = None,
+    # ) -> torch.Tensor:
+    #     """
+    #     Binary Focal Loss，支持 soft label（用于配合 label smoothing）。
+
+    #     参数
+    #     ----
+    #     logits : (N,)
+    #     labels : (N,)  已经做过 label smoothing 的 target（在 [0,1]）
+    #     """
+    #     logits = logits.view(-1)
+    #     labels = labels.view(-1)
+
+    #     gamma = float(getattr(self.train_cfg, "focal_gamma", 2.0))
+    #     alpha = float(getattr(self.train_cfg, "focal_alpha", 0.25))
+
+    #     # 概率 p = sigmoid(logit)
+    #     p = torch.sigmoid(logits)
+
+    #     # 对“目标类别”的概率 p_t：
+    #     # 对于 hard label: p_t = p (y=1), 1-p (y=0)
+    #     # 这里 labels 可能是 soft（smoothing 后），做一个线性插值版本：
+    #     p_t = p * labels + (1.0 - p) * (1.0 - labels)
+
+    #     # alpha_t 同理，用 soft label 做插值
+    #     alpha_t = alpha * labels + (1.0 - alpha) * (1.0 - labels)
+
+    #     eps = 1e-8
+    #     # 基础 CE（用 soft label）
+    #     ce = -(
+    #         labels * torch.log(p.clamp(min=eps))
+    #         + (1.0 - labels) * torch.log((1.0 - p).clamp(min=eps))
+    #     )
+
+    #     focal_factor = alpha_t * (1.0 - p_t).pow(gamma)
+    #     loss = focal_factor * ce
+
+    #     if sample_weight is not None:
+    #         sample_weight = sample_weight.view_as(loss)
+    #         loss = loss * sample_weight
+
+    #     return loss.mean()
+
 
     def _binary_focal_loss(
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
         sample_weight: torch.Tensor = None,
+        pos_weight: torch.Tensor = None,
     ) -> torch.Tensor:
         """
-        Binary Focal Loss，支持 soft label（用于配合 label smoothing）。
+        稳定版 Binary Focal Loss，支持 soft label + sample_weight + pos_weight。
 
-        参数
-        ----
         logits : (N,)
         labels : (N,)  已经做过 label smoothing 的 target（在 [0,1]）
         """
         logits = logits.view(-1)
-        labels = labels.view(-1)
+        labels = labels.view(-1).float()
 
         gamma = float(getattr(self.train_cfg, "focal_gamma", 2.0))
         alpha = float(getattr(self.train_cfg, "focal_alpha", 0.25))
 
-        # 概率 p = sigmoid(logit)
-        p = torch.sigmoid(logits)
+        # 1) 先用官方 BCEWithLogitsLoss 做“稳定的 CE”（不做 reduction）
+        #    这里可以同时考虑 pos_weight
+        ce = F.binary_cross_entropy_with_logits(
+            logits,
+            labels,
+            pos_weight=pos_weight,
+            reduction="none",
+        )  # [N]
 
-        # 对“目标类别”的概率 p_t：
-        # 对于 hard label: p_t = p (y=1), 1-p (y=0)
-        # 这里 labels 可能是 soft（smoothing 后），做一个线性插值版本：
+        # 2) 计算 p 和 soft-label 意义下的 p_t
+        p = torch.sigmoid(logits)              # [N]
+        # soft p_t: “对”的概率
         p_t = p * labels + (1.0 - p) * (1.0 - labels)
+        p_t = p_t.clamp(min=1e-6, max=1.0 - 1e-6)
 
-        # alpha_t 同理，用 soft label 做插值
+        # 3) alpha_t 同样用 soft label 做插值
         alpha_t = alpha * labels + (1.0 - alpha) * (1.0 - labels)
 
-        eps = 1e-8
-        # 基础 CE（用 soft label）
-        ce = -(
-            labels * torch.log(p.clamp(min=eps))
-            + (1.0 - labels) * torch.log((1.0 - p).clamp(min=eps))
-        )
+        # 4) focal 因子
+        focal_factor = alpha_t * (1.0 - p_t).pow(gamma)   # [N]
 
-        focal_factor = alpha_t * (1.0 - p_t).pow(gamma)
-        loss = focal_factor * ce
+        # 5) 组合：focal-weighted CE
+        loss = focal_factor * ce                          # [N]
 
+        # 6) 可选：sample_weight（如 ESA 权重）
         if sample_weight is not None:
             sample_weight = sample_weight.view_as(loss)
-            loss = loss * sample_weight
+            loss = loss * sample_weight                   # [N]
 
         return loss.mean()
 
@@ -804,6 +861,11 @@ class Trainer:
             # 取出 ESA-based per-sample weight（如果有）
             sample_weight = getattr(self, "_current_sample_weight", None)
             if sample_weight is not None:
+
+                print("[DEBUG] sample_weight min/max:",
+                    sample_weight.min().item(),
+                    sample_weight.max().item())
+                
                 # 防止 train 残留到 val，长度对不上时直接忽略
                 if sample_weight.numel() != logits_flat.numel():
                     sample_weight = None
@@ -851,32 +913,40 @@ class Trainer:
                 return loss
 
             elif loss_type == "focal":
-                # ✅ 只用 Focal loss（基于 smoothing 后的 labels_smooth）
                 return self._binary_focal_loss(
-                    logits_flat, 
+                    logits_flat,
                     labels_smooth,
                     sample_weight=sample_weight,
+                    pos_weight=pos_weight_tensor,
                 )
 
             elif loss_type == "bce_focal":
-                # ✅ BCE + lambda_focal * Focal
+                # 1) BCE 部分：保留原有 pos_weight + sample_weight 行为
                 bce_loss = F.binary_cross_entropy_with_logits(
                     logits_flat,
                     labels_smooth,
                     weight=sample_weight,
                     pos_weight=pos_weight_tensor,
                 )
+
+                if torch.isnan(logits).any() or torch.isinf(logits).any():
+                    print("[WARN] logits contains NaN/Inf in focal loss!")
+
+                # 2) Focal 部分：用稳定版实现 + 同样的 pos_weight / sample_weight
                 focal_loss = self._binary_focal_loss(
-                    logits_flat, 
+                    logits_flat,
                     labels_smooth,
                     sample_weight=sample_weight,
+                    pos_weight=pos_weight_tensor,
                 )
-                lambda_focal = float(getattr(self.train_cfg, "focal_lambda", 1))
-                lambda_bce = float(getattr(self.train_cfg, "bce_lambda", 1))
-                
+
+                lambda_focal = float(getattr(self.train_cfg, "focal_lambda", 1.0))
+                lambda_bce = float(getattr(self.train_cfg, "bce_lambda", 1.0))
+                            
                 # print(f"[DEBUG] bce_loss={bce_loss} focal_loss={focal_loss}")
 
                 return lambda_bce * bce_loss + lambda_focal * focal_loss
+
 
             else:
                 raise ValueError(f"Unknown loss_type for binary_classification: {loss_type}")
@@ -1034,25 +1104,48 @@ class Trainer:
 
 
         for batch in tqdm(loader, desc=f"Train epoch {self.state.epoch}"):
+
+            # 1) 先解包出 x, y, set_idx（兼容所有数据格式）
             x, y, set_idx = self._unpack_batch(batch)
             esa_scores = self._last_esa_scores
 
-            # ✅ 若打开 ESA weighting，但 batch 里没有 esa_scores，直接报错，避免悄悄变成 no-op
-            if bool(getattr(self.train_cfg, "esa_weighting", False)) and esa_scores is None:
-                raise RuntimeError(
-                    "train.esa_weighting=True 但 batch 中没有 'esa_scores' 字段。\n"
-                    "请检查：Dataset.__getitem__ 是否返回 esa，collate_fn 是否把 esa 汇总进 batch，"
-                    "以及 _unpack_batch 中对 'esa_scores' 的处理。"
-                )
+            # 2) 检查是否为 pair-level 模式
+            is_pair_level = self._is_pair_level_batch(batch)
+            
+            # pair-level 模式不需要 ESA weighting；确保不要误开
+            if is_pair_level:
+                self._current_sample_weight = None
+                # 即便 train.esa_weighting=True，这里也不走 ESA 权重逻辑
+            else:
+                # 只有在非 pair-level 模式下才允许 ESA weighting
+                # ✅ 若打开 ESA weighting，但 batch 里没有 esa_scores，直接报错，避免悄悄变成 no-op
+                if bool(getattr(self.train_cfg, "esa_weighting", False)) and esa_scores is None:
+                    raise RuntimeError(
+                        "train.esa_weighting=True 但 batch 中没有 'esa_scores' 字段。\n"
+                        "请检查：Dataset.__getitem__ 是否返回 esa，collate_fn 是否把 esa 汇总进 batch，"
+                        "以及 _unpack_batch 中对 'esa_scores' 的处理。"
+                    )
 
 
             self.optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-                logits = self.model(x)   # window-level logits, shape ~ (N, 1) or (N,)
 
+                # 3) 前向：根据 batch 类型决定是否传入 mask / pos
+                if is_pair_level:
+                    # 从 batch 中取出 mask / pos
+                    mask = batch["mask"].to(self.device, non_blocking=True)
+                    pos = batch.get("pos", None)
+                    if pos is not None:
+                        pos = pos.to(self.device, non_blocking=True)
+                    logits = self.model(x, attn_mask=mask, pos=pos)  # [B]
+                else:
+                    logits = self.model(x)  # 旧模型（window-level）
+                # logits = self.model(x)   # window-level logits, shape ~ (N, 1) or (N,)
+
+                # 4) MIL 聚合（pair-level 本身就是 bag 级别，通常不需要再聚）
                 # ====== MIL聚合(可选) ====== #
-                if (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
+                if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
                     logits_for_loss, labels_for_loss = self._apply_mil_reduction(
                         logits=logits,
                         labels=y,
@@ -1064,12 +1157,14 @@ class Trainer:
                     # 当前 Stage 0.x 专注 window-wise，bag-level 暂不加 ESA 权重 
                     esa_for_loss = None
                 else:
+                    # pair-level 直接用 pair 级 logits / labels
                     logits_for_loss, labels_for_loss = logits, y
-                    esa_for_loss = esa_scores
+                    esa_for_loss = None if is_pair_level else esa_scores
 
+                # 5) ESA-aware per-window weighting（仅 window-level 使用）
                 # ====== ESA-aware per-window weighting（Stage 0.3） ====== #
                 use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
-                if use_esa_weighting and (esa_for_loss is not None):
+                if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
                     self._current_sample_weight = self._compute_esa_sample_weight(
                         esa_for_loss, labels_for_loss
                     )
@@ -1163,9 +1258,21 @@ class Trainer:
 
             for batch in tqdm(loader, desc=f"Valid epoch {self.state.epoch}"):
                 x, y, set_idx = self._unpack_batch(batch)
+                is_pair_level = self._is_pair_level_batch(batch)
+
 
                 with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-                    logits = self.model(x)
+                    if is_pair_level:
+                        mask = batch["mask"].to(self.device, non_blocking=True)
+                        pos = batch.get("pos", None)
+                        if pos is not None:
+                            pos = pos.to(self.device, non_blocking=True)
+                        logits = self.model(x, attn_mask=mask, pos=pos)
+                    else:
+                        logits = self.model(x)
+
+                    # logits = self.model(x)
+                    # 验证阶段统一在“模型输出的粒度”上算 loss
                     loss = self._compute_loss(logits, y)
 
                 bs = logits.shape[0]
@@ -1181,6 +1288,8 @@ class Trainer:
             logits = torch.cat(all_logits).numpy()
             labels = torch.cat(all_labels).numpy()
 
+            # aggregate_sets 部分里，只有在 len(all_set_idx) > 0 时才会走 set-level 聚合；
+            # 而 pair-level batch 没有 set_idx，因此 all_set_idx 为空，自然就直接用 pair-level 预测做 metrics，
             # 若需要 set-level 聚合
             if aggregate_sets and set_labels is not None and len(all_set_idx) > 0:
                 set_idx_full = torch.cat(all_set_idx).numpy()
@@ -1266,7 +1375,18 @@ class Trainer:
 
             for batch in tqdm(loader, desc="Predict"):
                 x, y, set_idx = self._unpack_batch(batch)
-                logits = self.model(x)
+                is_pair_level = self._is_pair_level_batch(batch)
+
+                if is_pair_level:
+                    mask = batch["mask"].to(self.device, non_blocking=True)
+                    pos = batch.get("pos", None)
+                    if pos is not None:
+                        pos = pos.to(self.device, non_blocking=True)
+                    logits = self.model(x, attn_mask=mask, pos=pos)
+                else:
+                    logits = self.model(x)
+
+                # logits = self.model(x)
 
                 all_logits.append(logits.detach().cpu())
                 all_labels.append(y.detach().cpu())
