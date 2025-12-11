@@ -862,9 +862,9 @@ class Trainer:
             sample_weight = getattr(self, "_current_sample_weight", None)
             if sample_weight is not None:
 
-                print("[DEBUG] sample_weight min/max:",
-                    sample_weight.min().item(),
-                    sample_weight.max().item())
+                # print("[DEBUG] sample_weight min/max:",
+                #     sample_weight.min().item(),
+                #     sample_weight.max().item())
                 
                 # 防止 train 残留到 val，长度对不上时直接忽略
                 if sample_weight.numel() != logits_flat.numel():

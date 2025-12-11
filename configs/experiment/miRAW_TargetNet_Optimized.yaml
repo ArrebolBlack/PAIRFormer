@@ -17,8 +17,8 @@ data:
     test: "data/miRAW_Test_total.txt"
 
 run:
-  num_epochs: 40
-  batch_size: 128
+  num_epochs: 100
+  batch_size: 512
 
   reduction: "softmax"          # 统一控制
   train_reduction: ${run.reduction}
@@ -38,31 +38,31 @@ model:
 
   arch: TargetNet_Optimized
 
-  num_channels:      [16, 32, 64, 128]
-  num_blocks:        [3, 2, 2, 2]
+  num_channels:      [16, 16, 32, 32]
+  num_blocks:        [1, 1, 1, 1]
   pool_size:         3
   stem_kernel_size:  5
   block_kernel_size: 3
   skip_connection:   true
-  dropout:           0.3
+  dropout:           0.5
 
   multi_scale:       false          # 先关掉 multi-scale
   se_type:           "basic"         # 完全关掉 SE
   use_bn:            false          # 先完全关掉 BN
   se_reduction:      8              # 稍微小一点，让 SE 不那么「硬」
-  target_output_length: 16          # 对齐原模型池化后的长度
+  target_output_length: 12          # 对齐原模型池化后的长度
 
-  arch_variant:      "opt3_base"
+  arch_variant:      "opt4_tiny"
 
 train:
   # --- 优化器 & 学习率 ---
-  optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
-  lr: 0.0001
-  weight_decay: 0.01
+  optimizer: adamw              # ["adamw", "adam", "sgd", "rmsprop"]
+  lr: 0.005
+  weight_decay: 0.0
   momentum: 0.9                # 仅对 SGD 有效
 
   # --- 学习率调度器 ---
-  scheduler: plateau              # ["none", "plateau", "cosine", "step"]
+  scheduler: cosine              # ["none", "plateau", "cosine", "step"]
   scheduler_factor: 0.2        # for ReduceLROnPlateau
   scheduler_patience: 5
   scheduler_t_max: 10          # for CosineAnnealingLR
@@ -96,7 +96,7 @@ train:
 
   # --- EMA（可选） ---
   ema:
-    enabled: false
+    enabled: true
     decay: 0.999
 
   # --- 监控指标（决定 best.pt 保存逻辑） ---
