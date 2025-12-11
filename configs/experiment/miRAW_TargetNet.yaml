@@ -20,8 +20,8 @@ run:
   num_epochs: 50
   batch_size: 256
 
-  # reduction: "softmax"          # 统一控制
-  reduction: "max"
+  reduction: "softmax"          # 统一控制
+  # reduction: "max"
   train_reduction: ${run.reduction}
   eval_reduction:  ${run.reduction}
   test_reduction:  ${run.reduction}
@@ -52,7 +52,7 @@ model:
 
 train:
   # --- 优化器 & 学习率 ---
-  optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
+  optimizer: rmsprop              # ["adamw", "adam", "sgd", "rmsprop"]
   lr: 0.001
   weight_decay: 0.01
   momentum: 0.9                # 仅对 SGD 有效

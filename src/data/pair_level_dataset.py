@@ -179,6 +179,7 @@ class PairLevelDataset(Dataset):
         emb = entry["embeddings"]          # [N_i, d_emb]
         logits = entry["logits"].view(-1)  # [N_i]
         esa = entry["esa"].view(-1)        # [N_i]
+        pos = entry["pos"].view(-1)        # [N_i]
         label_val = float(entry["label"])  # scalar
 
         # 安全检查
@@ -193,9 +194,10 @@ class PairLevelDataset(Dataset):
         emb = emb[idx_keep]                          # [M, d_emb]
         logits_sel = logits[idx_keep].unsqueeze(-1)  # [M, 1]
         esa_sel = esa[idx_keep].unsqueeze(-1)        # [M, 1]
+        pos_sel = pos[idx_keep].unsqueeze(-1)        # [M, 1]
 
         # 拼成 token: [M, d_emb+2]
-        tokens = torch.cat([emb, logits_sel, esa_sel], dim=-1)
+        tokens = torch.cat([emb, logits_sel, esa_sel, pos_sel], dim=-1)
 
         length = int(tokens.size(0))
         label = torch.tensor(label_val, dtype=torch.float32)

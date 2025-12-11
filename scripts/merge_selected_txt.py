@@ -34,17 +34,32 @@ def merge_selected_txt(files_to_merge, output_file, encoding="utf-8"):
 
 if __name__ == "__main__":
     # === 修改这里：选择你要合并的 txt 文件 ===
+    # files_to_merge = [
+    #     "data/miRAW_Test0.txt",
+    #     "data/miRAW_Test1.txt",
+    #     "data/miRAW_Test2.txt",
+    #     "data/miRAW_Test3.txt",
+    #     "data/miRAW_Test4.txt",
+    #     "data/miRAW_Test5.txt",
+    #     "data/miRAW_Test6.txt",
+    #     "data/miRAW_Test7.txt",
+    #     "data/miRAW_Test8.txt",
+    #     "data/miRAW_Test9.txt",
+    # ]
+
+    # merge_selected_txt(files_to_merge, "miRAW_Test_total.txt")
+
     files_to_merge = [
         "data/miRAW_Test0.txt",
-        "data/miRAW_Test1.txt",
-        "data/miRAW_Test2.txt",
-        "data/miRAW_Test3.txt",
-        "data/miRAW_Test4.txt",
-        "data/miRAW_Test5.txt",
+        # "data/miRAW_Test1.txt",
+        # "data/miRAW_Test2.txt",
+        # "data/miRAW_Test3.txt",
+        # "data/miRAW_Test4.txt",
+        # "data/miRAW_Test5.txt",
         "data/miRAW_Test6.txt",
         "data/miRAW_Test7.txt",
         "data/miRAW_Test8.txt",
         "data/miRAW_Test9.txt",
     ]
 
-    merge_selected_txt(files_to_merge, "miRAW_Test_total.txt")
+    merge_selected_txt(files_to_merge, "miRAW_Test_0,6-9.txt")
