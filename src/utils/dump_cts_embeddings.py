@@ -7,7 +7,7 @@ python scripts/dump_cts_embeddings.py \
   --config configs/experiment/miRAW_TargetNet_baseline.yaml \
   --checkpoint checkpoints/miRAW_TargetNet_best.ckpt \
   --splits train val test \
-  --out-root cache/cts_cache \
+  --out-root pair_cache \
   --device cuda:0
 
 注意：现在 --out-root 作为“根目录”，脚本会在其下自动创建
@@ -93,18 +93,18 @@ def parse_args():
 def get_embedding_and_logit(model, x: torch.Tensor):
     """
     根据当前使用的 CTS 模型类型，统一返回:
-      - feat: [B, d_emb]  作为 CTS embedding
-      - logit: [B]        作为该 CTS 的打分
+      - feat:  [B, d_emb]  作为 CTS embedding（在最终线性层之前）
+      - logit: [B]         作为该 CTS 的打分
 
     支持的模型:
       - TargetNet
-      - TargetNet_Optimized
+      - TargetNet_Optimized（当前新版）
       - TargetNetTransformer1D
     """
 
     # ---------------- TargetNet ----------------
     if isinstance(model, TargetNet):
-        # 对应 TargetNet.forward 的拆解：
+        # 对应 TargetNet.forward 的逻辑拆解：
         # x = self.stem(x)
         # x = self.stage1(x)
         # x = self.stage2(x)
@@ -119,14 +119,14 @@ def get_embedding_and_logit(model, x: torch.Tensor):
         z = model.stage2(z)
         z = model.dropout(model.relu(z))
         z = model.avg_pool(z)
-        z = z.reshape(z.size(0), -1)     # [B, d_emb]
+        z = z.reshape(z.size(0), -1)       # [B, d_emb]
         feat = z
         logit = model.linear(feat).squeeze(-1)  # [B]
         return feat, logit
 
     # ---------------- TargetNet_Optimized ----------------
     if isinstance(model, TargetNet_Optimized):
-        # 对应 TargetNet_Optimized.forward 的拆解：
+        # 对应 **新版** TargetNet_Optimized.forward：
         # x = self.stem(x)
         # for stage in self.stages:
         #     x = stage(x)
@@ -140,31 +140,32 @@ def get_embedding_and_logit(model, x: torch.Tensor):
         z = model.stem(x)
         for stage in model.stages:
             z = stage(z)
+
         z = model.se(z)
         z = model.dropout(model.relu(z))
         z = model.adaptive_pool(z)
-        z = z.reshape(z.size(0), -1)     # [B, d_emb]
+        z = z.reshape(z.size(0), -1)       # [B, d_emb]
         feat = z
         logit = model.linear(feat).squeeze(-1)  # [B]
         return feat, logit
 
     # ---------------- TargetNetTransformer1D ----------------
     if isinstance(model, TargetNetTransformer1D):
-        # 对应 TargetNetTransformer1D.forward 的拆解：
-        # x = self.input_proj(x)          # [B, C, L] -> [B, d_model, L]
-        # x = x.transpose(1, 2)           # [B, L, d_model]
-        # h = self.encoder(inputs_embeds=x, attn_mask=None)  # [B, L, d_model]
-        # h = h.mean(dim=1)               # [B, d_model]
+        # 对应 TargetNetTransformer1D.forward 拆解：
+        # x = self.input_proj(x)             # [B, C, L] -> [B, d_model, L]
+        # x = x.transpose(1, 2)              # [B, L, d_model]
+        # h = self.encoder(inputs_embeds=x)  # [B, L, d_model]
+        # h = h.mean(dim=1)                  # [B, d_model]
         # h = self.post_norm(h)
         # logits = self.classifier(h).squeeze(-1)
 
-        z = model.input_proj(x)          # [B, d_model, L]
-        z = z.transpose(1, 2)            # [B, L, d_model]
+        z = model.input_proj(x)                 # [B, d_model, L]
+        z = z.transpose(1, 2)                   # [B, L, d_model]
         h = model.encoder(inputs_embeds=z, attn_mask=None)  # [B, L, d_model]
-        h = h.mean(dim=1)                # [B, d_model]
-        h = model.post_norm(h)           # [B, d_model]
+        h = h.mean(dim=1)                       # [B, d_model]
+        h = model.post_norm(h)                  # [B, d_model]
         feat = h
-        logit = model.classifier(h).squeeze(-1)  # [B]
+        logit = model.classifier(h).squeeze(-1) # [B]
         return feat, logit
 
     # ---------------- 其他未支持模型 ----------------
@@ -172,6 +173,7 @@ def get_embedding_and_logit(model, x: torch.Tensor):
         f"Unsupported model type for get_embedding_and_logit: {type(model)}. "
         f"当前只支持 TargetNet / TargetNet_Optimized / TargetNetTransformer1D。"
     )
+
 
 
 # =================================================
@@ -258,14 +260,20 @@ def dump_split(cfg, model, split: str, out_root: str, device, batch_size: int):
       - 按 set_idx 聚合到 pair 级别
       - 存成一个 dict[ pair_id ] = {...} 的 .pt 文件
 
-    存储结构（v0）：
+    存储结构（v1）：
       out_pairs[pid] = {
-          "embeddings": Tensor [N_i, d_emb],
-          "logits":     Tensor [N_i],
-          "esa":        Tensor [N_i],
-          "pos":        None,              # 预留字段，方便 v1 加位置
+          "embeddings": Tensor [N_i, d_emb],   # CTS embedding（线性层前）
+          "logits":     Tensor [N_i],          # 单 CTS logit
+          "esa":        Tensor [N_i],          # ESA 分数
+          "pos":        Tensor [N_i] 或 None,  # 归一化位置（若 Dataset 提供）
           "label":      float (0. / 1.)
       }
+
+    Dataset 约定（v1）：
+      - 推荐：__getitem__ 返回 5-tuple：
+            (x, y, set_idx, esa_score, pos)
+        其中 pos 为当前 CTS 的归一化位置（标量）。
+      - 兼容旧版：若仍为 4-tuple (x, y, set_idx, esa_score)，则 pos=None。
     """
     print(f"\n===== Dumping split: {split} =====")
 
@@ -295,25 +303,33 @@ def dump_split(cfg, model, split: str, out_root: str, device, batch_size: int):
         "embeddings": [],
         "logits": [],
         "esa": [],
+        "pos": [],      # v1: 存每个 CTS 的位置
         "label": None,
     })
 
     model.eval()
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
-            # v0: Dataset 返回 x, y, set_idx, esa_score
-            if len(batch) != 4:
+            # v1: 优先支持 5-tuple (x, y, set_idx, esa_score, pos)
+            #     若仍为 4-tuple，则认为没有 pos。
+            if len(batch) == 5:
+                x, y, set_idx, esa_score, pos = batch
+            elif len(batch) == 4:
+                x, y, set_idx, esa_score = batch
+                pos = None
+            else:
                 raise ValueError(
-                    f"[dump_split] Expect batch of length 4 (x, y, set_idx, esa_score), "
+                    f"[dump_split] Expect batch of length 4 or 5, "
                     f"got len={len(batch)}"
                 )
 
-            x, y, set_idx, esa_score = batch
+            x = x.to(device)                            # [B, C, L]
+            y = y.view(-1)                              # [B]
+            set_idx = set_idx.view(-1)                  # [B]
+            esa_score = esa_score.view(-1)              # [B]
 
-            x = x.to(device)                 # [B, C, L]
-            y = y.view(-1)                   # [B]
-            set_idx = set_idx.view(-1)       # [B]
-            esa_score = esa_score.view(-1)   # [B]
+            if pos is not None:
+                pos = pos.view(-1)                      # [B]
 
             # ---- 得到 embedding + logit ----
             feats, logits = get_embedding_and_logit(model, x)
@@ -324,19 +340,24 @@ def dump_split(cfg, model, split: str, out_root: str, device, batch_size: int):
             y = y.detach().cpu()
             set_idx = set_idx.detach().cpu().long()
             esa_score = esa_score.detach().cpu()
+            if pos is not None:
+                pos = pos.detach().cpu()
 
             B = feats.size(0)
             for i in range(B):
-                pid = int(set_idx[i].item())     # pair id（你的 set_idx 即 pair 编号）
-                emb_i = feats[i]                 # [d_emb]
-                logit_i = logits[i]              # scalar
-                esa_i = esa_score[i]             # scalar
-                label_i = float(y[i].item())     # scalar
+                pid = int(set_idx[i].item())       # pair id（你的 set_idx 即 pair 编号）
+                emb_i = feats[i]                   # [d_emb]
+                logit_i = logits[i]                # scalar
+                esa_i = esa_score[i]               # scalar
+                label_i = float(y[i].item())       # scalar
+                pos_i = pos[i] if pos is not None else None  # scalar
 
                 entry = pair_dict[pid]
                 entry["embeddings"].append(emb_i)
                 entry["logits"].append(logit_i)
                 entry["esa"].append(esa_i)
+                if pos_i is not None:
+                    entry["pos"].append(pos_i)
 
                 # 确保同一个 pair 的 label 一致
                 if entry["label"] is None:
@@ -358,11 +379,17 @@ def dump_split(cfg, model, split: str, out_root: str, device, batch_size: int):
         logits = torch.stack(entry["logits"], dim=0)    # [N_i]
         esa = torch.stack(entry["esa"], dim=0)          # [N_i]
 
+        # 如果 Dataset 提供了 pos，则这里应该有同样长度的 list
+        if len(entry["pos"]) > 0:
+            pos_tensor = torch.stack(entry["pos"], dim=0)   # [N_i]
+        else:
+            pos_tensor = None   # 兼容旧 run
+
         out_pairs[pid] = {
             "embeddings": emb,          # [N_i, d_emb]
             "logits": logits,           # [N_i]
             "esa": esa,                 # [N_i]
-            "pos": None,                # v0 没有位置，预留字段
+            "pos": pos_tensor,          # [N_i] or None
             "label": entry["label"],    # scalar
         }
 
@@ -373,9 +400,11 @@ def dump_split(cfg, model, split: str, out_root: str, device, batch_size: int):
     # 简单打印一个示例 shape，方便 sanity check
     any_pid = next(iter(out_pairs))
     print(f"[dump_split:{split}] Example emb shape: {out_pairs[any_pid]['embeddings'].shape}")
+    print(f"[dump_split:{split}] Example pos type: "
+          f"{type(out_pairs[any_pid]['pos'])}, "
+          f"shape={None if out_pairs[any_pid]['pos'] is None else out_pairs[any_pid]['pos'].shape}")
     print(f"[dump_split:{split}] Num pairs: {len(out_pairs)}")
     print(f"[dump_split:{split}] Saved {len(out_pairs)} pairs to {out_path}")
-
 
 # =================================================
 #  Main
