@@ -82,11 +82,12 @@ from src.utils import set_seeds
 from src.config.arch_space import ARCH_SPACE
 
 def apply_arch_variant(cfg):
-    v = cfg.model.arch_variant
-    arch = ARCH_SPACE[v]
-    cfg.model.num_channels = arch["num_channels"]
-    cfg.model.num_blocks   = arch["num_blocks"]
-    cfg.model.multi_scale  = arch["multi_scale"]
+    v = cfg.model.get("arch_variant", None)
+    if v is not None:
+        arch = ARCH_SPACE[v]
+        cfg.model.num_channels = arch["num_channels"]
+        cfg.model.num_blocks   = arch["num_blocks"]
+        cfg.model.multi_scale  = arch["multi_scale"]
 
 # ---------------------- #
 # 辅助函数
