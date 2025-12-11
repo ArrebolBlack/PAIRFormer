@@ -79,6 +79,15 @@ from src.models.registry import build_model
 from src.evaluator.evaluator import evaluate_with_trainer
 from src.utils import set_seeds 
 
+from src.config.arch_space import ARCH_SPACE
+
+def apply_arch_variant(cfg):
+    v = cfg.model.arch_variant
+    arch = ARCH_SPACE[v]
+    cfg.model.num_channels = arch["num_channels"]
+    cfg.model.num_blocks   = arch["num_blocks"]
+    cfg.model.multi_scale  = arch["multi_scale"]
+
 # ---------------------- #
 # 辅助函数
 # ---------------------- #
@@ -167,6 +176,7 @@ def main(cfg: DictConfig):
     - 由 configs/config.yaml 提供 defaults（data/model/train/task/run/eval/logging 等）
     - 命令行可以通过 override 改动任意字段
     """
+    apply_arch_variant(cfg)
     # ---- 基本环境准备 ----
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)

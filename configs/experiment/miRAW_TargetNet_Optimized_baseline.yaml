@@ -23,14 +23,20 @@ model:
   skip_connection:   true
   dropout:           0.3
 
-  multi_scale:       true 
+  multi_scale:       false          # 先关掉 multi-scale
+  se_type:           "basic"         # 完全关掉 SE
+  use_bn:            false          # 先完全关掉 BN
+  se_reduction:      8              # 稍微小一点，让 SE 不那么「硬」
+  target_output_length: 16          # 对齐原模型池化后的长度
 
+  arch_variant:      "opt3_base"
+  
 
 
 train:
   # --- 优化器 & 学习率 ---
   optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
-  lr: 0.00003
+  lr: 0.001
   weight_decay: 0.01
   momentum: 0.9                # 仅对 SGD 有效
 

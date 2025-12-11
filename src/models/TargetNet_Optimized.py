@@ -65,7 +65,7 @@ class Conv_Layer(nn.Module):
     """
     Conv_Layer
     ==========
-    Conv_kx1 -> BatchNorm -> (ReLU -> Dropout)?
+    Conv_kx1 -> (BN)? -> (ReLU -> Dropout)?
     """
 
     def __init__(
@@ -75,17 +75,19 @@ class Conv_Layer(nn.Module):
         kernel_size: int,
         dropout_rate: Optional[float],
         post_activation: bool = True,
+        use_bn: bool = True,
     ):
         super().__init__()
         self.conv = conv_kx1(in_channels, out_channels, kernel_size)
-        self.bn = nn.BatchNorm1d(out_channels)
+        self.use_bn = use_bn
+        self.bn = nn.BatchNorm1d(out_channels) if use_bn else nn.Identity()
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(p=dropout_rate if dropout_rate is not None else 0.3)
         self.post_activation = post_activation
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv(x)
-        out = self.bn(out)
+        out = self.bn(out) if self.use_bn else out
         if self.post_activation:
             out = self.dropout(self.relu(out))
         return out
@@ -95,10 +97,9 @@ class ResNet_Block(nn.Module):
     """
     ResNet_Block
     ============
-    增强版 1D ResNet block，支持 multi-scale 卷积：
 
-        ReLU -> Dropout -> Conv_kx1 (multi-scale 可选) -> BN
-        -> ReLU -> Dropout -> Conv_kx1 -> BN
+        ReLU -> Dropout -> Conv_kx1 (multi-scale 可选) -> (BN)?
+        -> ReLU -> Dropout -> Conv_kx1 -> (BN)?
         -> (+ skip_connection with optional 1x1 conv)
     """
 
@@ -110,15 +111,16 @@ class ResNet_Block(nn.Module):
         dropout_rate: Optional[float],
         skip_connection: bool = True,
         multi_scale: bool = True,
+        use_bn: bool = True,
     ):
         super().__init__()
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(p=dropout_rate if dropout_rate is not None else 0.3)
         self.skip_connection = skip_connection
         self.multi_scale = multi_scale
+        self.use_bn = use_bn
 
         if self.multi_scale:
-            # 多尺度：3 个并联 conv，最后在通道维 concat
             c1 = out_channels // 3
             c2 = out_channels // 3
             c3 = out_channels - c1 - c2
@@ -132,16 +134,16 @@ class ResNet_Block(nn.Module):
         else:
             self.conv1 = conv_kx1(in_channels, out_channels, kernel_size)
 
-        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.bn1 = nn.BatchNorm1d(out_channels) if use_bn else nn.Identity()
         self.conv2 = conv_kx1(out_channels, out_channels, kernel_size)
-        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.bn2 = nn.BatchNorm1d(out_channels) if use_bn else nn.Identity()
 
-        # skip connection: 通道不一致时用 1x1 conv + BN 对齐
         if skip_connection and in_channels != out_channels:
             self.skip_conv = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
-            self.skip_bn = nn.BatchNorm1d(out_channels)
+            self.skip_bn = nn.BatchNorm1d(out_channels) if use_bn else nn.Identity()
         else:
             self.skip_conv = None
+            self.skip_bn = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
@@ -152,6 +154,7 @@ class ResNet_Block(nn.Module):
             out = torch.cat(parts, dim=1)
         else:
             out = self.conv1(out)
+
         out = self.bn1(out)
 
         out = self.dropout(self.relu(out))
@@ -160,10 +163,86 @@ class ResNet_Block(nn.Module):
 
         if self.skip_connection:
             if self.skip_conv is not None:
-                identity = self.skip_bn(self.skip_conv(identity))
+                identity = self.skip_conv(identity)
+                identity = self.skip_bn(identity) if self.skip_bn is not None else identity
             out = out + identity
 
         return out
+
+
+# class ResNet_Block(nn.Module):
+#     """
+#     ResNet_Block
+#     ============
+#     增强版 1D ResNet block，支持 multi-scale 卷积：
+
+#         ReLU -> Dropout -> Conv_kx1 (multi-scale 可选) -> BN
+#         -> ReLU -> Dropout -> Conv_kx1 -> BN
+#         -> (+ skip_connection with optional 1x1 conv)
+#     """
+
+#     def __init__(
+#         self,
+#         in_channels: int,
+#         out_channels: int,
+#         kernel_size: int,
+#         dropout_rate: Optional[float],
+#         skip_connection: bool = True,
+#         multi_scale: bool = True,
+#     ):
+#         super().__init__()
+#         self.relu = nn.ReLU()
+#         self.dropout = nn.Dropout(p=dropout_rate if dropout_rate is not None else 0.3)
+#         self.skip_connection = skip_connection
+#         self.multi_scale = multi_scale
+
+#         if self.multi_scale:
+#             # 多尺度：3 个并联 conv，最后在通道维 concat
+#             c1 = out_channels // 3
+#             c2 = out_channels // 3
+#             c3 = out_channels - c1 - c2
+#             self.conv1_multi = nn.ModuleList(
+#                 [
+#                     conv_kx1(in_channels, c1, kernel_size=kernel_size),
+#                     conv_kx1(in_channels, c2, kernel_size=kernel_size + 2),
+#                     conv_kx1(in_channels, c3, kernel_size=kernel_size + 4),
+#                 ]
+#             )
+#         else:
+#             self.conv1 = conv_kx1(in_channels, out_channels, kernel_size)
+
+#         self.bn1 = nn.BatchNorm1d(out_channels)
+#         self.conv2 = conv_kx1(out_channels, out_channels, kernel_size)
+#         self.bn2 = nn.BatchNorm1d(out_channels)
+
+#         # skip connection: 通道不一致时用 1x1 conv + BN 对齐
+#         if skip_connection and in_channels != out_channels:
+#             self.skip_conv = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
+#             self.skip_bn = nn.BatchNorm1d(out_channels)
+#         else:
+#             self.skip_conv = None
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         identity = x
+
+#         out = self.dropout(self.relu(x))
+#         if self.multi_scale:
+#             parts = [conv(out) for conv in self.conv1_multi]
+#             out = torch.cat(parts, dim=1)
+#         else:
+#             out = self.conv1(out)
+#         out = self.bn1(out)
+
+#         out = self.dropout(self.relu(out))
+#         out = self.conv2(out)
+#         out = self.bn2(out)
+
+#         if self.skip_connection:
+#             if self.skip_conv is not None:
+#                 identity = self.skip_bn(self.skip_conv(identity))
+#             out = out + identity
+
+#         return out
 
 
 # ----------------------------- #
@@ -393,6 +472,7 @@ class TargetNet_Optimized(nn.Module):
         self.skip_connection: bool = bool(p.get("skip_connection", True))
         self.multi_scale: bool = bool(p.get("multi_scale", True))
         self.dropout_rate: float = float(p.get("dropout", 0.3))
+        self.use_bn: bool = bool(p.get("use_bn", True)) 
 
         self.num_channels = num_channels
         self.num_blocks = num_blocks
@@ -432,7 +512,9 @@ class TargetNet_Optimized(nn.Module):
         se_type = p.get("se_type", "basic")
         se_reduction = int(p.get("se_reduction", 16))
 
-        if se_type == "enhanced":
+        if se_type == "none":                   
+            self.se = nn.Identity()
+        elif se_type == "enhanced":
             self.se = SEBlockEnhanced(
                 channel=self.num_channels[-1],
                 reduction=se_reduction,
@@ -469,6 +551,7 @@ class TargetNet_Optimized(nn.Module):
                         kernel_size=self.stem_kernel_size,
                         dropout_rate=self.dropout_rate,
                         post_activation=(b < num_blocks - 1),
+                        use_bn=self.use_bn,
                     )
                 )
             else:
@@ -480,6 +563,7 @@ class TargetNet_Optimized(nn.Module):
                         dropout_rate=self.dropout_rate,
                         skip_connection=self.skip_connection,
                         multi_scale=self.multi_scale,
+                        use_bn=self.use_bn,
                     )
                 )
             self.in_channels = out_channels

@@ -1,0 +1,49 @@
+# @package _global_
+
+# 先只替换 arch，其他尽量保持和 baseline 一样
+
+defaults:
+  - miRAW_TargetNet_baseline
+  - _self_
+
+experiment_name: "miRAW_TargetNet_Optimized_v1"
+
+model:
+  name: targetnet_optimized_v1
+  arch: TargetNet_Optimized
+
+  # 先简化架构一点，不要一次上 [16, 32, 64, 128]
+  num_channels:      [16, 32, 64]
+  num_blocks:        [2, 2, 2]
+  pool_size:         3
+  stem_kernel_size:  5
+  block_kernel_size: 3
+  skip_connection:   true
+  dropout:           0.5
+
+  multi_scale:       false          # 先关掉 multi-scale
+  se_type:           "basic"         # 完全关掉 SE
+  use_bn:            false          # 先完全关掉 BN
+  se_reduction:      8              # 稍微小一点，让 SE 不那么「硬」
+  target_output_length: 16          # 对齐原模型池化后的长度
+
+# train / run / eval / logging 全部继承 baseline，不再改动 lr 等
+
+
+# ============================================================
+# 7. 日志 & WandB 配置 logging
+# ============================================================
+logging:
+  # 训练 & eval 统一使用的 WandB 基本设置
+  wandb:
+    enabled: true                  # 打开后 train/eval 都会 init wandb
+    project: "TargetNet"
+    entity: null
+    mode: "online"                  # "online" / "offline" / "disabled"
+    group: miRAW_baseline
+    tags: ["TargetNet_Optimized"]
+
+  # evaluator 内部使用的前缀设置（写 summary 时可以加上 eval/）
+  eval:
+    use_wandb: false                # 是否在 evaluator 中额外写 wandb summary
+    wandb_prefix: "eval"

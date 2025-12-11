@@ -34,3 +34,4 @@ se_reduction: 16
 
 # 若暂时不从 DataConfig 控制 ESA，可在这里兜底：
 # with_esa: true
+arch_variant: "opt3_base"
