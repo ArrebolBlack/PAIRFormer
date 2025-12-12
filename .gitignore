@@ -19,6 +19,7 @@ outputs/
 wandb/
 # checkpoints/
 cache/
+pair_cache/
 /eval/
 multirun/
 results/
