@@ -17,7 +17,7 @@ env/
 # 训练/实验输出（建议全部排除）
 outputs/
 wandb/
-checkpoints/
+# checkpoints/
 cache/
 /eval/
 multirun/
