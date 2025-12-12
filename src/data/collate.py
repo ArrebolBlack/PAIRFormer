@@ -50,7 +50,7 @@ def cts_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
     """
     # 分别是 length=B 的 tuple
     if len(batch[0]) == 3:
-        xs, ys, idx = zip(*batch)
+        xs, ys, idxs = zip(*batch)
         esas = None
         pos = None
     elif len(batch[0]) == 4:
