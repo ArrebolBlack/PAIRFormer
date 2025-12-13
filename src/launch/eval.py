@@ -42,27 +42,36 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
-import numbers 
-
+from typing import List, Dict, Any, Iterable, Tuple
+import numbers
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import get_original_cwd  
 
 from src.config.data_config import DataConfig
-from src.data.builder import build_dataset_and_loader, get_set_labels
+from src.data.builder import (
+    build_dataset_and_loader,
+    get_set_labels,
+    build_pair_level_dataset_and_loader,
+)
 from src.trainer.trainer import Trainer
 from src.models.registry import build_model
 from src.evaluator.evaluator import evaluate_with_trainer
-from src.utils import set_seeds 
+from src.utils import set_seeds
 
 
-import numpy as np
-from typing import Dict, Any, Iterable, Tuple
-import numbers
+from src.config.arch_space import ARCH_SPACE
+
+def apply_arch_variant(cfg):
+    v = cfg.model.get("arch_variant", None)
+    if v is not None:
+        arch = ARCH_SPACE[v]
+        cfg.model.num_channels = arch["num_channels"]
+        cfg.model.num_blocks   = arch["num_blocks"]
+        cfg.model.multi_scale  = arch["multi_scale"]
 
 def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
     """
@@ -143,6 +152,7 @@ def main(cfg: DictConfig):
     - 假设 cfg.run.mode=="eval"（可以在 configs/run/*.yaml 中定义）
     - 需要 cfg.run.checkpoint 指定要加载的权重
     """
+    apply_arch_variant(cfg)
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
@@ -234,25 +244,56 @@ def main(cfg: DictConfig):
     else:
         task_eval_cfg = cfg.task
 
+    # ==== 根据 experiment.task 判断评估模式（window-level / pair-level） ====
+    experiment_cfg = cfg.get("experiment", None)
+    task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
+    pair_cfg = cfg.data.get("pair", None)
+
     # 开始对所有 split 评估（通常 data_cfg.path.keys() 类似 ["test0", "test1", ...]）
     all_metrics = {}
 
-    for split_idx in data_cfg.path.keys():
-        # 你可以只对名字以 "test" 开头的 split 评估，也可以全部评估
-        # 这里简单起见全部评估
+    # 可以只对名字以 "test" 开头的 split 评估，也可以全部评估
+    # 这里简单起见全部评估
+    eval_splits = list(data_cfg.path.keys())
+    for split_idx in eval_splits:
+
         print(f"\n[Eval] Processing split: {split_idx}")
 
-        ds, loader = build_dataset_and_loader(
-            data_cfg=data_cfg,
-            split_idx=split_idx,
-            cache_data_path=cache_root,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            shuffle=False,
-            drop_last=False,
-        )
-        set_labels = get_set_labels(data_cfg, split_idx)
+        if task_mode == "pair_level_train":
+            # ===================== Pair-level 分支 =====================
+            if pair_cfg is None:
+                raise ValueError(
+                    "[Eval] experiment.task='pair_level_train' 但 cfg.data.pair 缺失。"
+                )
+
+            # 使用 pair-level builder 构建 Dataset + DataLoader
+            ds, loader = build_pair_level_dataset_and_loader(
+                pair_cfg=pair_cfg,
+                split=str(split_idx),    
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            set_labels = None
+            aggregate_sets = False
+
+        else:
+            # ===================== Window-level 分支（原逻辑） =====================
+            ds, loader = build_dataset_and_loader(
+                data_cfg=data_cfg,
+                split_idx=split_idx,
+                cache_data_path=cache_root,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            # window-level：需要 set-level label，并在 evaluator 里做 window→set 聚合
+            set_labels = get_set_labels(data_cfg, split_idx)
+            aggregate_sets = True
 
         split_eval_dir = eval_root / split_idx
         split_eval_dir.mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,11 @@ python -m scripts.analyze_cts_per_pair \
   --config configs/experiment/miRAW_TargetNet_baseline.yaml \
   --split test
 
+
+python -m scripts.analyze_cts_per_pair \
+  --config configs/experiment/miRAW_TargetNet.yaml \
+  --split test
+
 '''
 import argparse
 from collections import Counter
@@ -37,7 +42,7 @@ def compute_cts_per_pair_stats(dataset):
     counts = Counter()
 
     for i in range(len(dataset)):
-        _, _, set_idx, _ = dataset[i]   # set_idx: Tensor([k])
+        _, _, set_idx, _, _ = dataset[i]   # set_idx: Tensor([k])
         k = int(set_idx.item())
         counts[k] += 1
 

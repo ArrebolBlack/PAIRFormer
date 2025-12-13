@@ -68,12 +68,19 @@ data:
   path:
     train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
     val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    test: "data/miRAW_Test0.txt"
-    # test: "data/miRAW_Test_0,6-9.txt"
+    test: "data/miRAW_Test_0,6-9.txt"
+    # test: "data/miRAW_Test0.txt"
+
+  # 6 列：mirna_id, mirna_seq, mrna_id, mrna_seq, label, split
+  split_column: 5
+  split_map:
+    train: "train"
+    val:   "val"
+    # test: 不写，表示 test 这条 path 没有 split 列，全文件都属于 test
 
   # PairLevelDataset 的配置（你 Stage-1 导出的 cache）
   pair:
-    cache_root: cache/cts_cache/TargetNet_miRAW   # dump_cts_embeddings.py 的 out-root
+    cache_root: pair_cache/miRAW_TargetNet_Optimized_dp-0.1_Test_1-5_Test_0,6-9   # dump_cts_embeddings.py 的 out-root
     train_split: train
     val_split: val
     test_split: test
@@ -103,7 +110,8 @@ model:
   #   比如 emb_dim=512:
   #     pos_in_token = true  -> in_dim = 515
   #     pos_in_token = false -> in_dim = 514
-  in_dim: 515
+  # in_dim: 515
+  in_dim: 387     # TargetNet_Optimized embedding dim = 384
 
   d_model: 256
   n_layers: 3
@@ -181,11 +189,6 @@ eval:
   sweep_num_thresholds: 101
   save_threshold_csv: true
   best_threshold_path: null       # 如果你想在 test 用 val 的 best thr，可以把 val 的 best_threshold.txt 路径填进来
-
-  # 早停 / 保存 best ckpt
-  metric:
-    primary: auroc
-    others: [auprc, f1, accuracy]
 
   val_interval: 1
   save_best_by: auroc

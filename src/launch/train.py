@@ -65,7 +65,6 @@ from typing import List
 import numbers 
 
 import torch
-from torch.utils.data import DataLoader
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -73,14 +72,18 @@ from hydra.utils import get_original_cwd
 
 # 项目内模块
 from src.config.data_config import DataConfig
-from src.data.builder import build_dataset_and_loader, get_set_labels
+from src.data.builder import (
+    build_dataset_and_loader,
+    get_set_labels,
+    build_pair_level_dataset_and_loader,
+)
 from src.trainer.trainer import Trainer
 from src.models.registry import build_model
 from src.evaluator.evaluator import evaluate_with_trainer
-from src.utils import set_seeds 
+from src.utils import set_seeds
 
 from src.config.arch_space import ARCH_SPACE
-from src.data.pair_level_dataset import PairLevelDataset, pair_level_collate_fn
+
 
 
 def apply_arch_variant(cfg):
@@ -246,39 +249,26 @@ def main(cfg: DictConfig):
         # ===================== Pair-level 分支 =====================
         pair_cfg = cfg.data.pair
 
-        train_ds = PairLevelDataset(
-            cache_root=pair_cfg.cache_root,
-            split=pair_cfg.train_split,
-            max_cts_per_pair=pair_cfg.max_cts_per_pair,
-            selection_mode=pair_cfg.selection_mode,
-            pos_in_token=pair_cfg.pos_in_token,
-            order_mode=pair_cfg.order_mode,
-        )
-        train_loader = DataLoader(
-            train_ds,
+        train_ds, train_loader = build_pair_level_dataset_and_loader(
+            pair_cfg=pair_cfg,
+            split="train",
             batch_size=batch_size,
-            shuffle=True,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            collate_fn=pair_level_collate_fn,
+            shuffle=True,
+            drop_last=False,
         )
 
-        val_ds = PairLevelDataset(
-            cache_root=pair_cfg.cache_root,
-            split=pair_cfg.val_split,
-            max_cts_per_pair=pair_cfg.max_cts_per_pair,
-            selection_mode=pair_cfg.selection_mode,
-            pos_in_token=pair_cfg.pos_in_token,
-            order_mode=pair_cfg.order_mode,
-        )
-        val_loader = DataLoader(
-            val_ds,
+        val_ds, val_loader = build_pair_level_dataset_and_loader(
+            pair_cfg=pair_cfg,
+            split="val",
             batch_size=batch_size,
-            shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            collate_fn=pair_level_collate_fn,
+            shuffle=False,
+            drop_last=False,
         )
+
 
         # pair-level: 每个 sample 就是一个 pair，不需要额外 set 聚合
         val_set_labels = None
@@ -491,24 +481,16 @@ def main(cfg: DictConfig):
                 if pair_cfg is None:
                     raise ValueError("[Train] experiment.task='pair_level_train' but cfg.data.pair is missing.")
 
-                # 对 pair-level，一般就一个 test split：pair_cfg.test_split
-                test_ds = PairLevelDataset(
-                    cache_root=pair_cfg.cache_root,
-                    split=pair_cfg.test_split,
-                    max_cts_per_pair=pair_cfg.max_cts_per_pair,
-                    selection_mode=pair_cfg.selection_mode,
-                    pos_in_token=pair_cfg.pos_in_token,
-                    order_mode=pair_cfg.order_mode,
-                )
-                test_loader = DataLoader(
-                    test_ds,
+                test_ds, test_loader = build_pair_level_dataset_and_loader(
+                    pair_cfg=pair_cfg,
+                    split=split_idx,
                     batch_size=batch_size,
-                    shuffle=False,
                     num_workers=num_workers,
                     pin_memory=pin_memory,
-                    collate_fn=pair_level_collate_fn,
+                    shuffle=False,
+                    drop_last=False,
                 )
-
+                
                 # pair-level：每个 sample 就是一个 pair，不需要 set-level label
                 test_set_labels = None
 
@@ -544,22 +526,22 @@ def main(cfg: DictConfig):
             out_dir_fixed = test_root / "thr0_5"
             out_dir_fixed.mkdir(parents=True, exist_ok=True)
 
-            print(f"[Train][Test {split_idx}] Eval with fixed threshold = 0.5")
-            res_fixed = evaluate_with_trainer(
-                trainer=trainer,
-                loader=test_loader,
-                task_cfg=task_fixed,
-                logging_cfg=cfg.logging,
-                output_dir=str(out_dir_fixed),
-                set_labels=test_set_labels,
-                aggregate_sets=aggregate_sets,
-                tag=f"{split_idx}_thr0.5",
-                do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
-                sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-                reduction=cfg.run.get("test_reduction", "max"),
-                softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
-                topk=cfg.run.get("test_topk", 3),
-            )
+            # print(f"[Train][Test {split_idx}] Eval with fixed threshold = 0.5")
+            # res_fixed = evaluate_with_trainer(
+            #     trainer=trainer,
+            #     loader=test_loader,
+            #     task_cfg=task_fixed,
+            #     logging_cfg=cfg.logging,
+            #     output_dir=str(out_dir_fixed),
+            #     set_labels=test_set_labels,
+            #     aggregate_sets=aggregate_sets,
+            #     tag=f"{split_idx}_thr0.5",
+            #     do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
+            #     sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
+            #     reduction=cfg.run.get("test_reduction", "max"),
+            #     softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
+            #     topk=cfg.run.get("test_topk", 3),
+            # )
 
             # ---------- (B) 使用 val 上 best_threshold 的报告（如果存在） ----------
             res_valbest = None

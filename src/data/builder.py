@@ -197,3 +197,72 @@ def build_dataset_and_loader(
 
 
 
+from src.data.pair_level_dataset import PairLevelDataset, pair_level_collate_fn
+from src.data.sampler import PairLevelChunkBatchSampler
+
+def build_pair_level_dataset_and_loader(
+    pair_cfg,
+    split: str,
+    batch_size: int,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    shuffle: bool = True,
+    drop_last: bool = False,
+) -> Tuple[PairLevelDataset, DataLoader]:
+    """
+    Pair-level 专用 builder：基于 PairLevelDataset + PairLevelChunkBatchSampler
+    一次性构建好 Dataset 与 DataLoader。
+
+    参数
+    ----
+    pair_cfg :
+        一般来自 cfg.data.pair，要求包含：
+            - cache_root: str
+            - train_split / val_split / test_split: str
+            - max_cts_per_pair: int
+            - selection_mode: str
+            - pos_in_token: bool
+            - order_mode: str
+
+    split : str
+        "train" / "val" / "test" 等，调用方负责传入具体值。
+
+    其余参数与 CTS builder 类似。
+    """
+    if split == "train":
+        split_name = pair_cfg.train_split
+    elif split == "val":
+        split_name = pair_cfg.val_split
+    elif hasattr(pair_cfg, "test_split") and split == "test":
+        split_name = pair_cfg.test_split
+    else:
+        # 可根据你实际的命名灵活处理，这里给一个保守兜底
+        split_name = split
+
+    dataset = PairLevelDataset(
+        cache_root=pair_cfg.cache_root,
+        split=split_name,
+        max_cts_per_pair=pair_cfg.max_cts_per_pair,
+        selection_mode=pair_cfg.selection_mode,
+        pos_in_token=pair_cfg.pos_in_token,
+        order_mode=pair_cfg.order_mode,
+    )
+
+    sampler = PairLevelChunkBatchSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=pair_level_collate_fn,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
+    )
+
+    return dataset, loader

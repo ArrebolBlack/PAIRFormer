@@ -244,6 +244,7 @@ class PairTransformerAggregator(nn.Module):
             # cls: [1, 1, d_model] -> [B, 1, d_model]
             cls = self.cls_token.expand(B, 1, -1)
             h = torch.cat([cls, h], dim=1)  # [B, L+1, d_model]
+            T = L + 1
 
             if attn_mask is not None:
                 # attn_mask: [B, L] -> [B, L+1]，CLS 位置设为 1
@@ -251,7 +252,14 @@ class PairTransformerAggregator(nn.Module):
                 attn_mask = torch.cat([cls_mask, attn_mask], dim=1)  # [B, L+1]
         else:
             # 不用 CLS，长度就是 L
-            pass
+            T = L
+
+        # -------- 3.5) 规范化 mask 形状，方便 SelfAttention 使用 -------- #
+        if attn_mask is not None:
+            # 现在 attn_mask 是 [B, T] (bool: True=valid, False=pad)
+            # 扩展为 [B, 1, 1, T]，用于对 [B, heads, T, T] 的最后一维做 masking
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.view(B, 1, 1, T)     # [B, 1, 1, T]
 
         # -------- 4) 进入 TransformerEncoder -------- #
         # TransformerEncoder 预期输入: [B, T, d_model]

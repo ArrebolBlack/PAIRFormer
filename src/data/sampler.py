@@ -123,3 +123,86 @@ class ChunkAwareBatchSampler(Sampler[List[int]]):
             else:
                 total_batches += math.ceil(n / self.batch_size)
         return total_batches
+
+class PairLevelChunkBatchSampler(Sampler[List[int]]):
+    """
+    Pair-level 专用的 chunk-aware BatchSampler。
+
+    约定：
+    - dataset 必须是 PairLevelDataset，且已经加载 chunked cache：
+        cache_root/{split}_meta.json
+        cache_root/{split}_shardXXXX.pt
+
+    目标：
+    - 与 CTS 的 ChunkAwareBatchSampler 一样：
+        * batch 尽量来自同一个 shard 的连续 index 段；
+        * shard 顺序可 shuffle；
+        * shard 内的 pair 顺序也可 shuffle。
+    - 配合 PairLevelDataset 中“只保留一个 current_chunk”的实现，
+      减少频繁切换 shard 时的 torch.load 开销。
+    """
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        shuffle: bool = True,
+        drop_last: bool = False,
+    ):
+        # PairLevelDataset 里会设定 mode="chunked"
+        if not hasattr(dataset, "mode") or dataset.mode != "chunked":
+            raise ValueError(
+                "PairLevelChunkBatchSampler 只能用于 chunked 模式的 PairLevelDataset "
+                "(需要有 dataset.mode == 'chunked')"
+            )
+        if not hasattr(dataset, "cum_sizes") or not hasattr(dataset, "chunk_sizes"):
+            raise ValueError(
+                "PairLevelChunkBatchSampler 需要 dataset.cum_sizes 和 dataset.chunk_sizes 属性，"
+                "请确认使用的是 PairLevelDataset 的分块 cache。"
+            )
+
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+
+        # PairLevelDataset.__init__ 已经构造了 chunk_sizes / cum_sizes
+        self.chunk_sizes: List[int] = list(dataset.chunk_sizes)
+        self.cum_sizes: List[int] = list(dataset.cum_sizes)
+
+        # 将 cum_sizes 转为每个 shard 的 [start, end) 段
+        self.ranges: List[Tuple[int, int]] = []
+        prev = 0
+        for c in self.cum_sizes:
+            self.ranges.append((prev, c))
+            prev = c
+
+    def __iter__(self) -> Iterator[List[int]]:
+        # 先确定 shard 的出场顺序
+        chunk_ids = list(range(len(self.ranges)))
+        if self.shuffle:
+            random.shuffle(chunk_ids)
+
+        for cid in chunk_ids:
+            start, end = self.ranges[cid]
+            idxs = list(range(start, end))
+            if self.shuffle:
+                random.shuffle(idxs)
+
+            # 和 CTS 一样，按 batch_size 切分当前 shard
+            n = len(idxs)
+            for i in range(0, n, self.batch_size):
+                batch = idxs[i : i + self.batch_size]
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+                yield batch
+
+    def __len__(self) -> int:
+        # 估算总 batch 数：对每个 shard 单独算
+        total_batches = 0
+        for n in self.chunk_sizes:
+            if self.drop_last:
+                total_batches += n // self.batch_size
+            else:
+                total_batches += math.ceil(n / self.batch_size)
+        return total_batches

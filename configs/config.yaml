@@ -16,6 +16,7 @@ defaults:
 # seed: 2020
 # device: "cuda"
 
+experiment_name: ${experiment.name}
 
 hydra:
   run:
