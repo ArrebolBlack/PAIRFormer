@@ -145,7 +145,7 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=10240000,
         help="Batch size for dumping.",
     )
     parser.add_argument(
@@ -160,7 +160,7 @@ def parse_args():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
+        default=16,
         help="num_workers passed to build_dataset_and_loader。",
     )
     parser.add_argument(

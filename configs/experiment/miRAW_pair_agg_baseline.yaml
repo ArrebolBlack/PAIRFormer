@@ -25,9 +25,9 @@ run:
 
   # dataloader / epoch
   batch_size: 64
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
-  num_epochs: 30              # 和 train.max_epochs 对齐；二者有一个即可，你可以只用这个
+  num_epochs: 50              # 和 train.max_epochs 对齐；二者有一个即可，你可以只用这个
 
   # MIL 聚合（pair-level 这边不再需要 bag-level MIL）
   train_reduction: none       # Stage-1: window-level TargetNet 的 bag 聚合方式（这里不启用）
@@ -136,13 +136,13 @@ model:
 train:
   # --- 损失相关 ---
   loss_type: bce_focal            # 或 bce / focal（与你现有 trainer 支持的类型一致）
-  esa_weighting: false            # Stage-2 不使用 ESA 加权
+  esa_weighting: true            # Stage-2 不使用 ESA 加权
 
   # Focal / Label smoothing 等参数（沿用你 miRAW_TargetNet_Optimized 的那套）
   focal_alpha: 0.4
   focal_gamma: 1.0
   focal_lambda: 1.0
-  label_smoothing: false          # pair-level 先关闭，有需要再打开
+  label_smoothing: true          # pair-level 先关闭，有需要再打开
   bce_lambda: 0.01
   pos_weight: 1.0                 # if 用在 BCE
   bce_pos_weight: 1.0             # 若你在代码里用的是这个字段，两个都保留不会出问题
@@ -167,7 +167,7 @@ train:
   grad_clip: 1.0
 
   ema:
-    enabled: false
+    enabled: true
     decay: 0.999
 
   monitor: loss                   # 早停/保存最佳模型时监控的指标名
