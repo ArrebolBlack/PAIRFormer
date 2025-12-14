@@ -183,15 +183,16 @@ eval:
   save_curves_png: true
   save_report_txt: true
   save_metrics_json: true
+  save_threshold_csv: true
 
   # 阈值扫描
   do_threshold_sweep: true
   sweep_num_thresholds: 101
   save_threshold_csv: true
-  best_threshold_path: null       # 如果你想在 test 用 val 的 best thr，可以把 val 的 best_threshold.txt 路径填进来
+  best_threshold_path: null       # 为空时默认尝试 eval/val/best_threshold.json
 
   val_interval: 1
-  save_best_by: auroc
+  save_best_by: pr_auc
   use_val_best_threshold: false   # 先让 test 自己扫一遍；如果要复用 val best，就设成 true 并提供 best_threshold_path
 
 

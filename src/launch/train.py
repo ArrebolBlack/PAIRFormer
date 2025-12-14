@@ -526,22 +526,22 @@ def main(cfg: DictConfig):
             out_dir_fixed = test_root / "thr0_5"
             out_dir_fixed.mkdir(parents=True, exist_ok=True)
 
-            # print(f"[Train][Test {split_idx}] Eval with fixed threshold = 0.5")
-            # res_fixed = evaluate_with_trainer(
-            #     trainer=trainer,
-            #     loader=test_loader,
-            #     task_cfg=task_fixed,
-            #     logging_cfg=cfg.logging,
-            #     output_dir=str(out_dir_fixed),
-            #     set_labels=test_set_labels,
-            #     aggregate_sets=aggregate_sets,
-            #     tag=f"{split_idx}_thr0.5",
-            #     do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
-            #     sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-            #     reduction=cfg.run.get("test_reduction", "max"),
-            #     softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
-            #     topk=cfg.run.get("test_topk", 3),
-            # )
+            print(f"[Train][Test {split_idx}] Eval with fixed threshold = 0.5")
+            res_fixed = evaluate_with_trainer(
+                trainer=trainer,
+                loader=test_loader,
+                task_cfg=task_fixed,
+                logging_cfg=cfg.logging,
+                output_dir=str(out_dir_fixed),
+                set_labels=test_set_labels,
+                aggregate_sets=aggregate_sets,
+                tag=f"{split_idx}_thr0.5",
+                do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
+                sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
+                reduction=cfg.run.get("test_reduction", "max"),
+                softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
+                topk=cfg.run.get("test_topk", 3),
+            )
 
             # ---------- (B) 使用 val 上 best_threshold 的报告（如果存在） ----------
             res_valbest = None
