@@ -58,7 +58,11 @@ run:
 
   # 训练完是否自动在 test 上评估
   eval_test_after_train: true
-
+  
+  # 新增：控制 test 阶段使用哪些 checkpoint
+  eval_test_with_last: true       # 用当前训练结束时的 last 权重测试
+  eval_test_with_best: true       # 也用 best.pt 再跑一套测试（如果文件存在）
+  best_ckpt_path: null            # 可选；默认用 ckpt_dir/best.pt
 
 # ===================== 数据配置：pair-level aggregator =====================
 data:
@@ -155,7 +159,7 @@ train:
   weight_decay: 1e-2
 
   scheduler: cosine               # ["none","plateau","cosine","step"] 等
-  scheduler_t_max: 10             # 对应 cosine
+  scheduler_t_max: 50             # 对应 cosine
   scheduler_factor: 0.2           # 对应 plateau / step 时可用
   scheduler_patience: 5           # 对应 plateau
   scheduler_step_size: 10         # 对应 step
