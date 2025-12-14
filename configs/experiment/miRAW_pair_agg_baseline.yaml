@@ -184,11 +184,10 @@ eval:
   save_report_txt: true
   save_metrics_json: true
   save_threshold_csv: true
-
   # 阈值扫描
   do_threshold_sweep: true
   sweep_num_thresholds: 101
-  save_threshold_csv: true
+
   best_threshold_path: null       # 为空时默认尝试 eval/val/best_threshold.json
 
   val_interval: 1
