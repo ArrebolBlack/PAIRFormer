@@ -3,7 +3,11 @@
 # -------- Optimizer -------- #
 # 支持："adamw"（默认） / "adam" / "sgd" / "rmsprop"
 optimizer: "adamw"
-
+# Adam / AdamW 相关超参
+betas: [0.9, 0.999]
+eps: 1e-8
+adam_weight_decay: 0.01
+amsgrad: false
 # 学习率 —— 注意 Trainer 里访问的是 train_cfg.lr（不是 learning_rate）
 lr: 1e-3
 

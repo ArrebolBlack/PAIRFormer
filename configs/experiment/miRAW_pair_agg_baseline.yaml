@@ -155,11 +155,17 @@ train:
 
   # --- 优化器与学习率调度 ---
   optimizer: adamw                # trainer 里是 train_cfg.optimizer: "adamw" / ...
+  # Adam / AdamW 相关超参
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  adam_weight_decay: 0.01
+  amsgrad: false
+
   lr: 3e-4
   weight_decay: 1e-2
 
   scheduler: cosine               # ["none","plateau","cosine","step"] 等
-  scheduler_t_max: 50             # 对应 cosine
+  scheduler_t_max: 10             # 对应 cosine
   scheduler_factor: 0.2           # 对应 plateau / step 时可用
   scheduler_patience: 5           # 对应 plateau
   scheduler_step_size: 10         # 对应 step

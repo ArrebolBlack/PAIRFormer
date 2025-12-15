@@ -541,28 +541,47 @@ class Trainer:
         train_cfg: DictConfig,
         param_groups: List[Dict[str, Any]],
     ) -> optim.Optimizer:
-        """
-        根据 train_cfg.optimizer 构建优化器。
-
-        支持：
-        - "adamw" (默认)
-        - "adam"
-        - "sgd"
-        - "rmsprop"
-        以后可以继续扩展（如 Lion）。
-        """
         opt_name = getattr(train_cfg, "optimizer", "adamw").lower()
         lr = float(train_cfg.lr)
 
-        if opt_name == "adam":
-            return optim.Adam(param_groups, lr=lr)
+        if opt_name in ("adam", "adamw"):
+            # 通用参数，从 train_cfg 里读；没写时用 PyTorch 的默认值
+            betas = tuple(getattr(train_cfg, "betas", (0.9, 0.999)))
+            eps = float(getattr(train_cfg, "eps", 1e-8))
+            weight_decay_default = 0.01 if opt_name == "adamw" else 0.0
+            weight_decay = float(getattr(train_cfg, "adam_weight_decay", weight_decay_default))
+            amsgrad = bool(getattr(train_cfg, "amsgrad", False))
+
+            OptimCls = optim.AdamW if opt_name == "adamw" else optim.Adam
+            return OptimCls(
+                param_groups,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay,
+                amsgrad=amsgrad,
+            )
+
         elif opt_name == "sgd":
             momentum = float(getattr(train_cfg, "momentum", 0.9))
             return optim.SGD(param_groups, lr=lr, momentum=momentum)
+
         elif opt_name == "rmsprop":
             return optim.RMSprop(param_groups, lr=lr)
-        else:  # 默认 AdamW
-            return optim.AdamW(param_groups, lr=lr)
+
+        else:
+            # fallback: 默认 AdamW
+            betas = (0.9, 0.999)
+            eps = 1e-8
+            weight_decay = float(getattr(train_cfg, "weight_decay", 0.01))
+            return optim.AdamW(
+                param_groups,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay,
+            )
+
 
     def _build_scheduler(
         self,
