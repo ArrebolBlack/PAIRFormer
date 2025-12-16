@@ -1,0 +1,159 @@
+data:
+  name: mirna_miraw_pair_level
+  path:
+    train: data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
+    val: data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
+    test: data/miRAW_Test_0,6-9.txt
+  with_esa: true
+  alignment: extended_seed_alignment
+  split_column: 5
+  split_map:
+    train: train
+    val: val
+  pair:
+    cache_root: pair_cache/miRAW_TargetNet_Optimized_dp-0.1_Test_1-5_Test_0,6-9
+    train_split: train
+    val_split: val
+    test_split: test
+    max_cts_per_pair: 512
+    selection_mode: topk_logit
+    order_mode: score
+    pos_in_token: true
+model:
+  name: pair_agg_v0
+  arch: PairTransformerAggregator
+  num_channels:
+  - 16
+  - 16
+  - 32
+  num_blocks:
+  - 2
+  - 1
+  - 1
+  pool_size: 3
+  stem_kernel_size: 5
+  block_kernel_size: 3
+  skip_connection: true
+  dropout: 0.1
+  in_dim: 387
+  d_model: 256
+  n_layers: 3
+  n_heads: 8
+  dim_ff: 512
+  ff_activation: gelu
+  max_len: 512
+  use_cls_token: true
+  pos_encoding_type: sinusoidal
+  causal: false
+  use_rel_pos: false
+  rel_pos_encoding_type: sinusoidal
+  rel_pos_hidden_dim: 32
+train:
+  optimizer: adamw
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  adam_weight_decay: 0.01
+  amsgrad: false
+  lr: 0.0003
+  weight_decay: 0.01
+  momentum: 0.9
+  scheduler: cosine
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+  scheduler_t_max: 10
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+  pos_weight: 1.0
+  label_smoothing: true
+  smooth_pos: 0.95
+  smooth_neg: 0.05
+  loss_type: focal
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1.0
+  bce_lambda: 0.01
+  esa_weighting: true
+  esa_scale: 10.0
+  esa_lambda_pos: 1.0
+  esa_lambda_neg: 0.5
+  amp: true
+  grad_clip: 1.0
+  ema:
+    enabled: true
+    decay: 0.999
+  monitor: loss
+  greater_is_better: false
+  bce_pos_weight: 1.0
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5
+run:
+  mode: train
+  num_epochs: 50
+  batch_size: 64
+  num_workers: 16
+  pin_memory: true
+  cache_path: ${paths.cache_root}
+  resume: false
+  checkpoint: null
+  reduction: max
+  train_reduction: none
+  eval_reduction: none
+  test_reduction: none
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+  ckpt_subdir: checkpoints
+  eval_subdir: eval
+  ckpt_dir: ${hydra:run.dir}/${run.ckpt_subdir}
+  eval_dir: ${hydra:run.dir}/${run.eval_subdir}
+  eval_test_after_train: true
+  test_splits:
+  - test
+  seed: ${seed}
+  eval_test_with_last: true
+  eval_test_with_best: true
+  best_ckpt_path: null
+eval:
+  save_dir: eval_outputs
+  do_threshold_sweep: true
+  sweep_num_thresholds: 101
+  use_val_best_threshold: false
+  best_threshold_path: null
+  save_metrics_json: true
+  save_report_txt: true
+  save_threshold_csv: true
+  save_curves_png: true
+  roc_curve_file: roc_curve.png
+  pr_curve_file: pr_curve.png
+  val_interval: 1
+  save_best_by: pr_auc
+logging:
+  wandb:
+    enabled: true
+    project: TargetNet
+    entity: null
+    mode: online
+    group: pair_agg_baseline
+    tags:
+    - PairAggregator
+    - miRAW
+  eval:
+    use_wandb: false
+    wandb_prefix: eval
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+experiment:
+  name: miRAW_pair_agg_baseline
+  task: pair_level_train
+seed: 2020
+device: cuda
+experiment_name: ${experiment.name}

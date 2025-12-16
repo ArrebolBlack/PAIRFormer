@@ -152,6 +152,11 @@ train:
   bce_pos_weight: 1.0             # 若你在代码里用的是这个字段，两个都保留不会出问题
   smooth_neg: 0.05
   smooth_pos: 0.95
+  # === Stage 0.3: esa weight(window-size) ===
+  # esa_weighting: true
+  esa_scale: 10.0     # ESA 归一化尺度，esa_norm = clamp(score / esa_scale, 0..1)
+  esa_lambda_pos: 1.0 # 正样本 ESA 权重系数
+  esa_lambda_neg: 0.5 # 负样本 ESA 权重系数（一般从 0 或 0.5 小试）
 
   # --- 优化器与学习率调度 ---
   optimizer: adamw                # trainer 里是 train_cfg.optimizer: "adamw" / ...
