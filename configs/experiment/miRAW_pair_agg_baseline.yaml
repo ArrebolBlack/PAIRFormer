@@ -89,7 +89,7 @@ data:
     val_split: val
     test_split: test
 
-    max_cts_per_pair: 512
+    max_cts_per_pair: 128  # 512
 
     # 选择哪些 miRNA-CTS token
     selection_mode: topk_logit       # [topk_logit, topk_abs_logit, topk_esa, random]
@@ -139,7 +139,7 @@ model:
 # ===================== 训练配置（对应 trainer 里的 train_cfg） =====================
 train:
   # --- 损失相关 ---
-  loss_type: bce_focal            # 或 bce / focal（与你现有 trainer 支持的类型一致）
+  loss_type: focal            # 或 bce / focal（与你现有 trainer 支持的类型一致）
   esa_weighting: true            # Stage-2 不使用 ESA 加权
 
   # Focal / Label smoothing 等参数（沿用你 miRAW_TargetNet_Optimized 的那套）

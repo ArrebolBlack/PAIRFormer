@@ -1,0 +1,49 @@
+# configs/sweeps/pair_agg_loss_sweep.yaml
+
+program: src.launch.train     # 对应 python -m src.launch.train
+name: pair_agg_sweep
+method: random           
+metric:
+  name: test/test/best_sweep/pr_auc            # 对应你 WandB summary 里写入的 key
+  goal: maximize
+
+parameters:
+
+  train.label_smoothing:
+    values: [false] 
+  train.loss_type:
+    values: [focal] 
+  # train.esa_weighting:
+  #   values: [true]
+  train.amp:
+    values: [false]
+  train.ema:
+    values: [false]
+  seed:
+    values: [2020]
+  # train.optimizer:
+  #   values: [adamw]
+  # train.lr:
+  #   values: [0.005]
+  # train.weight_decay:
+  #   values: [0.0,0.01,0.02]
+  # train.scheduler:
+  #   values: [cosine,plateau,step]
+
+  # data.pair.max_cts_per_pair:
+  #   values: [128,512]
+  train.focal_alpha:
+    values: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
+  train.focal_gamma:
+    values: [1,2,3,4,5]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - src.launch.train
+  - experiment=miRAW_pair_agg_baseline
+  - logging.wandb.enabled=true
+  - logging.wandb.project=TargetNet
+  - logging.wandb.group=pair_agg_loss_sweep_2
+  - ${args_no_hyphens}   # ⭐ 关键修改
