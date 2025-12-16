@@ -9,6 +9,9 @@ defaults:
 
 
 experiment_name: "miRAW_Transformer_baseline"
+experiment:
+  name: miRAW_Transformer_baseline
+  task: window_level_train    
 
 model:
   arch: MyTransformer1D

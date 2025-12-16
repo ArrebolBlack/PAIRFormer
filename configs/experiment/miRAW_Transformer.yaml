@@ -9,6 +9,9 @@ defaults:
   - _self_
 
 experiment_name: "miRAW_Transformer"
+experiment:
+  name: miRAW_Transformer
+  task: window_level_train    
 
 data:
   path:

@@ -12,6 +12,10 @@
 
 # ---- 顶层元信息（推荐有） ----
 experiment_name: "miRAW_TargetNet_baseline"  # 实验名，用于 WandB / 日志前缀
+experiment:
+  name: miRAW_TargetNet_baseline
+  task: window_level_train    
+
 seed: 2020                                   # 全局随机种子 
 device: "cuda"                               # "cuda" / "cpu"
 

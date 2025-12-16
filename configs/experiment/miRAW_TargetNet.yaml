@@ -10,6 +10,10 @@ defaults:
 
 experiment_name: "miRAW_TargetNet"
 
+experiment:
+  name: miRAW_TargetNet
+  task: window_level_train    
+
 data:
   path:
     train: "data/miRAW_Train_Validation.txt"

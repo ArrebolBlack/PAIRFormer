@@ -9,6 +9,9 @@ defaults:
 
 
 experiment_name: "miRAW_TargetNet_Optimized_baseline"
+experiment:
+  name: miRAW_TargetNet_Optimized_baseline
+  task: window_level_train    
 
 model:
   name: targetnet_optimized

@@ -89,7 +89,7 @@ data:
     val_split: val
     test_split: test
 
-    max_cts_per_pair: 128  # 512
+    max_cts_per_pair: 512 # 128  # 512
 
     # 选择哪些 miRNA-CTS token
     selection_mode: topk_logit       # [topk_logit, topk_abs_logit, topk_esa, random]

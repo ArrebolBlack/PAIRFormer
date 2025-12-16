@@ -9,6 +9,9 @@ defaults:
   - _self_
 
 experiment_name: "miRAW_TargetNet_Optimized"
+experiment:
+  name: miRAW_TargetNet_Optimized
+  task: window_level_train    
 
 data:
   path:
