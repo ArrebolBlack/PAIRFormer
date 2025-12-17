@@ -34,10 +34,11 @@ from typing import List
 
 # ======== 可根据需要在这里改路径 / 参数 ========
 
-DATA_DIR = Path("data")
-INPUT_PATTERN = "miRAW_Test{idx}.txt"
+DATA_DIR = Path("data/deepTargetPro")
+INPUT_PATTERN = "test_split_{idx}.txt"
 
-OUTPUT_DIR = DATA_DIR / "miRAW_Test_for_Train_Validation"
+# OUTPUT_DIR = DATA_DIR / "miRAW_Test_for_Train_Validation"
+OUTPUT_DIR = DATA_DIR
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42  # 保证可复现
@@ -89,7 +90,7 @@ def make_dataset_for_n(max_idx: int):
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    out_name = f"miRAW_Test1-{max_idx}_split-ratio-{TRAIN_RATIO}_Train_Validation.txt"
+    out_name = f"deepTargetPro_Test1-{max_idx}_split-ratio-{TRAIN_RATIO}_Train_Validation.txt"
     out_path = OUTPUT_DIR / out_name
 
     df.to_csv(out_path, sep="\t", index=False)
@@ -98,7 +99,7 @@ def make_dataset_for_n(max_idx: int):
 
 def main():
     # 需要 9 个数据集：使用 Test1..1, Test1..2, ..., Test1..9
-    for n in range(1, 10):
+    for n in range(5, 6):
         make_dataset_for_n(n)
 
 
