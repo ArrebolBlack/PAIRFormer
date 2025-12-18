@@ -43,6 +43,5 @@ data/**
 !data/miRAW_Train_Validation.txt
 !data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
 !data/miRAW_Test_0,6-9.txt
-!data/DeepMirTar/
-!data/deepTargetPro/
-!data/_MACOSX
+!data/DeepMirTar/**
+!data/deepTargetPro/**
