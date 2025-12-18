@@ -61,7 +61,7 @@ train:
   # --- 优化器 & 学习率 ---
   optimizer: adam              # ["adamw", "adam", "sgd", "rmsprop"]
   lr: 0.001
-  weight_decay: 0.01
+  weight_decay: 0
   momentum: 0.9                # 仅对 SGD 有效
 
   # --- 学习率调度器 ---
@@ -74,7 +74,7 @@ train:
 
   # --- 损失 & 数值稳定 ---
   loss_type: bce               # "bce" or "mse" or "custom"
-  amp: true                    # 是否使用混合精度
+  amp: false                    # 是否使用混合精度
   grad_clip: 1.0               # None 或 float
 
   # --- EMA（可选） ---

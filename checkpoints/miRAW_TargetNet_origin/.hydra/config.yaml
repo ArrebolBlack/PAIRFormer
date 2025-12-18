@@ -1,0 +1,129 @@
+data:
+  name: mirna_miraw
+  path:
+    train: data/miRAW_Train_Validation.txt
+    val: data/miRAW_Train_Validation.txt
+    test: data/miRAW_Test0.txt
+  with_esa: true
+  alignment: extended_seed_alignment
+  split_column: 5
+  split_map:
+    train: train
+    val: val
+model:
+  name: targetnet_default
+  arch: TargetNet
+  num_channels:
+  - 16
+  - 16
+  - 32
+  num_blocks:
+  - 2
+  - 1
+  - 1
+  pool_size: 3
+  stem_kernel_size: 5
+  block_kernel_size: 3
+  skip_connection: true
+  dropout: 0.5
+train:
+  optimizer: adam
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  adam_weight_decay: 0.01
+  amsgrad: false
+  lr: 0.001
+  weight_decay: 0
+  momentum: 0.9
+  scheduler: plateau
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+  scheduler_t_max: 10
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+  pos_weight: 1.0
+  label_smoothing: false
+  smooth_pos: 1.0
+  smooth_neg: 0.0
+  loss_type: bce
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1
+  bce_lambda: 0.01
+  esa_weighting: false
+  esa_scale: 10.0
+  esa_lambda_pos: 0.5
+  esa_lambda_neg: 0.0
+  amp: false
+  grad_clip: 1.0
+  ema:
+    enabled: false
+    decay: 0.999
+  monitor: loss
+  greater_is_better: false
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5
+run:
+  mode: train
+  num_epochs: 50
+  batch_size: 256
+  num_workers: 4
+  pin_memory: true
+  cache_path: ${paths.cache_root}
+  resume: false
+  checkpoint: null
+  reduction: max
+  train_reduction: ${run.reduction}
+  eval_reduction: ${run.reduction}
+  test_reduction: ${run.reduction}
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+  ckpt_subdir: checkpoints
+  eval_subdir: eval
+  ckpt_dir: ${hydra:run.dir}/${run.ckpt_subdir}
+  eval_dir: ${hydra:run.dir}/${run.eval_subdir}
+  eval_test_after_train: true
+  test_splits:
+  - test
+eval:
+  save_dir: eval_outputs
+  do_threshold_sweep: true
+  sweep_num_thresholds: 101
+  use_val_best_threshold: false
+  best_threshold_path: null
+  save_metrics_json: true
+  save_report_txt: true
+  save_threshold_csv: true
+  save_curves_png: true
+  roc_curve_file: roc_curve.png
+  pr_curve_file: pr_curve.png
+logging:
+  wandb:
+    enabled: true
+    project: TargetNet
+    entity: null
+    mode: online
+    group: miRAW_baseline
+    tags:
+    - TargetNet
+  eval:
+    use_wandb: false
+    wandb_prefix: eval
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+experiment_name: ${experiment.name}
+experiment:
+  name: miRAW_TargetNet_baseline
+  task: window_level_train
+seed: 2020
+device: cuda
