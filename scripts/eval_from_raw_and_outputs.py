@@ -117,38 +117,42 @@ def main():
 
     all_y_true = []
     all_y_pred_raw = []
-
-    # 2) 逐对读取 Test_i + Test_i_outputs，对齐方式：**行号对应**
+    
+    # 2) 逐对读取 Test_i + Test_i_outputs
     for data_path, out_path in zip(data_files, output_files):
         print(f"[INFO] 处理 pair：{os.path.basename(data_path)}  &  {os.path.basename(out_path)}")
 
-        # 2.1 读原始数据，取标签列
         df_data = pd.read_csv(data_path, sep=args.data_sep)
         if args.label_col not in df_data.columns:
             raise ValueError(
-                f"{data_path} 中找不到标签列 '{args.label_col}'，"
-                f"实际列名为：{list(df_data.columns)}"
+                f"{data_path} 中找不到标签列 '{args.label_col}'，实际列名为：{list(df_data.columns)}"
             )
-        labels = df_data[args.label_col].to_numpy()
 
-        # 2.2 读输出文件，取 output 列（set_idx 只做 sanity check，不参与对齐）
+        # 关键改动：给原始数据显式加 set_idx
+        df_data = df_data.reset_index().rename(columns={"index": "set_idx"})
+        labels = df_data[["set_idx", args.label_col]].copy()
+        labels.columns = ["set_idx", "label"]
+
         df_out = pd.read_csv(out_path, sep=args.outputs_sep)
         df_out.columns = [c.strip() for c in df_out.columns]
         if "output" not in df_out.columns:
             raise ValueError(f"{out_path} 中找不到 'output' 列，实际列名为：{list(df_out.columns)}")
 
-        preds = df_out["output"].to_numpy()
+        # 如果输出文件没有 set_idx，则回退到“行号对齐”
+        if "set_idx" not in df_out.columns:
+            df_out = df_out.reset_index().rename(columns={"index": "set_idx"})
 
-        # 2.3 检查行数一致
-        if len(labels) != len(preds):
+        preds = df_out[["set_idx", "output"]].copy()
+
+        merged = labels.merge(preds, on="set_idx", how="inner")
+        if len(merged) != len(labels):
             raise RuntimeError(
-                f"文件行数不匹配：{data_path} 有 {len(labels)} 行，"
-                f"{out_path} 有 {len(preds)} 行。顺序对齐的前提是行数一致。"
+                f"对齐失败：{data_path} 样本数={len(labels)}，但 merge 后={len(merged)}。"
+                f"请检查 outputs 是否对应同一个输入文件。"
             )
 
-        # 2.4 追加到总的列表中
-        all_y_true.append(labels)
-        all_y_pred_raw.append(preds)
+        all_y_true.append(merged["label"].to_numpy())
+        all_y_pred_raw.append(merged["output"].to_numpy())
 
     # 3) 拼接所有文件的标签和预测
     y_true = np.concatenate(all_y_true, axis=0).astype(int)

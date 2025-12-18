@@ -84,6 +84,7 @@ from src.utils import set_seeds
 
 from src.config.arch_space import ARCH_SPACE
 
+import time 
 
 
 def apply_arch_variant(cfg):
@@ -245,6 +246,39 @@ def main(cfg: DictConfig):
     experiment_cfg = cfg.get("experiment", None)
     task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
     
+    # 用于效率实验
+    def build_loader_for_split(split_name: str):
+        """
+        split_name: "val" or "test" (或你的其它 split 名)
+        返回 (dataset, loader, set_labels, aggregate_sets_flag)
+        """
+        if task_mode == "pair_level_train":
+            ds, ld = build_pair_level_dataset_and_loader(
+                pair_cfg=cfg.data.pair,
+                split=split_name,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            return ds, ld, None, False
+        else:
+            ds, ld = build_dataset_and_loader(
+                data_cfg=data_cfg,
+                split_idx=split_name,
+                cache_data_path=cache_root,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            # window-level：一定是 set-level 聚合
+            set_labels_local = get_set_labels(data_cfg, split_name)
+            return ds, ld, set_labels_local, True
+
+
     if task_mode == "pair_level_train":
         # ===================== Pair-level 分支 =====================
         pair_cfg = cfg.data.pair
@@ -315,6 +349,7 @@ def main(cfg: DictConfig):
         train_cfg=cfg.train,
         run_cfg=cfg.run,
         device=device,
+        logger=wandb_run,
     )
 
     # 若需要从 checkpoint 恢复
@@ -457,208 +492,53 @@ def main(cfg: DictConfig):
             except (TypeError, ValueError):
                 pass
 
+
     # ============================================================
-    # 额外：可选地在训练结束后，直接对 test 集做评估
-    # - 固定阈值 0.5 报告
-    # - 使用 val 上 best_threshold 的报告（如果有）
-    # - 在 test 上 sweep，找 test 自身 F1 最大的阈值
+    # Efficiency: inference throughput benchmark (pairs/s)
+    # - 默认在 val 上测；可通过 cfg.run.bench_inference_split 指定 "test"
+    # - 结果用于填 Table: Inference (pairs/s)
     # ============================================================
-    # if cfg.run.get("eval_test_after_train", False):
-    #     print("\n[Train] eval_test_after_train=True, start evaluating on test set...")
+    if cfg.run.get("bench_inference", False):
+        bench_split = str(cfg.run.get("bench_inference_split", "val"))
+        warmup_batches = int(cfg.run.get("bench_infer_warmup_batches", 10))
+        max_batches = cfg.run.get("bench_infer_max_batches", None)
+        max_batches = int(max_batches) if max_batches is not None else None
 
-    #     # 1) 构建 test Dataset + DataLoader
-    #     test_splits = cfg.run.get("test_splits", ["test"])
-    #     # 安全读取 experiment.task（老实验没有 experiment 字段）
-    #     experiment_cfg = cfg.get("experiment", None)
-    #     task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
-    #     pair_cfg = cfg.data.get("pair", None)
+        print(f"\n[Efficiency] Benchmarking inference throughput on split='{bench_split}' ...")
+        _, bench_loader, _, _ = build_loader_for_split(bench_split)
 
-    #     for split_idx in test_splits:
-    #         print(f"[Train] Building test loader for split='{split_idx}'")
+        # 需要 Trainer 实现 benchmark_inference()
+        infer_stats = trainer.benchmark_inference(
+            bench_loader,
+            use_ema=True,
+            warmup_batches=warmup_batches,
+            max_batches=max_batches,
+        )
 
-    #         # ===================== 按 task 分支构建 test dataset =====================
-    #         if task_mode == "pair_level_train":
-    #             if pair_cfg is None:
-    #                 raise ValueError("[Train] experiment.task='pair_level_train' but cfg.data.pair is missing.")
+        # 统一输出
+        print(
+            f"[Efficiency] split='{bench_split}': "
+            f"pairs/s={infer_stats['infer_pairs_per_s']:.2f}, "
+            f"peak_vram_gb={infer_stats['infer_peak_vram_gb']:.3f}, "
+            f"elapsed_s={infer_stats['infer_elapsed_s']:.3f}, "
+            f"total_pairs={int(infer_stats['infer_total_pairs'])}"
+        )
 
-    #             test_ds, test_loader = build_pair_level_dataset_and_loader(
-    #                 pair_cfg=pair_cfg,
-    #                 split=split_idx,
-    #                 batch_size=batch_size,
-    #                 num_workers=num_workers,
-    #                 pin_memory=pin_memory,
-    #                 shuffle=False,
-    #                 drop_last=False,
-    #             )
+        # 写入 wandb：同时 log + summary（便于直接抄表）
+        if wandb_run is not None:
+            import wandb  # type: ignore
+            log_dict = {
+                f"eff/{bench_split}/infer_pairs_per_s": float(infer_stats["infer_pairs_per_s"]),
+                f"eff/{bench_split}/infer_peak_vram_gb": float(infer_stats["infer_peak_vram_gb"]),
+                f"eff/{bench_split}/infer_elapsed_s": float(infer_stats["infer_elapsed_s"]),
+                f"eff/{bench_split}/infer_total_pairs": float(infer_stats["infer_total_pairs"]),
+            }
+            wandb.log(log_dict, step=trainer.state.global_step)
+
+            for k, v in log_dict.items():
+                wandb_run.summary[k] = float(v)
+
                 
-    #             # pair-level：每个 sample 就是一个 pair，不需要 set-level label
-    #             test_set_labels = None
-
-    #         else:
-    #             # 原有 window-level 模式
-    #             test_ds, test_loader = build_dataset_and_loader(
-    #                 data_cfg=data_cfg,
-    #                 split_idx=split_idx,
-    #                 cache_data_path=cache_root,
-    #                 batch_size=batch_size,
-    #                 num_workers=num_workers,
-    #                 pin_memory=pin_memory,
-    #                 shuffle=False,
-    #                 drop_last=False,
-    #             )
-
-    #             if aggregate_sets:
-    #                 test_set_labels = get_set_labels(data_cfg, split_idx)
-    #             else:
-    #                 test_set_labels = None
-
-
-    #         # 为 test 结果单独建一个子目录：eval/test/<split_idx>/
-    #         test_root = eval_dir / "test" / str(split_idx)
-    #         test_root.mkdir(parents=True, exist_ok=True)
-
-    #         # ---------- (A) 阈值 0.5 的报告 ----------
-    #         from copy import deepcopy
-    #         task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-    #         # 这里假设 task.threshold 是一个 float（当前实现就是）
-    #         task_fixed.threshold = 0.5
-
-    #         out_dir_fixed = test_root / "thr0_5"
-    #         out_dir_fixed.mkdir(parents=True, exist_ok=True)
-
-    #         print(f"[Train][Test {split_idx}] Eval with fixed threshold = 0.5")
-    #         res_fixed = evaluate_with_trainer(
-    #             trainer=trainer,
-    #             loader=test_loader,
-    #             task_cfg=task_fixed,
-    #             logging_cfg=cfg.logging,
-    #             output_dir=str(out_dir_fixed),
-    #             set_labels=test_set_labels,
-    #             aggregate_sets=aggregate_sets,
-    #             tag=f"{split_idx}_thr0.5",
-    #             do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
-    #             sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-    #             reduction=cfg.run.get("test_reduction", "max"),
-    #             softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
-    #             topk=cfg.run.get("test_topk", 3),
-    #         )
-
-    #         # ---------- (B) 使用 val 上 best_threshold 的报告（如果存在） ----------
-    #         res_valbest = None
-    #         if best_threshold is not None:
-    #             task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-    #             task_valbest.threshold = float(best_threshold)
-
-    #             out_dir_valbest = test_root / "val_best"
-    #             out_dir_valbest.mkdir(parents=True, exist_ok=True)
-
-    #             print(f"[Train][Test {split_idx}] Eval with val best_threshold = {float(best_threshold):.4f}")
-    #             res_valbest = evaluate_with_trainer(
-    #                 trainer=trainer,
-    #                 loader=test_loader,
-    #                 task_cfg=task_valbest,
-    #                 logging_cfg=cfg.logging,
-    #                 output_dir=str(out_dir_valbest),
-    #                 set_labels=test_set_labels,
-    #                 aggregate_sets=aggregate_sets,
-    #                 tag=f"{split_idx}_valbest",
-    #                 do_threshold_sweep=False,           # ✅ 固定 val best 阈值
-    #                 sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-    #                 reduction=cfg.run.get("test_reduction", "max"),
-    #                 softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
-    #                 topk=cfg.run.get("test_topk", 3),
-    #             )
-    #         else:
-    #             print(f"[Train][Test {split_idx}] Skip val-best eval because best_threshold is None.")
-
-    #         # ---------- (C) 在 test 上做 sweep，找 test F1 最大阈值 ----------
-    #         task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-    #         # task_sweep.threshold 用不用都行，这里保留原值
-    #         out_dir_sweep = test_root / "sweep"
-    #         out_dir_sweep.mkdir(parents=True, exist_ok=True)
-
-    #         print(f"[Train][Test {split_idx}] Eval with threshold sweep on test")
-    #         res_sweep = evaluate_with_trainer(
-    #             trainer=trainer,
-    #             loader=test_loader,
-    #             task_cfg=task_sweep,
-    #             logging_cfg=cfg.logging,
-    #             output_dir=str(out_dir_sweep),
-    #             set_labels=test_set_labels,
-    #             aggregate_sets=aggregate_sets,
-    #             tag=f"{split_idx}_sweep",
-    #             do_threshold_sweep=True,               # ✅ 在 test 上扫阈值
-    #             sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-    #             reduction=cfg.run.get("test_reduction", "max"),
-    #             softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
-    #             topk=cfg.run.get("test_topk", 3),
-    #         )
-
-    #         best_thr_test = res_sweep.get("best_threshold", None)
-
-    #         # ---- (A) Fixed threshold = 0.5 ----
-    #         metrics_fixed = res_fixed.get("metrics", {})
-
-    #         print(f"\n[Test {split_idx}] Fixed threshold=0.5 metrics:")
-    #         for k, v in iter_scalar_metrics(metrics_fixed):
-    #             print(f"  {k}: {v:.4f}")
-
-    #         cm_fixed = metrics_fixed.get("confusion_matrix", None)
-    #         if cm_fixed is not None:
-    #             print("  confusion_matrix:")
-    #             print(np.array(cm_fixed))
-
-    #         # ---- (B) 使用 val best_threshold ----
-    #         metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
-    #         if metrics_valbest is not None:
-    #             print(f"\n[Test {split_idx}] Using val best_threshold={float(best_threshold):.4f} metrics:")
-    #             for k, v in iter_scalar_metrics(metrics_valbest):
-    #                 print(f"  {k}: {v:.4f}")
-
-    #             cm_valbest = metrics_valbest.get("confusion_matrix", None)
-    #             if cm_valbest is not None:
-    #                 print("  confusion_matrix:")
-    #                 print(np.array(cm_valbest))
-
-    #         # ---- (C) Sweep：优先使用 best_threshold 下的指标 ----
-    #         metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
-
-    #         if best_thr_test is not None and "metrics_at_best" in res_sweep:
-    #             print(f"\n[Test {split_idx}] Sweep on test metrics (best threshold={float(best_thr_test):.4f}):")
-    #         else:
-    #             print(f"\n[Test {split_idx}] Sweep on test metrics (base threshold={float(task_sweep.threshold):.4f}):")
-
-    #         for k, v in iter_scalar_metrics(metrics_sweep):
-    #             print(f"  {k}: {v:.4f}")
-
-    #         cm_sweep = metrics_sweep.get("confusion_matrix", None)
-    #         if cm_sweep is not None:
-    #             print("  confusion_matrix:")
-    #             print(np.array(cm_sweep))
-
-    #         if best_thr_test is not None:
-    #             print(f"[Test {split_idx}] Best threshold on test (from sweep) = {float(best_thr_test):.4f}")
-    #         else:
-    #             print(f"[Test {split_idx}] No best_threshold from sweep (unexpected if do_threshold_sweep=True).")
-
-    #         # ---- 如启用 WandB，把 test 的标量 metrics 也写入 summary ----
-    #         if wandb_run is not None:
-    #             prefix = f"test/{split_idx}"
-    #             # 固定 0.5
-    #             for k, v in iter_scalar_metrics(metrics_fixed):
-    #                 wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
-    #             # val best
-    #             if metrics_valbest is not None:
-    #                 for k, v in iter_scalar_metrics(metrics_valbest):
-    #                     wandb_run.summary[f"{prefix}_valbest/{k}"] = v
-    #             # sweep：记录 best-threshold 对应的 metrics
-    #             for k, v in iter_scalar_metrics(metrics_sweep):
-    #                 wandb_run.summary[f"{prefix}_sweep/{k}"] = v
-    #             if best_thr_test is not None:
-    #                 try:
-    #                     wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
-    #                 except (TypeError, ValueError):
-    #                     pass
     # ============================================================
     # 额外：可选地在训练结束后，直接对 test 集做评估
     # - 可以选择用 last 权重（当前 trainer 状态）

@@ -52,8 +52,10 @@ from tqdm import tqdm
 
 from omegaconf import DictConfig
 
-from src.evaluator.metrics import compute_metrics  # 你的统一评测函数
+from src.evaluator.metrics import compute_metrics  # 统一评测函数
 
+from src.utils.efficiency import EffMeter
+import time
 
 # ----------------------- #
 # 训练状态对象
@@ -490,22 +492,11 @@ class Trainer:
         """
         _log_metrics
         ============
-        内部统一的 metrics 上报入口。
+        内部统一的 metrics 上报入口（WandB/TensorBoard/自定义 logger 兼容）。
 
-        行为
-        ----
-        - 若 self.logger 为 None，则什么都不做；
-        - 若 logger 有 .log_metrics(...) 方法，则调用：
-            logger.log_metrics(metrics, step=step, prefix=f"{stage}/")
-        - 否则若 logger 有 .log(...) 方法，则调用：
-            logger.log({f"{stage}/{k}": v for k,v in metrics.items()}, step=step)
-
-        注意
-        ----
-        - 这个函数只在 epoch 级别调用：
-            * train_one_epoch 结束后  → stage="train"
-            * validate_one_epoch 结束后 → stage="val"
-        - step 默认为 self.state.global_step（即迄今为止的总优化步数）。
+        - 自动过滤非标量项（list/dict/ndarray/多元素 tensor 等）
+        - 自动兼容 numpy 标量、torch 标量 tensor
+        - 统一将标量转为 Python float，避免 wandb 序列化问题
         """
         if self.logger is None:
             return
@@ -513,26 +504,72 @@ class Trainer:
         if step is None:
             step = self.state.global_step
 
-        # 给 metrics 加上 stage 前缀
-        prefixed = {f"{stage}/{k}": float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+        # --------- helper: 安全地把 v 转成 float，不能转则返回 None --------- #
+        def _to_float(v):
+            # 延迟 import，避免在无 numpy/torch 环境下报错
+            try:
+                import numpy as np  # type: ignore
+            except Exception:
+                np = None
 
+            try:
+                import torch  # type: ignore
+            except Exception:
+                torch = None
+
+            # 跳过明显复杂类型
+            if isinstance(v, (list, dict, tuple, set)):
+                return None
+
+            # numpy ndarray 不是标量
+            if np is not None and isinstance(v, np.ndarray):
+                return None
+
+            # torch tensor：只接受单元素
+            if torch is not None and torch.is_tensor(v):
+                if v.numel() != 1:
+                    return None
+                v = v.detach().item()
+
+            # numpy 标量 -> Python 标量
+            if np is not None and isinstance(v, np.generic):
+                v = v.item()
+
+            # 最后兜底：能 float(...) 的都认为是标量
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        # 给 metrics 加 stage 前缀（只保留可转 float 的标量）
+        prefixed = {}
+        for k, v in metrics.items():
+            vf = _to_float(v)
+            if vf is None:
+                continue
+            prefixed[f"{stage}/{k}"] = vf
+
+        if not prefixed:
+            return
+
+        # 如果 logger 提供 log_metrics，就用它（会让 logger 自己处理 prefix）
         if hasattr(self.logger, "log_metrics"):
             try:
-                # logger.log_metrics 允许自己处理 prefix，这里直接传原始 metrics
-                self.logger.log_metrics(metrics, step=step, prefix=f"{stage}/")
+                # 注意：这里给的是“未加前缀”的 metrics + prefix 参数
+                # 但 metrics 可能含非标量，容易让 logger 自己炸。
+                # 更稳妥：传 prefixed 并不带 prefix。
+                self.logger.log_metrics(prefixed, step=step)
                 return
             except TypeError:
-                # 如果签名不匹配，就退回到 log 接口
                 pass
 
+        # 否则走 logger.log（wandb_run 就是这个）
         if hasattr(self.logger, "log"):
-            # 常见的是 WandB 的 run.log(...)
             try:
                 self.logger.log(prefixed, step=step)
-                return
             except TypeError:
-                # 有些 logger.log 不接受 step 参数，就只传数据
                 self.logger.log(prefixed)
+
 
     # --------- 构建 optimizer / scheduler / loss --------- #
 
@@ -732,52 +769,6 @@ class Trainer:
         """
         return isinstance(batch, dict) and ("tokens" in batch)
 
-    # def _binary_focal_loss(
-    #     self,
-    #     logits: torch.Tensor,
-    #     labels: torch.Tensor,
-    #     sample_weight: torch.Tensor = None,
-    # ) -> torch.Tensor:
-    #     """
-    #     Binary Focal Loss，支持 soft label（用于配合 label smoothing）。
-
-    #     参数
-    #     ----
-    #     logits : (N,)
-    #     labels : (N,)  已经做过 label smoothing 的 target（在 [0,1]）
-    #     """
-    #     logits = logits.view(-1)
-    #     labels = labels.view(-1)
-
-    #     gamma = float(getattr(self.train_cfg, "focal_gamma", 2.0))
-    #     alpha = float(getattr(self.train_cfg, "focal_alpha", 0.25))
-
-    #     # 概率 p = sigmoid(logit)
-    #     p = torch.sigmoid(logits)
-
-    #     # 对“目标类别”的概率 p_t：
-    #     # 对于 hard label: p_t = p (y=1), 1-p (y=0)
-    #     # 这里 labels 可能是 soft（smoothing 后），做一个线性插值版本：
-    #     p_t = p * labels + (1.0 - p) * (1.0 - labels)
-
-    #     # alpha_t 同理，用 soft label 做插值
-    #     alpha_t = alpha * labels + (1.0 - alpha) * (1.0 - labels)
-
-    #     eps = 1e-8
-    #     # 基础 CE（用 soft label）
-    #     ce = -(
-    #         labels * torch.log(p.clamp(min=eps))
-    #         + (1.0 - labels) * torch.log((1.0 - p).clamp(min=eps))
-    #     )
-
-    #     focal_factor = alpha_t * (1.0 - p_t).pow(gamma)
-    #     loss = focal_factor * ce
-
-    #     if sample_weight is not None:
-    #         sample_weight = sample_weight.view_as(loss)
-    #         loss = loss * sample_weight
-
-    #     return loss.mean()
 
 
     def _binary_focal_loss(
@@ -1105,14 +1096,130 @@ class Trainer:
 
     # --------- 训练 --------- #
 
+    # def train_one_epoch(self, loader: DataLoader) -> Dict[str, float]:
+    #     """
+    #     单个 epoch 训练。
+
+    #     返回
+    #     ----
+    #     {"loss": avg_loss, "lr": current_lr}
+    #     """
+    #     self.model.train()
+    #     total_loss = 0.0
+    #     num_samples = 0
+
+    #     mil_reduction = getattr(self.run_cfg, "train_reduction", "none")
+    #     mil_temperature = float(getattr(self.run_cfg, "train_softmax_temp", 1.0))
+    #     mil_topk = int(getattr(self.run_cfg, "train_topk", 3))
+
+
+    #     for batch in tqdm(loader, desc=f"Train epoch {self.state.epoch}"):
+
+    #         # 1) 先解包出 x, y, set_idx（兼容所有数据格式）
+    #         x, y, set_idx = self._unpack_batch(batch)
+    #         esa_scores = self._last_esa_scores
+
+    #         # 2) 检查是否为 pair-level 模式
+    #         is_pair_level = self._is_pair_level_batch(batch)
+            
+    #         # pair-level 模式不需要 ESA weighting；确保不要误开
+    #         if is_pair_level:
+    #             self._current_sample_weight = None
+    #             # 即便 train.esa_weighting=True，这里也不走 ESA 权重逻辑
+    #         else:
+    #             # 只有在非 pair-level 模式下才允许 ESA weighting
+    #             # ✅ 若打开 ESA weighting，但 batch 里没有 esa_scores，直接报错，避免悄悄变成 no-op
+    #             if bool(getattr(self.train_cfg, "esa_weighting", False)) and esa_scores is None:
+    #                 raise RuntimeError(
+    #                     "train.esa_weighting=True 但 batch 中没有 'esa_scores' 字段。\n"
+    #                     "请检查：Dataset.__getitem__ 是否返回 esa，collate_fn 是否把 esa 汇总进 batch，"
+    #                     "以及 _unpack_batch 中对 'esa_scores' 的处理。"
+    #                 )
+
+
+    #         self.optimizer.zero_grad(set_to_none=True)
+
+    #         with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+
+    #             # 3) 前向：根据 batch 类型决定是否传入 mask / pos
+    #             if is_pair_level:
+    #                 # 从 batch 中取出 mask / pos
+    #                 mask = batch["mask"].to(self.device, non_blocking=True)
+    #                 pos = batch.get("pos", None)
+    #                 if pos is not None:
+    #                     pos = pos.to(self.device, non_blocking=True)
+    #                 logits = self.model(x, attn_mask=mask, pos=pos)  # [B]
+    #             else:
+    #                 logits = self.model(x)  # 旧模型（window-level）
+    #             # logits = self.model(x)   # window-level logits, shape ~ (N, 1) or (N,)
+
+    #             # 4) MIL 聚合（pair-level 本身就是 bag 级别，通常不需要再聚）
+    #             # ====== MIL聚合(可选) ====== #
+    #             if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
+    #                 logits_for_loss, labels_for_loss = self._apply_mil_reduction(
+    #                     logits=logits,
+    #                     labels=y,
+    #                     set_idx=set_idx,
+    #                     reduction=mil_reduction,
+    #                     temperature=mil_temperature,
+    #                     topk=mil_topk,
+    #                 )
+    #                 # 当前 Stage 0.x 专注 window-wise，bag-level 暂不加 ESA 权重 
+    #                 esa_for_loss = None
+    #             else:
+    #                 # pair-level 直接用 pair 级 logits / labels
+    #                 logits_for_loss, labels_for_loss = logits, y
+    #                 esa_for_loss = None if is_pair_level else esa_scores
+
+    #             # 5) ESA-aware per-window weighting（仅 window-level 使用）
+    #             # ====== ESA-aware per-window weighting（Stage 0.3） ====== #
+    #             use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
+    #             if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
+    #                 self._current_sample_weight = self._compute_esa_sample_weight(
+    #                     esa_for_loss, labels_for_loss
+    #                 )
+    #             else:
+    #                 self._current_sample_weight = None
+
+    #             loss = self._compute_loss(logits_for_loss, labels_for_loss)
+
+    #         self.scaler.scale(loss).backward()
+
+    #         if self.grad_clip is not None:
+    #             self.scaler.unscale_(self.optimizer)
+    #             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+    #         self.scaler.step(self.optimizer)
+    #         self.scaler.update()
+
+    #         # EMA 更新
+    #         if self.ema is not None:
+    #             self.ema.update(self.model)
+
+    #         bs = logits.shape[0]
+    #         total_loss += loss.item() * bs
+    #         num_samples += bs
+    #         self.state.global_step += 1
+
+    #     avg_loss = total_loss / max(1, num_samples)
+    #     # 记录当前学习率（使用第一个 param_group）
+    #     current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
+
+    #     metrics = {"loss": avg_loss, "lr": current_lr}
+    #     # 将 train metrics 上报给 logger
+    #     self._log_metrics(metrics, stage="train", step=self.state.global_step)
+    #     return metrics
+
+
     def train_one_epoch(self, loader: DataLoader) -> Dict[str, float]:
         """
         单个 epoch 训练。
-
-        返回
-        ----
-        {"loss": avg_loss, "lr": current_lr}
+        返回 {"loss": avg_loss, "lr": current_lr, ...optional efficiency metrics...}
         """
+        profile_eff = bool(getattr(self.run_cfg, "profile_eff", False))
+        warmup_epochs = int(getattr(self.run_cfg, "profile_warmup_epochs", 1))
+        do_profile = profile_eff and (self.state.epoch >= warmup_epochs)
+
         self.model.train()
         total_loss = 0.0
         num_samples = 0
@@ -1121,49 +1228,154 @@ class Trainer:
         mil_temperature = float(getattr(self.run_cfg, "train_softmax_temp", 1.0))
         mil_topk = int(getattr(self.run_cfg, "train_topk", 3))
 
+        # -------------------------
+        # (A) 默认路径：保持你现有行为不变
+        # -------------------------
+        if not do_profile:
+            for batch in tqdm(loader, desc=f"Train epoch {self.state.epoch}"):
 
-        for batch in tqdm(loader, desc=f"Train epoch {self.state.epoch}"):
+                x, y, set_idx = self._unpack_batch(batch)
+                esa_scores = self._last_esa_scores
+                is_pair_level = self._is_pair_level_batch(batch)
 
-            # 1) 先解包出 x, y, set_idx（兼容所有数据格式）
+                if is_pair_level:
+                    self._current_sample_weight = None
+                else:
+                    if bool(getattr(self.train_cfg, "esa_weighting", False)) and esa_scores is None:
+                        raise RuntimeError(
+                            "train.esa_weighting=True 但 batch 中没有 'esa_scores' 字段。\n"
+                            "请检查 Dataset/collate/_unpack_batch。"
+                        )
+
+                self.optimizer.zero_grad(set_to_none=True)
+
+                with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+                    if is_pair_level:
+                        mask = batch["mask"].to(self.device, non_blocking=True)
+                        pos = batch.get("pos", None)
+                        if pos is not None:
+                            pos = pos.to(self.device, non_blocking=True)
+                        logits = self.model(x, attn_mask=mask, pos=pos)
+                    else:
+                        logits = self.model(x)
+
+                    if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
+                        logits_for_loss, labels_for_loss = self._apply_mil_reduction(
+                            logits=logits,
+                            labels=y,
+                            set_idx=set_idx,
+                            reduction=mil_reduction,
+                            temperature=mil_temperature,
+                            topk=mil_topk,
+                        )
+                        esa_for_loss = None
+                    else:
+                        logits_for_loss, labels_for_loss = logits, y
+                        esa_for_loss = None if is_pair_level else esa_scores
+
+                    use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
+                    if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
+                        self._current_sample_weight = self._compute_esa_sample_weight(
+                            esa_for_loss, labels_for_loss
+                        )
+                    else:
+                        self._current_sample_weight = None
+
+                    loss = self._compute_loss(logits_for_loss, labels_for_loss)
+
+                self.scaler.scale(loss).backward()
+
+                if self.grad_clip is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+                if self.ema is not None:
+                    self.ema.update(self.model)
+
+                bs = logits.shape[0]
+                total_loss += loss.item() * bs
+                num_samples += bs
+                self.state.global_step += 1
+
+            avg_loss = total_loss / max(1, num_samples)
+            current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
+            metrics = {"loss": avg_loss, "lr": current_lr}
+            self._log_metrics(metrics, stage="train", step=self.state.global_step)
+            return metrics
+
+        # -------------------------
+        # (B) Profiling 路径：测效率，不强制每步 synchronize（用 CUDA events）
+        # -------------------------
+        meter = EffMeter(device=self.device, enabled=True)
+        meter.reset_epoch()
+
+        t_epoch0 = time.perf_counter()
+
+        it = iter(loader)
+        pbar = tqdm(total=len(loader), desc=f"Train epoch {self.state.epoch} [profile]")
+        while True:
+            # (1) data fetch wait time
+            t0 = time.perf_counter()
+            try:
+                batch = next(it)
+            except StopIteration:
+                break
+            t1 = time.perf_counter()
+            meter.record_data_fetch(t1 - t0)
+
+            # (2) H2D timing (CUDA events)
+            is_pair_level = self._is_pair_level_batch(batch)
+
+            h2d_s = h2d_e = None
+            if self.device.type == "cuda":
+                h2d_s = torch.cuda.Event(enable_timing=True)
+                h2d_e = torch.cuda.Event(enable_timing=True)
+                h2d_s.record()
+
             x, y, set_idx = self._unpack_batch(batch)
             esa_scores = self._last_esa_scores
 
-            # 2) 检查是否为 pair-level 模式
-            is_pair_level = self._is_pair_level_batch(batch)
-            
-            # pair-level 模式不需要 ESA weighting；确保不要误开
+            # pair-level 的 mask/pos 也算进 H2D
+            mask = None
+            pos = None
+            if is_pair_level:
+                mask = batch["mask"].to(self.device, non_blocking=True)
+                pos = batch.get("pos", None)
+                if pos is not None:
+                    pos = pos.to(self.device, non_blocking=True)
+
+            if self.device.type == "cuda":
+                h2d_e.record()
+                meter.record_h2d_events(h2d_s, h2d_e)
+
+            # ESA weighting 检查（与原逻辑一致）
             if is_pair_level:
                 self._current_sample_weight = None
-                # 即便 train.esa_weighting=True，这里也不走 ESA 权重逻辑
             else:
-                # 只有在非 pair-level 模式下才允许 ESA weighting
-                # ✅ 若打开 ESA weighting，但 batch 里没有 esa_scores，直接报错，避免悄悄变成 no-op
                 if bool(getattr(self.train_cfg, "esa_weighting", False)) and esa_scores is None:
                     raise RuntimeError(
                         "train.esa_weighting=True 但 batch 中没有 'esa_scores' 字段。\n"
-                        "请检查：Dataset.__getitem__ 是否返回 esa，collate_fn 是否把 esa 汇总进 batch，"
-                        "以及 _unpack_batch 中对 'esa_scores' 的处理。"
+                        "请检查 Dataset/collate/_unpack_batch。"
                     )
-
 
             self.optimizer.zero_grad(set_to_none=True)
 
+            # (3) compute timing (CUDA events)
+            comp_s = comp_e = None
+            if self.device.type == "cuda":
+                comp_s = torch.cuda.Event(enable_timing=True)
+                comp_e = torch.cuda.Event(enable_timing=True)
+                comp_s.record()
+
             with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-
-                # 3) 前向：根据 batch 类型决定是否传入 mask / pos
                 if is_pair_level:
-                    # 从 batch 中取出 mask / pos
-                    mask = batch["mask"].to(self.device, non_blocking=True)
-                    pos = batch.get("pos", None)
-                    if pos is not None:
-                        pos = pos.to(self.device, non_blocking=True)
-                    logits = self.model(x, attn_mask=mask, pos=pos)  # [B]
+                    logits = self.model(x, attn_mask=mask, pos=pos)
                 else:
-                    logits = self.model(x)  # 旧模型（window-level）
-                # logits = self.model(x)   # window-level logits, shape ~ (N, 1) or (N,)
+                    logits = self.model(x)
 
-                # 4) MIL 聚合（pair-level 本身就是 bag 级别，通常不需要再聚）
-                # ====== MIL聚合(可选) ====== #
                 if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
                     logits_for_loss, labels_for_loss = self._apply_mil_reduction(
                         logits=logits,
@@ -1173,15 +1385,11 @@ class Trainer:
                         temperature=mil_temperature,
                         topk=mil_topk,
                     )
-                    # 当前 Stage 0.x 专注 window-wise，bag-level 暂不加 ESA 权重 
                     esa_for_loss = None
                 else:
-                    # pair-level 直接用 pair 级 logits / labels
                     logits_for_loss, labels_for_loss = logits, y
                     esa_for_loss = None if is_pair_level else esa_scores
 
-                # 5) ESA-aware per-window weighting（仅 window-level 使用）
-                # ====== ESA-aware per-window weighting（Stage 0.3） ====== #
                 use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
                 if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
                     self._current_sample_weight = self._compute_esa_sample_weight(
@@ -1201,23 +1409,51 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            # EMA 更新
             if self.ema is not None:
                 self.ema.update(self.model)
+
+            if self.device.type == "cuda":
+                comp_e.record()
+                meter.record_compute_events(comp_s, comp_e)
+
+            meter.update_peak_cpu()
 
             bs = logits.shape[0]
             total_loss += loss.item() * bs
             num_samples += bs
             self.state.global_step += 1
 
+            pbar.update(1)
+
+        pbar.close()
+
+        # epoch wall: 需要等 GPU 完成（只 synchronize 一次）
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        epoch_wall = time.perf_counter() - t_epoch0
+
+        meter.finalize_epoch(epoch_wall_s=epoch_wall, sync=False)
+        eff = meter.to_dict()
+
         avg_loss = total_loss / max(1, num_samples)
-        # 记录当前学习率（使用第一个 param_group）
         current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
 
-        metrics = {"loss": avg_loss, "lr": current_lr}
-        # 将 train metrics 上报给 logger
+        # 这些 key 可直接填表：epoch_wall_s / peak_vram_gb / data_overhead_pct
+        metrics = {
+            "loss": avg_loss,
+            "lr": current_lr,
+            "eff_epoch_wall_s": eff["epoch_wall_s"],
+            "eff_peak_vram_gb": eff["peak_vram_gb"],
+            "eff_peak_cpu_rss_gb": eff["peak_cpu_rss_gb"],
+            "eff_data_overhead_pct": eff["data_overhead_pct"],
+            # 可选：你想 debug 时再看
+            "eff_data_fetch_s": eff["data_fetch_s"],
+            "eff_h2d_s": eff["h2d_s"],
+            "eff_compute_s": eff["compute_s"],
+        }
         self._log_metrics(metrics, stage="train", step=self.state.global_step)
         return metrics
+
 
     # --------- 验证（含 metrics + set-level 聚合） --------- #
 
@@ -1422,6 +1658,103 @@ class Trainer:
                 "logits": logits,
                 "labels": labels,
                 "set_idx": set_idx,
+            }
+
+
+    @torch.no_grad()
+    def benchmark_inference(
+        self,
+        loader: DataLoader,
+        use_ema: bool = True,
+        warmup_batches: int = 10,
+        max_batches: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """
+        End-to-end inference throughput (pairs/s), including data loading + H2D + forward.
+        """
+        self._current_sample_weight = None
+        self._last_esa_scores = None
+
+        ctx = self.ema.swap_parameters(self.model) if (use_ema and self.ema is not None) else _nullcontext()
+        with ctx:
+            self.model.eval()
+
+            meter = EffMeter(device=self.device, enabled=True)
+            meter.reset_epoch()
+
+            if self.device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(self.device)
+
+            it = iter(loader)
+
+            # warmup
+            n_seen = 0
+            for _ in range(warmup_batches):
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    break
+                x, y, _ = self._unpack_batch(batch)
+                is_pair_level = self._is_pair_level_batch(batch)
+                if is_pair_level:
+                    mask = batch["mask"].to(self.device, non_blocking=True)
+                    pos = batch.get("pos", None)
+                    if pos is not None:
+                        pos = pos.to(self.device, non_blocking=True)
+                    _ = self.model(x, attn_mask=mask, pos=pos)
+                else:
+                    _ = self.model(x)
+
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+
+            # measure
+            import time
+            t0 = time.perf_counter()
+            total_pairs = 0
+
+            while True:
+                if max_batches is not None and n_seen >= max_batches:
+                    break
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    break
+
+                x, y, _ = self._unpack_batch(batch)
+                is_pair_level = self._is_pair_level_batch(batch)
+
+                with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+                    if is_pair_level:
+                        mask = batch["mask"].to(self.device, non_blocking=True)
+                        pos = batch.get("pos", None)
+                        if pos is not None:
+                            pos = pos.to(self.device, non_blocking=True)
+                        _ = self.model(x, attn_mask=mask, pos=pos)
+                    else:
+                        _ = self.model(x)
+
+                total_pairs += int(y.numel())
+                n_seen += 1
+                meter.update_peak_cpu()
+
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            t1 = time.perf_counter()
+
+            elapsed = max(t1 - t0, 1e-9)
+            pairs_per_s = float(total_pairs / elapsed)
+
+            peak_vram_gb = 0.0
+            if self.device.type == "cuda":
+                peak_vram_gb = float(torch.cuda.max_memory_allocated(self.device) / (1024 ** 3))
+
+            return {
+                "infer_pairs_per_s": pairs_per_s,
+                "infer_peak_vram_gb": peak_vram_gb,
+                "infer_peak_cpu_rss_gb": float(meter.stats.peak_cpu_rss_gb),
+                "infer_elapsed_s": float(elapsed),
+                "infer_total_pairs": float(total_pairs),
             }
 
 

@@ -4,7 +4,7 @@ import bisect
 import gc
 import numpy as np
 
-from typing import Dict, List, Tuple, Sequence
+from typing import Dict, List, Tuple, Sequence, Optional
 import os
 
 import torch
@@ -49,6 +49,8 @@ class PairLevelDataset(Dataset):
         selection_mode: str = "topk_logit",
         pos_in_token: bool = True,
         order_mode: str = "original",    # "score" 或 "original"
+        random_order_seed: int = 12345,
+        random_select_seed: Optional[int] = None,  # 若为 None，则保持 legacy random 行为（非确定性）
     ):
         super().__init__()
 
@@ -58,6 +60,9 @@ class PairLevelDataset(Dataset):
         self.selection_mode = selection_mode
         self.pos_in_token = bool(pos_in_token)
         self.order_mode = order_mode
+
+        self.random_order_seed = int(random_order_seed)
+        self.random_select_seed = None if random_select_seed is None else int(random_select_seed)
 
         # -------- 只支持“分 shard 模式” --------
         meta_path = os.path.join(cache_root, f"{split}_meta.json")
@@ -136,6 +141,8 @@ class PairLevelDataset(Dataset):
         self,
         logits: torch.Tensor,
         esa: torch.Tensor,
+        pos_full: Optional[torch.Tensor] = None,
+        pair_id: Optional[int] = None,
     ) -> torch.Tensor:
         """
         根据 selection_mode，在 [0, N-1] 中选择若干 index，最多 max_cts_per_pair 个。
@@ -153,26 +160,48 @@ class PairLevelDataset(Dataset):
             raise ValueError("[PairLevelDataset] Encountered pair with 0 CTS.")
 
         k = min(N, self.max_cts_per_pair)
-
         mode = self.selection_mode
+
         if mode == "topk_logit":
             scores = logits
-        elif mode == "topk_abs_logit":
-            scores = logits.abs()
-        elif mode == "topk_esa":
-            scores = esa
-        elif mode == "random":
-            perm = torch.randperm(N)
-            return perm[:k]
-        else:
-            raise ValueError(
-                f"[PairLevelDataset] Unknown selection_mode='{mode}'. "
-                f"支持: topk_logit, topk_abs_logit, topk_esa, random."
-            )
+            _, idx = torch.topk(scores, k=k, largest=True, sorted=True)
+            return idx
 
-        # torch.topk 会自动处理 k <= N
-        _, idx = torch.topk(scores, k=k, largest=True, sorted=True)
-        return idx
+        if mode == "topk_abs_logit":
+            scores = logits.abs()
+            _, idx = torch.topk(scores, k=k, largest=True, sorted=True)
+            return idx
+
+        if mode == "topk_esa":
+            scores = esa
+            _, idx = torch.topk(scores, k=k, largest=True, sorted=True)
+            return idx
+
+        # NEW: all + truncate = 不过滤，只截断前 k 个（保持 cache 原始顺序）
+        if mode == "all_truncate":
+            if pos_full is None:
+                return torch.arange(k, dtype=torch.long)
+            idx_pos = torch.argsort(pos_full)
+            return idx_pos[:k].to(torch.long)
+
+        # legacy random: 旧行为为非确定性 randperm
+        if mode == "random":
+            if self.random_select_seed is None:
+                perm = torch.randperm(N)
+            else:
+                # 仅当显式给出 random_select_seed 时才启用确定性随机（不影响旧默认）
+                if pair_id is None:
+                    raise ValueError("[PairLevelDataset] random_select_seed is set but pair_id is None.")
+                g = torch.Generator()
+                g.manual_seed(self.random_select_seed + int(pair_id))
+                perm = torch.randperm(N, generator=g)
+            return perm[:k]
+
+        raise ValueError(
+            f"[PairLevelDataset] Unknown selection_mode='{mode}'. "
+            f"支持: topk_logit, topk_abs_logit, topk_esa, all_truncate, random."
+        )
+    
 
     def _get_entry_by_index_chunked(self, idx: int) -> Tuple[int, Dict[str, torch.Tensor]]:
         """
@@ -257,7 +286,9 @@ class PairLevelDataset(Dataset):
                 pos_full = torch.linspace(0.0, 1.0, steps=N, dtype=torch.float32)
 
         # ---------- 选取 M 个 CTS ----------
-        idx_keep = self._select_indices(logits, esa)   # [M]
+        # idx_keep = self._select_indices(logits, esa, pair_id=pair_id)  # [M]
+        idx_keep = self._select_indices(logits, esa, pos_full=pos_full, pair_id=pair_id)
+
 
         if self.order_mode == "original":
             pos_sub = pos_full[idx_keep]              # [M]
@@ -266,11 +297,29 @@ class PairLevelDataset(Dataset):
             pos_sel = sort_pos
         elif self.order_mode == "score":
             pos_sel = pos_full[idx_keep]
+        elif self.order_mode == "random":
+            # NEW: deterministic shuffle of selected CTS order (sanity check)
+            M = int(idx_keep.numel())
+            g = torch.Generator()
+            g.manual_seed(self.random_order_seed + int(pair_id))
+            perm = torch.randperm(M, generator=g)
+            idx_keep = idx_keep[perm]
+            pos_sel = pos_full[idx_keep]
+        elif self.order_mode in ("score_logit", "logit"):
+            # NEW: reorder selected CTS by logits (descending) using topk for consistency
+            # (does NOT change legacy 'score' behavior; use this mode explicitly in ablations)
+            scores_sub = logits[idx_keep]
+            local = torch.argsort(scores_sub, descending=True)
+            idx_keep = idx_keep[local]
+            pos_sel = pos_full[idx_keep]
+
+
         else:
             raise ValueError(
                 f"[PairLevelDataset] Unknown order_mode='{self.order_mode}'. "
-                f"支持: 'score', 'original'."
+                f"支持: 'score', 'original', 'random', 'score_logit'."
             )
+
 
         emb = emb[idx_keep]                          # [M, d_emb]
         logits_sel = logits[idx_keep].unsqueeze(-1)  # [M, 1]

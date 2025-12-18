@@ -246,6 +246,8 @@ def build_pair_level_dataset_and_loader(
         selection_mode=pair_cfg.selection_mode,
         pos_in_token=pair_cfg.pos_in_token,
         order_mode=pair_cfg.order_mode,
+        random_order_seed=pair_cfg.random_order_seed,
+        random_select_seed=pair_cfg.random_select_seed,
     )
 
     sampler = PairLevelChunkBatchSampler(

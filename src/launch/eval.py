@@ -202,6 +202,7 @@ def main(cfg: DictConfig):
         train_cfg=cfg.train,
         run_cfg=cfg.run,
         device=device,
+        logger=wandb_run,
     )
 
     # checkpoint 必须指定

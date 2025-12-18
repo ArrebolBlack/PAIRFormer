@@ -93,7 +93,10 @@ data:
 
     # 选择哪些 miRNA-CTS token
     selection_mode: topk_logit       # [topk_logit, topk_abs_logit, topk_esa, random]
-    order_mode: score                # [score, original]
+    order_mode: score                # [score, original, random]
+    random_order_seed: 12345
+    random_select_seed: 23456
+
 
     # 位置是否直接拼进 token：
     pos_in_token: true               # true: token 最后一维是 pos；false: pos 单独传给模型
