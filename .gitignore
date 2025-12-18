@@ -28,6 +28,7 @@ logs/
 *.out
 
 # 数据文件（按自己需求调整）
+# ignore everything under data
 data/**
 !data/miRAW_Test0.txt
 !data/miRAW_Test1.txt
@@ -43,5 +44,11 @@ data/**
 !data/miRAW_Train_Validation.txt
 !data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
 !data/miRAW_Test_0,6-9.txt
+
+
+# re-include these directories (directory itself first!)
+!data/DeepMirTar/
 !data/DeepMirTar/**
+
+!data/deepTargetPro/
 !data/deepTargetPro/**
