@@ -28,7 +28,7 @@ logs/
 *.out
 
 # 数据文件（按自己需求调整）
-# data/**
+data/**
 !data/miRAW_Test0.txt
 !data/miRAW_Test1.txt
 !data/miRAW_Test2.txt
