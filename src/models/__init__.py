@@ -8,3 +8,4 @@ from . import TargetNet_Optimized  # noqa: F401
 from . import my_transformer       # noqa: F401
 from . import TargetNet_transformer       # noqa: F401
 from . import PairTransformerAggregator
+from . import pair_maxpool_cache  # noqa: F401

@@ -61,6 +61,31 @@ from src.models.TargetNet_Optimized import TargetNet_Optimized
 from src.models.TargetNet_transformer import TargetNetTransformer1D
 
 
+import os
+import time
+import json
+import subprocess
+import psutil
+import torch
+
+
+def get_total_rss_bytes(proc: psutil.Process) -> int:
+    """Main process + all (recursive) children RSS."""
+    total = 0
+    try:
+        total += proc.memory_info().rss
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0
+
+    for child in proc.children(recursive=True):
+        try:
+            total += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return total
+
+
+
 # =================================================
 #  Argument parsing
 # =================================================
@@ -444,6 +469,9 @@ def dump_split(
         ...
       ]
     """
+    global peak_rss
+
+
     print(f"\n===== Dumping split: {split} =====")
 
     # ---- 构建 DataConfig ----
@@ -629,6 +657,13 @@ def dump_split(
             if (batch_idx + 1) % 50 == 0:
                 print(f"  [dump_split:{split}] Processed {(batch_idx + 1) * B} samples...")
 
+            if (batch_idx + 1) % 10 == 0:
+                rss = get_total_rss_bytes(proc)
+                peak_rss = max(peak_rss, rss)
+
+
+
+
         # 所有 batch 结束，flush 最后一个 pair
         flush_current_pair()
 
@@ -656,11 +691,20 @@ def dump_split(
     print(f"[dump_split:{split}] Shards written   : {len(shard_meta)}")
 
 
+
+
+
 # =================================================
 #  Main
 # =================================================
 
 def main():
+
+    global t0, proc, peak_rss
+    t0 = time.perf_counter()
+    proc = psutil.Process(os.getpid())
+    peak_rss = 0
+    
     args = parse_args()
 
     model_cfg = OmegaConf.load(args.config)
@@ -671,7 +715,12 @@ def main():
         data_cfg_root = model_cfg
 
     device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        torch.cuda.reset_peak_memory_stats()
+
     model = load_model(model_cfg, args.checkpoint, device)
+
 
     model_arch = getattr(model, "_registry_name", model.__class__.__name__)
 
@@ -751,6 +800,26 @@ def main():
             dump_score_mode=args.dump_score_mode,
             max_pairs_per_shard=args.max_pairs_per_shard,
         )
+
+    elapsed_s = time.perf_counter() - t0
+    peak_cpu_gb = peak_rss / (1024 ** 3)
+
+    peak_vram_gb = 0.0
+    if torch.cuda.is_available():
+        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+
+    # out_root = 你 dump 输出目录（pair_cache/...）
+    du_bytes = int(subprocess.check_output(["du", "-sb", str(out_root)]).split()[0])
+    disk_gb = du_bytes / (1024 ** 3)
+
+    summary = {
+        "dump_elapsed_min": elapsed_s / 60.0,
+        "dump_peak_vram_gb": peak_vram_gb,
+        "dump_peak_cpu_rss_gb": peak_cpu_gb,
+        "dump_disk_gb": disk_gb,
+        "dump_out_root": str(out_root),
+    }
+    print("[EFF_BREAKDOWN_DUMP]", json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

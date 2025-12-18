@@ -1452,6 +1452,18 @@ class Trainer:
             "eff_compute_s": eff["compute_s"],
         }
         self._log_metrics(metrics, stage="train", step=self.state.global_step)
+        
+        # 新增：按 epoch 记录（仅为效率分析更好用）
+        # 在 W&B UI 里把 x-axis 选为 train_epoch/epoch 即可
+        metrics_epoch = {
+            "epoch": int(self.state.epoch),
+            "eff_epoch_wall_s": eff["epoch_wall_s"],
+            "eff_peak_vram_gb": eff["peak_vram_gb"],
+            "eff_peak_cpu_rss_gb": eff["peak_cpu_rss_gb"],
+            "eff_data_overhead_pct": eff["data_overhead_pct"],
+        }
+        self._log_metrics(metrics_epoch, stage="train_epoch", step=self.state.global_step)
+
         return metrics
 
 

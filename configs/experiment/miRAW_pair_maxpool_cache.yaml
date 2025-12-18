@@ -1,0 +1,24 @@
+# @package _global_
+# configs/experiment/miRAW_pair_maxpool_cache.yaml
+
+defaults:
+  - miRAW_pair_agg_baseline
+  - _self_
+
+experiment:
+  name: miRAW_pair_maxpool_cache
+  task: pair_level_train
+
+model:
+  arch: PairMaxPoolCache
+  name: pair_maxpool_cache
+
+  # 关键：pos_in_token=true -> -3；pos_in_token=false -> -2
+  logit_index: -3
+  affine_init_scale: 1.0
+  affine_init_bias: 0.0
+
+train:
+  lr: 0.0
+  weight_decay: 0.0
+  adam_weight_decay: 0.0
