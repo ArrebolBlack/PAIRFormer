@@ -1,0 +1,17 @@
+{
+  "global/spearman_rho": 0.7262276450521484,
+  "global/spearman_p": 0.0,
+  "global/n": 4329,
+  "by_set/spearman_by_set_mean": NaN,
+  "by_set/spearman_by_set_weighted": NaN,
+  "by_set/num_sets_used": 0,
+  "by_set/min_size": 20,
+  "topk/min_size": 20.0,
+  "topk/topk_overlap@64_mean": NaN,
+  "topk/topk_overlap@64_weighted": NaN,
+  "topk/topk_overlap@128_mean": NaN,
+  "topk/topk_overlap@128_weighted": NaN,
+  "topk/topk_overlap@256_mean": NaN,
+  "topk/topk_overlap@256_weighted": NaN,
+  "topk/num_sets_used": 0.0
+}

@@ -83,7 +83,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         split_idx : str
             当前使用的数据 split（如 "train", "val", "test0"）
         """
-        data_file_path = str(data_cfg.path[split_idx])
+        data_file_path = str(data_cfg.get_path(split_idx))
 
         # ✅ 新增：把 alignment 拼进 hash key，区分不同 alignment 下的 cache
         alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")
@@ -117,6 +117,25 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             f"Initialized ChunkedCTSDataset(split={split_idx}) "
             f"with {self.total_size} samples across {len(self.chunk_files)} blocks."
         )
+
+        # ---- Stage 1: load PairIndex (optional but recommended) ----
+        pair_index_name = f"pair_index_{split_idx}_{path_hash}.pt"
+        pair_index_path = os.path.join(cache_data_path, pair_index_name)
+        self.pair_offsets = None
+        self.pair_counts = None
+        self.num_pairs = None
+
+        if os.path.exists(pair_index_path):
+            obj = torch.load(pair_index_path, map_location="cpu", weights_only=False)
+            self.pair_offsets = obj["pair_offsets"].long()
+            self.pair_counts = obj.get("pair_counts", None)
+            self.num_pairs = int(obj.get("num_pairs", self.pair_offsets.numel() - 1))
+            print(f"Loaded PairIndex: {pair_index_path} (num_pairs={self.num_pairs})")
+        else:
+            print(f"[Warn] PairIndex not found: {pair_index_path}. "
+                  f"Stage-1 APIs get_pair_slice() will be unavailable until built.")
+
+    
 
     def __len__(self) -> int:
         """
@@ -199,3 +218,152 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             f"  num_blocks={len(self.chunk_files)}\n"
             f")"
         )
+
+
+
+    def get_pair_slice(self, pair_id: int):
+        """O(1) 获取某个 pair 的 CTS uid 区间 [start, end)."""
+        if self.pair_offsets is None:
+            raise RuntimeError("PairIndex not loaded. Please rebuild cache to generate pair_index_*.pt.")
+        start = int(self.pair_offsets[pair_id].item())
+        end = int(self.pair_offsets[pair_id + 1].item())
+        return start, end
+
+    def get_pair_num_cts(self, pair_id: int) -> int:
+        s, e = self.get_pair_slice(pair_id)
+        return e - s
+
+    def get_cts_meta_by_uid(self, uids, fields=("X", "labels", "set_idxs", "pos", "esa_scores")):
+        """
+        Stage 1 朴素实现：逐 uid 调 __getitem__/load chunk。
+        Stage 4 再做高性能 batch gather（按 chunk 分组）。
+        """
+        out = {k: [] for k in fields}
+        for uid in uids:
+            idx = int(uid)  # 在当前设计中 uid == global idx
+            # 强行走 __getitem__ 会丢失新字段；这里直接定位 chunk + local_idx，读 current_chunk
+            import bisect
+            chunk_idx = bisect.bisect_right(self.cum_sizes, idx)
+            if self.current_chunk_idx != chunk_idx:
+                if self.current_chunk is not None:
+                    del self.current_chunk
+                    gc.collect()
+                self.current_chunk = torch.load(self.chunk_files[chunk_idx], map_location="cpu", weights_only=False)
+                self.current_chunk_idx = chunk_idx
+            local_idx = idx if chunk_idx == 0 else idx - self.cum_sizes[chunk_idx - 1]
+            for k in fields:
+                if k in self.current_chunk:
+                    out[k].append(self.current_chunk[k][local_idx])
+        # stack（若为空则返回空）
+        for k in list(out.keys()):
+            if len(out[k]) > 0:
+                out[k] = torch.stack(out[k], dim=0)
+            else:
+                out[k] = None
+        return out
+
+    def validate_pair_offsets(self, num_checks: int = 20, seed: int = 0):
+        """
+        随机抽 pair，验证：
+        1) slice 长度 == pair_counts
+        2) slice 内 set_idx 全等于 pair_id（需要读取少量样本验证）
+        """
+        if self.pair_offsets is None:
+            raise RuntimeError("PairIndex not loaded.")
+        import random
+        rng = random.Random(seed)
+        P = self.num_pairs
+        for _ in range(num_checks):
+            pid = rng.randint(0, P - 1)
+            s, e = self.get_pair_slice(pid)
+            if e < s:
+                raise AssertionError(f"Invalid offsets for pid={pid}: {s},{e}")
+            # 抽查头尾几个 uid
+            probe = [s, min(s+1, e-1), max(e-1, s)]
+            probe = [u for u in probe if s <= u < e]
+            meta = self.get_cts_meta_by_uid(probe, fields=("set_idxs",))
+            set_idxs = meta["set_idxs"].view(-1).tolist()
+            for v in set_idxs:
+                if int(v) != int(pid):
+                    raise AssertionError(f"Pair slice mismatch: pid={pid}, got set_idx={v}, slice=({s},{e})")
+        print(f"[OK] validate_pair_offsets passed with {num_checks} checks.")
+
+
+    def batch_gather_by_uid(
+        self,
+        uids,
+        fields=("inputs", "labels", "set_idx", "esa_scores", "pos"),
+    ):
+        """
+        Stage-4: 高性能 gather：按 chunk 分组，一次 load 一个 chunk，张量索引取多条。
+        约定：cts_uid == 全局样本 idx（也就是 ChunkedCTSDataset 的 global index）。
+        """
+        import torch
+
+        if isinstance(uids, (list, tuple)):
+            uids = torch.tensor(uids, dtype=torch.long)
+        else:
+            uids = uids.to(dtype=torch.long)
+
+        if uids.numel() == 0:
+            return {k: None for k in fields}
+
+        # cum_sizes_t: [num_chunks]，严格递增
+        if not hasattr(self, "cum_sizes_t"):
+            self.cum_sizes_t = torch.tensor(self.cum_sizes, dtype=torch.long)
+
+        # chunk_ids: [N], in [0, num_chunks-1]
+        chunk_ids = torch.bucketize(uids, self.cum_sizes_t, right=True)
+
+        # sort by chunk_id to make contiguous segments
+        order = torch.argsort(chunk_ids)
+        uids_s = uids[order]
+        cids_s = chunk_ids[order]
+
+        # inverse permutation to restore original order
+        inv = torch.empty_like(order)
+        inv[order] = torch.arange(order.numel(), dtype=torch.long)
+
+        out_chunks = {k: [] for k in fields}
+
+        # iterate segments
+        n = uids_s.numel()
+        i = 0
+        while i < n:
+            cid = int(cids_s[i].item())
+            j = i + 1
+            while j < n and int(cids_s[j].item()) == cid:
+                j += 1
+
+            # load chunk once
+            if self.current_chunk_idx != cid:
+                if self.current_chunk is not None:
+                    del self.current_chunk
+                self.current_chunk = torch.load(self.chunk_files[cid], map_location="cpu", weights_only=False)
+                self.current_chunk_idx = cid
+
+            # compute local indices
+            base = 0 if cid == 0 else self.cum_sizes_t[cid - 1].item()
+            local = (uids_s[i:j] - int(base)).to(dtype=torch.long)
+
+            for k in fields:
+                if k not in self.current_chunk:
+                    # 兼容：字段不存在则返回 None（本阶段你不加新字段）
+                    out_chunks[k].append(None)
+                else:
+                    out_chunks[k].append(self.current_chunk[k].index_select(0, local))
+
+            i = j
+
+        # concat per field, then reorder back to original uid order
+        out = {}
+        for k, parts in out_chunks.items():
+            if all(p is None for p in parts):
+                out[k] = None
+                continue
+            # 过滤 None（字段缺失的情况）
+            parts2 = [p for p in parts if p is not None]
+            cat = torch.cat(parts2, dim=0)
+            out[k] = cat.index_select(0, inv)
+
+        return out

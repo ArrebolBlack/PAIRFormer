@@ -42,7 +42,7 @@ trainer.py
 
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
-
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -56,6 +56,11 @@ from src.evaluator.metrics import compute_metrics  # 统一评测函数
 
 from src.utils.efficiency import EffMeter
 import time
+
+from src.distill.teacher_extractor import TeacherRunner
+
+from collections import defaultdict
+from typing import DefaultDict
 
 # ----------------------- #
 # 训练状态对象
@@ -342,6 +347,47 @@ class _nullcontext:
 
 
 # ----------------------- #
+# epoch标量累加器（distill log汇总）
+# ----------------------- #
+    
+class _EpochScalarMeter:
+    """
+    Accumulate detached scalar tensors on device, convert to python floats only at epoch end.
+    This avoids per-step .item() / cpu() which would sync CUDA.
+    """
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.sums: DefaultDict[str, torch.Tensor] = defaultdict(
+            lambda: torch.zeros((), device=device)
+        )
+        self.count: int = 0
+
+    def update(self, logs: Dict[str, torch.Tensor], n: int):
+        if n <= 0:
+            return
+        self.count += int(n)
+        for k, v in logs.items():
+            if v is None:
+                continue
+            if not torch.is_tensor(v):
+                v = torch.tensor(float(v), device=self.device)
+            v = v.detach()
+            if v.numel() != 1:
+                continue
+            self.sums[k] = self.sums[k] + v * float(n)
+
+    def mean(self) -> Dict[str, float]:
+        if self.count <= 0:
+            return {}
+        out = {}
+        denom = float(self.count)
+        for k, v in self.sums.items():
+            out[k] = float((v / denom).detach().item())
+        return out
+
+
+
+# ----------------------- #
 # 主 Trainer
 # ----------------------- #
 
@@ -384,6 +430,7 @@ class Trainer:
         custom_loss_fn: Optional[nn.Module] = None,
         use_selective_weight_decay: bool = True,
         logger: Optional[Any] = None,
+        teacher_model: nn.Module = None,
     ):
         """
         参数
@@ -412,6 +459,76 @@ class Trainer:
         self.run_cfg = run_cfg
         self.device = device
         self.logger = logger  # 可选 logger，对接 WandB / TB / 自定义系统
+        self.teacher_model = teacher_model
+
+
+        # ----------- Distill --------- # 
+        self.teacher_runner = None
+        self._last_teacher_feat = None
+        self._last_teacher_logit = None
+
+        self.teacher_proj: Optional[nn.Module] = None
+        self.student_proj: Optional[nn.Module] = None
+        self.distill_feat_mode = str(getattr(self.run_cfg, "distill_feat_mode", "teacher_proj_trainable"))
+
+        self._distill_warned_no_feat: bool = False
+
+        # 用 run_cfg 控制开关
+        self.distill_enabled = bool(getattr(self.run_cfg, "distill_enabled", False))
+        self.distill_T = float(getattr(self.run_cfg, "distill_T", 2.0))
+
+        self.distill_alpha_start = float(getattr(self.run_cfg, "distill_alpha_start", 0.8))
+        self.distill_alpha_end   = float(getattr(self.run_cfg, "distill_alpha_end", 0.5))
+
+        # debug & try
+        self.distill_beta_kd   = float(getattr(self.run_cfg, "distill_beta_kd", 1))
+        self.distill_beta_feat = float(getattr(self.run_cfg, "distill_beta_feat", 0.1))
+        self.distill_beta_rel  = float(getattr(self.run_cfg, "distill_beta_rel", 0.0))
+
+        self.distill_rel_max_b = int(getattr(self.run_cfg, "distill_rel_max_b", 256))
+
+        self.distill_teacher_feat_dim = int(getattr(self.run_cfg, "distill_teacher_feat_dim", 384))
+        self.distill_student_emb_dim = int(getattr(self.run_cfg, "distill_student_emb_dim", 64))
+
+        
+        if self.distill_enabled:
+            teacher_need_feat = bool(getattr(self.run_cfg, "distill_need_feat", True))
+            teacher_amp = bool(getattr(self.run_cfg, "distill_teacher_amp", True))
+
+            if self.teacher_model is None:
+                raise ValueError("distill_enabled=True but teacher_model is None")
+
+            self.teacher_runner = TeacherRunner(
+                teacher=self.teacher_model,       
+                device=self.device,
+                amp_enabled=teacher_amp and bool(getattr(train_cfg, "amp", False)),
+                amp_dtype=torch.float16,
+                need_feat=teacher_need_feat,
+            )
+
+            if self.distill_beta_feat > 0:
+                if self.distill_feat_mode in ["teacher_proj_trainable", "teacher_proj_frozen"]:
+                    self.teacher_proj = nn.Linear(
+                        self.distill_teacher_feat_dim, self.distill_student_emb_dim, bias=True
+                    ).to(self.device)
+                    self.model.teacher_proj = self.teacher_proj
+                    if self.distill_feat_mode == "teacher_proj_frozen":
+                        for p in self.teacher_proj.parameters():
+                            p.requires_grad_(False)
+
+                elif self.distill_feat_mode == "student_proj":
+                    # student_emb_raw: [B, d_student] -> [B, D_teacher]
+                    self.student_proj = nn.Linear(
+                        self.distill_student_emb_dim, self.distill_teacher_feat_dim, bias=True
+                    ).to(self.device)
+
+                    # 可选但强烈建议：把它挂到 model 上，确保 state_dict / checkpoint 一致
+                    self.model.student_proj = self.student_proj
+
+                else:
+                    raise ValueError(f"Unknown distill_feat_mode={self.distill_feat_mode}")
+        # ----------- Distill --------- # 
+
 
         # ---------- 监控指标设置（loss or F1/AUC） ---------- #
         self.monitor: str = getattr(train_cfg, "monitor", "loss")
@@ -433,6 +550,20 @@ class Trainer:
             weight_decay=float(getattr(train_cfg, "weight_decay", 0.0)),
             selective=use_selective_weight_decay,
         )
+
+        # Distill:
+        # if (self.teacher_proj is not None) and (self.distill_feat_mode == "teacher_proj_trainable"):
+        #     param_groups.append({
+        #         "params": list(self.teacher_proj.parameters()),
+        #         "weight_decay": float(getattr(train_cfg, "weight_decay", 0.0)),
+        #     })
+
+        # if (self.student_proj is not None) and (self.distill_feat_mode == "student_proj"):
+        #     param_groups.append({
+        #         "params": list(self.student_proj.parameters()),
+        #         "weight_decay": float(getattr(train_cfg, "weight_decay", 0.0)),
+        #     })
+
         self.optimizer = self._build_optimizer(train_cfg, param_groups)
 
         # ---------- 调度器 ---------- #
@@ -458,6 +589,140 @@ class Trainer:
         # 用于在 batch / loss 之间传递 ESA 权重
         self._last_esa_scores = None
         self._current_sample_weight = None
+
+
+
+
+
+
+
+
+    # --------- Distill 相关工具 --------- #
+    # 在pair-level不做蒸馏
+    def _maybe_run_teacher(self, x: torch.Tensor, is_pair_level: bool):
+        self._last_teacher_feat = None
+        self._last_teacher_logit = None
+
+        if (self.teacher_runner is None) or is_pair_level:
+            return
+
+        with torch.no_grad():
+            feat, logit = self.teacher_runner(x)
+        self._last_teacher_feat = feat
+        self._last_teacher_logit = logit
+
+
+    def _distill_alpha(self) -> float:
+        """
+        distill_alpha schedule: linear or cosine decay from alpha_start -> alpha_end.
+        Config:
+        - run_cfg.distill_alpha_schedule: "linear" (default) or "cosine"
+        """
+        num_epochs = int(getattr(self.run_cfg, "num_epochs", 1))
+        if num_epochs <= 1:
+            return float(self.distill_alpha_end)
+
+        # epoch in [0, num_epochs-1]
+        e = int(getattr(self.state, "epoch", 0))
+        e = max(0, min(e, num_epochs - 1))
+
+        start = float(self.distill_alpha_start)
+        end = float(self.distill_alpha_end)
+
+        schedule = str(getattr(self.run_cfg, "distill_alpha_schedule", "linear")).lower()
+
+        t = float(e) / float(num_epochs - 1)  # normalized progress in [0,1]
+
+        if schedule == "linear":
+            w = t
+        elif schedule == "cosine":
+            # cosine annealing weight in [0,1]
+            w = 0.5 * (1.0 - math.cos(math.pi * t))
+        else:
+            raise ValueError(f"Unknown distill_alpha_schedule: {schedule}")
+
+        return start + (end - start) * w
+
+    def _compute_distill_loss(
+        self,
+        student_logit: torch.Tensor,     # [B] or [B,1]
+        y: torch.Tensor,                 # [B] or [B,1]
+        student_emb: Optional[torch.Tensor],       # [B,d] normalized
+        student_emb_raw: Optional[torch.Tensor],   # [B,d]
+        teacher_logit: torch.Tensor,     # [B] or [B,1]
+        teacher_feat: Optional[torch.Tensor],      # [B,D] or None
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+
+        student_logit = student_logit.view(-1)
+        y = y.view(-1)
+        teacher_logit = teacher_logit.view(-1)
+
+        # (1) supervised (keeps your original _compute_loss behavior incl. sample_weight/focal/etc.)
+        L_sup = self._compute_loss(student_logit, y)
+
+        # (2) KD-logit (does NOT use sample_weight; avoids double-weighting)
+        T = float(self.distill_T)
+        with torch.no_grad():
+            soft = torch.sigmoid(teacher_logit / T)
+        L_kd = F.binary_cross_entropy_with_logits(student_logit / T, soft, reduction="mean") * (T * T)
+
+        # (3) feature matching (optional)
+        L_feat = student_logit.new_zeros(())
+        if (teacher_feat is not None) and (self.distill_beta_feat > 0):
+            assert student_emb_raw is not None
+
+            mode = str(getattr(self.run_cfg, "distill_feat_mode", "teacher_proj_trainable"))
+
+            if mode in ["teacher_proj_trainable", "teacher_proj_frozen"]:
+                if self.teacher_proj is None:
+                    raise RuntimeError("mode uses teacher_proj but teacher_proj is None")
+                proj_t = F.normalize(self.teacher_proj(teacher_feat), p=2, dim=-1)   # [B,d_student]
+                s_raw  = F.normalize(student_emb_raw, p=2, dim=-1)                  # [B,d_student]
+                L_feat = (1.0 - F.cosine_similarity(proj_t, s_raw, dim=-1)).mean()
+
+            elif mode == "student_proj":
+                if self.student_proj is None:
+                    # 如果你选择把 student_proj 挂在 model 上，这里也可以 fallback
+                    self.student_proj = getattr(self.model, "student_proj", None)
+                if self.student_proj is None:
+                    raise RuntimeError("mode=student_proj but student_proj is None")
+
+                # 对齐到 teacher_feat 空间
+                s_proj = F.normalize(self.student_proj(student_emb_raw), p=2, dim=-1)  # [B,D_teacher]
+                t_norm = F.normalize(teacher_feat, p=2, dim=-1)                        # [B,D_teacher]
+                L_feat = (1.0 - F.cosine_similarity(s_proj, t_norm, dim=-1)).mean()
+
+            else:
+                raise ValueError(f"Unknown distill_feat_mode={mode}")
+
+        # (4) relational (optional)
+        L_rel = student_logit.new_zeros(())
+        if (teacher_feat is not None) and (self.distill_beta_rel > 0):
+            assert student_emb is not None
+            B = int(teacher_feat.shape[0])
+            m = min(B, int(self.distill_rel_max_b))
+            if m >= 2:
+                idx = torch.randperm(B, device=teacher_feat.device)[:m]
+                t = F.normalize(teacher_feat[idx], p=2, dim=-1)   # [m,D]
+                s = F.normalize(student_emb[idx], p=2, dim=-1)    # [m,d]
+                S_t = t @ t.T
+                S_s = s @ s.T
+                L_rel = F.mse_loss(S_s, S_t)
+
+        alpha = float(self._distill_alpha())
+        loss = (1 - alpha) * L_sup + alpha * L_kd * self.distill_beta_kd + self.distill_beta_feat * L_feat + self.distill_beta_rel * L_rel
+
+        # IMPORTANT: logs are scalar tensors (detached), do NOT .item() here
+        logs = {
+            "distill_loss_sup": L_sup.detach(),
+            "distill_loss_kd": L_kd.detach(),
+            "distill_loss_feat": L_feat.detach(),
+            "distill_loss_rel": L_rel.detach(),
+            "distill_alpha": student_logit.new_tensor(alpha).detach(),
+        }
+        return loss, logs
+
+
 
     # --------- logger 相关工具 --------- #
 
@@ -1216,6 +1481,10 @@ class Trainer:
         单个 epoch 训练。
         返回 {"loss": avg_loss, "lr": current_lr, ...optional efficiency metrics...}
         """
+
+        distill_meter = _EpochScalarMeter(self.device) if self.distill_enabled else None
+        distill_steps = 0
+
         profile_eff = bool(getattr(self.run_cfg, "profile_eff", False))
         warmup_epochs = int(getattr(self.run_cfg, "profile_warmup_epochs", 1))
         do_profile = profile_eff and (self.state.epoch >= warmup_epochs)
@@ -1237,6 +1506,10 @@ class Trainer:
                 x, y, set_idx = self._unpack_batch(batch)
                 esa_scores = self._last_esa_scores
                 is_pair_level = self._is_pair_level_batch(batch)
+                self._current_sample_weight = None  # 防止跨 batch 泄漏（无论是否 distill）
+
+                # 新增：teacher on-the-fly
+                self._maybe_run_teacher(x, is_pair_level=is_pair_level) 
 
                 if is_pair_level:
                     self._current_sample_weight = None
@@ -1250,44 +1523,96 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-                    if is_pair_level:
-                        mask = batch["mask"].to(self.device, non_blocking=True)
+
+                    # Distill：
+                    if self.distill_enabled and  (self.teacher_runner is not None) and (not is_pair_level):
+                      
+                        esa = batch.get("esa_scores", None)
                         pos = batch.get("pos", None)
-                        if pos is not None:
+                        if esa is not None and esa.device != self.device:
+                            esa = esa.to(self.device, non_blocking=True)
+                        if pos is not None and pos.device != self.device:
                             pos = pos.to(self.device, non_blocking=True)
-                        logits = self.model(x, attn_mask=mask, pos=pos)
-                    else:
-                        logits = self.model(x)
 
-                    if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
-                        logits_for_loss, labels_for_loss = self._apply_mil_reduction(
-                            logits=logits,
-                            labels=y,
-                            set_idx=set_idx,
-                            reduction=mil_reduction,
-                            temperature=mil_temperature,
-                            topk=mil_topk,
+                        emb, student_logit, emb_raw = self.model(
+                            x,
+                            esa_scores=esa,
+                            pos=pos,
+                            return_normalized_emb=True,
+                            return_emb_raw=True,
                         )
-                        esa_for_loss = None
-                    else:
-                        logits_for_loss, labels_for_loss = logits, y
-                        esa_for_loss = None if is_pair_level else esa_scores
 
-                    use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
-                    if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
-                        self._current_sample_weight = self._compute_esa_sample_weight(
-                            esa_for_loss, labels_for_loss
+                        # teacher 已在循环开头 _maybe_run_teacher(x) 生成
+                        teacher_logit = self._last_teacher_logit
+                        teacher_feat  = self._last_teacher_feat
+
+                        if teacher_logit is None:
+                            raise RuntimeError("distill enabled but teacher_logit is None")
+
+                        loss, distill_logs = self._compute_distill_loss(
+                            student_logit=student_logit,
+                            y=y,
+                            student_emb=emb,
+                            student_emb_raw=emb_raw,
+                            teacher_logit=teacher_logit,
+                            teacher_feat=teacher_feat,
                         )
-                    else:
-                        self._current_sample_weight = None
+                        logits = student_logit  # 兼容你后面的 bs/logits.shape[0] 逻辑
 
-                    loss = self._compute_loss(logits_for_loss, labels_for_loss)
+                        if distill_meter is not None:
+                            distill_meter.update(distill_logs, n=int(logits.shape[0]))
+                            distill_steps += 1
+
+                    
+                    # 原来：
+                    else:
+                        if is_pair_level:
+                            mask = batch["mask"].to(self.device, non_blocking=True)
+                            pos = batch.get("pos", None)
+                            if pos is not None:
+                                pos = pos.to(self.device, non_blocking=True)
+                            logits = self.model(x, attn_mask=mask, pos=pos)
+                        else:
+                            logits = self.model(x)
+
+                        if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
+                            logits_for_loss, labels_for_loss = self._apply_mil_reduction(
+                                logits=logits,
+                                labels=y,
+                                set_idx=set_idx,
+                                reduction=mil_reduction,
+                                temperature=mil_temperature,
+                                topk=mil_topk,
+                            )
+                            esa_for_loss = None
+                        else:
+                            logits_for_loss, labels_for_loss = logits, y
+                            esa_for_loss = None if is_pair_level else esa_scores
+
+                        use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
+                        if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
+                            self._current_sample_weight = self._compute_esa_sample_weight(
+                                esa_for_loss, labels_for_loss
+                            )
+                        else:
+                            self._current_sample_weight = None
+
+                        loss = self._compute_loss(logits_for_loss, labels_for_loss)
+                    
+                # Distill & Origin 合并
 
                 self.scaler.scale(loss).backward()
 
                 if self.grad_clip is not None:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    params = list(self.model.parameters())
+                    # if (self.teacher_proj is not None) and (self.distill_feat_mode == "teacher_proj_trainable"):
+                    #     params += list(self.teacher_proj.parameters())
+                    # if (self.student_proj is not None) and (self.distill_feat_mode == "student_proj"):
+                    #     params += list(self.student_proj.parameters())
+
+                    torch.nn.utils.clip_grad_norm_(params, self.grad_clip)
+                    # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -1303,7 +1628,59 @@ class Trainer:
             avg_loss = total_loss / max(1, num_samples)
             current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
             metrics = {"loss": avg_loss, "lr": current_lr}
+
+            if distill_meter is not None and distill_meter.count > 0:
+                distill_means = distill_meter.mean()
+                metrics.update(distill_means)
+                metrics["distill_steps"] = float(distill_steps)
+
+            # -------------------------
+            # Distill: log weighted contributions (epoch mean)
+            # -------------------------
+            if distill_meter is not None and distill_meter.count > 0:
+                # distill_means 已经是 python float（mean() 内部 .item() 过了）
+                alpha = float(metrics.get("distill_alpha", self._distill_alpha()))
+
+                L_sup  = float(metrics.get("distill_loss_sup", 0.0))
+                L_kd   = float(metrics.get("distill_loss_kd", 0.0))
+                L_feat = float(metrics.get("distill_loss_feat", 0.0))
+                L_rel  = float(metrics.get("distill_loss_rel", 0.0))
+
+                contrib_sup  = (1.0 - alpha) * L_sup
+                contrib_kd   = alpha * L_kd
+                contrib_feat = float(self.distill_beta_feat) * L_feat
+                contrib_rel  = float(self.distill_beta_rel) * L_rel
+                contrib_total = contrib_sup + contrib_kd + contrib_feat + contrib_rel
+
+                # 直接进 W&B（走你现有 _log_metrics）
+                metrics.update({
+                    "distill_contrib_sup":  contrib_sup,
+                    "distill_contrib_kd":   contrib_kd,
+                    "distill_contrib_feat": contrib_feat,
+                    "distill_contrib_rel":  contrib_rel,
+                    "distill_contrib_total": contrib_total,
+                })
+
+                # 可选：占比更直观（建议）
+                denom = max(contrib_total, 1e-12)
+                metrics.update({
+                    "distill_contrib_sup_pct":  contrib_sup  / denom,
+                    "distill_contrib_kd_pct":   contrib_kd   / denom,
+                    "distill_contrib_feat_pct": contrib_feat / denom,
+                    "distill_contrib_rel_pct":  contrib_rel  / denom,
+                })
+
+                # 可选：终端也打印一行（epoch 级别，低噪声）
+                print(
+                    f"[DistillContrib][epoch {self.state.epoch}] "
+                    f"sup={contrib_sup:.4f} kd={contrib_kd:.4f} "
+                    f"feat={contrib_feat:.4f} rel={contrib_rel:.4f} "
+                    f"total={contrib_total:.4f} (alpha={alpha:.3f})"
+                )
+
+
             self._log_metrics(metrics, stage="train", step=self.state.global_step)
+
             return metrics
 
         # -------------------------
@@ -1328,6 +1705,7 @@ class Trainer:
 
             # (2) H2D timing (CUDA events)
             is_pair_level = self._is_pair_level_batch(batch)
+            self._current_sample_weight = None  # 防止跨 batch 泄漏（无论是否 distill）
 
             h2d_s = h2d_e = None
             if self.device.type == "cuda":
@@ -1337,6 +1715,7 @@ class Trainer:
 
             x, y, set_idx = self._unpack_batch(batch)
             esa_scores = self._last_esa_scores
+
 
             # pair-level 的 mask/pos 也算进 H2D
             mask = None
@@ -1370,41 +1749,97 @@ class Trainer:
                 comp_e = torch.cuda.Event(enable_timing=True)
                 comp_s.record()
 
+            # 新增：teacher on-the-fly
+            self._maybe_run_teacher(x, is_pair_level=is_pair_level)
+
             with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-                if is_pair_level:
-                    logits = self.model(x, attn_mask=mask, pos=pos)
-                else:
-                    logits = self.model(x)
+                
 
-                if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
-                    logits_for_loss, labels_for_loss = self._apply_mil_reduction(
-                        logits=logits,
-                        labels=y,
-                        set_idx=set_idx,
-                        reduction=mil_reduction,
-                        temperature=mil_temperature,
-                        topk=mil_topk,
+                # Distill：
+                if self.distill_enabled and  (self.teacher_runner is not None) and (not is_pair_level):
+                    
+                    esa = batch.get("esa_scores", None)
+                    pos = batch.get("pos", None)
+                    if esa is not None and esa.device != self.device:
+                        esa = esa.to(self.device, non_blocking=True)
+                    if pos is not None and pos.device != self.device:
+                        pos = pos.to(self.device, non_blocking=True)
+
+                    emb, student_logit, emb_raw = self.model(
+                        x,
+                        esa_scores=esa,
+                        pos=pos,
+                        return_normalized_emb=True,
+                        return_emb_raw=True,
                     )
-                    esa_for_loss = None
-                else:
-                    logits_for_loss, labels_for_loss = logits, y
-                    esa_for_loss = None if is_pair_level else esa_scores
 
-                use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
-                if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
-                    self._current_sample_weight = self._compute_esa_sample_weight(
-                        esa_for_loss, labels_for_loss
+                    # teacher 已在循环开头 _maybe_run_teacher(x) 生成
+                    teacher_logit = self._last_teacher_logit
+                    teacher_feat  = self._last_teacher_feat
+
+                    if teacher_logit is None:
+                        raise RuntimeError("distill enabled but teacher_logit is None")
+
+                    loss, distill_logs = self._compute_distill_loss(
+                        student_logit=student_logit,
+                        y=y,
+                        student_emb=emb,
+                        student_emb_raw=emb_raw,
+                        teacher_logit=teacher_logit,
+                        teacher_feat=teacher_feat,
                     )
+                    logits = student_logit  # 兼容你后面的 bs/logits.shape[0] 逻辑
+                    
+                    if distill_meter is not None:
+                        distill_meter.update(distill_logs, n=int(logits.shape[0]))
+                        distill_steps += 1
+                
+                # 原来：
                 else:
-                    self._current_sample_weight = None
+                    if is_pair_level:
+                        mask = batch["mask"].to(self.device, non_blocking=True)
+                        pos = batch.get("pos", None)
+                        if pos is not None:
+                            pos = pos.to(self.device, non_blocking=True)
+                        logits = self.model(x, attn_mask=mask, pos=pos)
+                    else:
+                        logits = self.model(x)
 
-                loss = self._compute_loss(logits_for_loss, labels_for_loss)
+                    if (not is_pair_level) and (set_idx is not None) and (mil_reduction is not None) and (mil_reduction != "none"):
+                        logits_for_loss, labels_for_loss = self._apply_mil_reduction(
+                            logits=logits,
+                            labels=y,
+                            set_idx=set_idx,
+                            reduction=mil_reduction,
+                            temperature=mil_temperature,
+                            topk=mil_topk,
+                        )
+                        esa_for_loss = None
+                    else:
+                        logits_for_loss, labels_for_loss = logits, y
+                        esa_for_loss = None if is_pair_level else esa_scores
+
+                    use_esa_weighting = bool(getattr(self.train_cfg, "esa_weighting", False))
+                    if (not is_pair_level) and use_esa_weighting and (esa_for_loss is not None):
+                        self._current_sample_weight = self._compute_esa_sample_weight(
+                            esa_for_loss, labels_for_loss
+                        )
+                    else:
+                        self._current_sample_weight = None
+
+                    loss = self._compute_loss(logits_for_loss, labels_for_loss)
+                
+                # Distill & Origin 合并
 
             self.scaler.scale(loss).backward()
 
             if self.grad_clip is not None:
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                params = list(self.model.parameters())
+                # if self.teacher_proj is not None:
+                #     params += list(self.teacher_proj.parameters())
+                torch.nn.utils.clip_grad_norm_(params, self.grad_clip)
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -1438,6 +1873,8 @@ class Trainer:
         avg_loss = total_loss / max(1, num_samples)
         current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
 
+
+
         # 这些 key 可直接填表：epoch_wall_s / peak_vram_gb / data_overhead_pct
         metrics = {
             "loss": avg_loss,
@@ -1451,6 +1888,10 @@ class Trainer:
             "eff_h2d_s": eff["h2d_s"],
             "eff_compute_s": eff["compute_s"],
         }
+        if distill_meter is not None and distill_meter.count > 0:
+            distill_means = distill_meter.mean()
+            metrics.update(distill_means)
+            metrics["distill_steps"] = float(distill_steps)
         self._log_metrics(metrics, stage="train", step=self.state.global_step)
         
         # 新增：按 epoch 记录（仅为效率分析更好用）
@@ -1463,6 +1904,9 @@ class Trainer:
             "eff_data_overhead_pct": eff["data_overhead_pct"],
         }
         self._log_metrics(metrics_epoch, stage="train_epoch", step=self.state.global_step)
+
+
+
 
         return metrics
 
@@ -1512,6 +1956,14 @@ class Trainer:
         self._current_sample_weight = None
         self._last_esa_scores = None
 
+        # --- Distill: epoch scalar meter for VAL ---
+        val_distill_meter = (
+            _EpochScalarMeter(self.device)
+            if (self.distill_enabled and self.teacher_runner is not None)
+            else None
+        )
+        val_distill_steps = 0
+
         ctx = self.ema.swap_parameters(self.model) if (use_ema and self.ema is not None) else _nullcontext()
 
         with ctx:
@@ -1528,6 +1980,9 @@ class Trainer:
                 is_pair_level = self._is_pair_level_batch(batch)
 
 
+                if self.distill_enabled and (self.teacher_runner is not None) and (not is_pair_level):
+                    self._maybe_run_teacher(x, is_pair_level=False)
+
                 with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
                     if is_pair_level:
                         mask = batch["mask"].to(self.device, non_blocking=True)
@@ -1535,12 +1990,48 @@ class Trainer:
                         if pos is not None:
                             pos = pos.to(self.device, non_blocking=True)
                         logits = self.model(x, attn_mask=mask, pos=pos)
-                    else:
-                        logits = self.model(x)
+                        loss = self._compute_loss(logits, y)
 
-                    # logits = self.model(x)
-                    # 验证阶段统一在“模型输出的粒度”上算 loss
-                    loss = self._compute_loss(logits, y)
+                                        
+                    elif self.distill_enabled and (self.teacher_runner is not None) and (not is_pair_level):
+                        # 只有 distill window-level 才给 CheapCTSNet 传 esa_scores / pos（与 train 一致）
+                        esa = batch.get("esa_scores", None)
+                        pos = batch.get("pos", None)
+                        if esa is not None and esa.device != self.device:
+                            esa = esa.to(self.device, non_blocking=True)
+                        if pos is not None and pos.device != self.device:
+                            pos = pos.to(self.device, non_blocking=True)
+
+                        emb, logits, emb_raw = self.model(
+                            x,
+                            esa_scores=esa,
+                            pos=pos,
+                            return_normalized_emb=True,
+                            return_emb_raw=True,
+                        )
+
+                        teacher_logit = self._last_teacher_logit
+                        teacher_feat  = self._last_teacher_feat
+                        if teacher_logit is None:
+                            raise RuntimeError("val: distill enabled but teacher_logit is None")
+
+                        loss, distill_logs = self._compute_distill_loss(
+                            student_logit=logits,
+                            y=y,
+                            student_emb=emb,
+                            student_emb_raw=emb_raw,
+                            teacher_logit=teacher_logit,
+                            teacher_feat=teacher_feat,
+                        )
+                        # （可选）你如果想在 val 里也 log distill_logs，可以在循环外累积；不想就忽略 distill_logs
+                        if val_distill_meter is not None:
+                            val_distill_meter.update(distill_logs, n=int(logits.shape[0]))
+                            val_distill_steps += 1
+
+                    else:
+                        # 非 distill 的 window-level：保持 instance 模型路径（不传 esa/pos）
+                        logits = self.model(x)
+                        loss = self._compute_loss(logits, y)
 
                 bs = logits.shape[0]
                 total_loss += loss.item() * bs
@@ -1587,6 +2078,48 @@ class Trainer:
             # 也可以附带当前 lr，方便定位：val metrics 对应哪一个 lr
             current_lr = self.optimizer.param_groups[0].get("lr", 0.0)
             metrics["lr"] = current_lr
+
+            # --- Distill: add VAL loss components + contributions ---
+            if val_distill_meter is not None and val_distill_meter.count > 0:
+                distill_means = val_distill_meter.mean()   # python floats
+                metrics.update(distill_means)
+                metrics["distill_steps"] = float(val_distill_steps)
+
+                alpha = float(metrics.get("distill_alpha", self._distill_alpha()))
+                L_sup  = float(metrics.get("distill_loss_sup", 0.0))
+                L_kd   = float(metrics.get("distill_loss_kd", 0.0))
+                L_feat = float(metrics.get("distill_loss_feat", 0.0))
+                L_rel  = float(metrics.get("distill_loss_rel", 0.0))
+
+                contrib_sup  = (1.0 - alpha) * L_sup
+                contrib_kd   = alpha * L_kd
+                contrib_feat = float(self.distill_beta_feat) * L_feat
+                contrib_rel  = float(self.distill_beta_rel) * L_rel
+                contrib_total = contrib_sup + contrib_kd + contrib_feat + contrib_rel
+
+                metrics.update({
+                    "distill_contrib_sup":  contrib_sup,
+                    "distill_contrib_kd":   contrib_kd,
+                    "distill_contrib_feat": contrib_feat,
+                    "distill_contrib_rel":  contrib_rel,
+                    "distill_contrib_total": contrib_total,
+                })
+
+                denom = max(contrib_total, 1e-12)
+                metrics.update({
+                    "distill_contrib_sup_pct":  contrib_sup  / denom,
+                    "distill_contrib_kd_pct":   contrib_kd   / denom,
+                    "distill_contrib_feat_pct": contrib_feat / denom,
+                    "distill_contrib_rel_pct":  contrib_rel  / denom,
+                })
+
+                print(
+                    f"[ValDistillContrib][epoch {self.state.epoch}] "
+                    f"sup={contrib_sup:.4f} kd={contrib_kd:.4f} "
+                    f"feat={contrib_feat:.4f} rel={contrib_rel:.4f} "
+                    f"total={contrib_total:.4f} (alpha={alpha:.3f})"
+                )
+
 
             # ---------- 调度器 step ---------- #
             if self.scheduler is not None:
@@ -1640,9 +2173,31 @@ class Trainer:
             all_labels = []
             all_set_idx = []
 
+            # --- ranking (distill-only) ---
+            rank_student_logits = []
+            rank_teacher_logits = []
+            rank_set_idx = []
+
             for batch in tqdm(loader, desc="Predict"):
                 x, y, set_idx = self._unpack_batch(batch)
                 is_pair_level = self._is_pair_level_batch(batch)
+
+                teacher_logit = None
+
+                # Round0: eval 时也允许收集 teacher logits（不等同于 distill 训练）
+                collect_teacher = (
+                    (self.teacher_runner is not None)
+                    and (not is_pair_level)
+                    and (set_idx is not None)  # test 才有意义；val 若没有 set_idx 就跳过
+                    and (
+                        self.distill_enabled
+                        or bool(getattr(self.run_cfg, "eval_collect_teacher_logits", False))
+                    )
+                )
+
+                if collect_teacher:
+                    self._maybe_run_teacher(x, is_pair_level=False)
+                    teacher_logit = self._last_teacher_logit
 
                 if is_pair_level:
                     mask = batch["mask"].to(self.device, non_blocking=True)
@@ -1650,6 +2205,22 @@ class Trainer:
                     if pos is not None:
                         pos = pos.to(self.device, non_blocking=True)
                     logits = self.model(x, attn_mask=mask, pos=pos)
+                elif self.distill_enabled and (self.teacher_runner is not None) and (not is_pair_level):
+             
+                    esa = batch.get("esa_scores", None)
+                    pos = batch.get("pos", None)
+                    if esa is not None and esa.device != self.device:
+                        esa = esa.to(self.device, non_blocking=True)
+                    if pos is not None and pos.device != self.device:
+                        pos = pos.to(self.device, non_blocking=True)
+
+                    emb, logits, emb_raw = self.model(
+                        x,
+                        esa_scores=esa,
+                        pos=pos,
+                        return_normalized_emb=True,
+                        return_emb_raw=True,
+                    )
                 else:
                     logits = self.model(x)
 
@@ -1660,17 +2231,37 @@ class Trainer:
                 if set_idx is not None:
                     all_set_idx.append(set_idx.detach().cpu())
 
+                # 仅当 distill 且 window-level 且 set_idx 存在时，收集 ranking 三元组
+                if (teacher_logit is not None) and (set_idx is not None) and (not is_pair_level):
+                    rank_student_logits.append(logits.detach().cpu())
+                    rank_teacher_logits.append(teacher_logit.detach().cpu())
+                    rank_set_idx.append(set_idx.detach().cpu())
+
+
             logits = torch.cat(all_logits).numpy()
             labels = torch.cat(all_labels).numpy()
             set_idx = None
             if len(all_set_idx) > 0:
                 set_idx = torch.cat(all_set_idx).numpy()
 
+            ranking_student_logits = None
+            ranking_teacher_logits = None
+            ranking_set_idx = None
+            if len(rank_set_idx) > 0:
+                ranking_student_logits = torch.cat(rank_student_logits).numpy()
+                ranking_teacher_logits = torch.cat(rank_teacher_logits).numpy()
+                ranking_set_idx = torch.cat(rank_set_idx).numpy()
+
             return {
                 "logits": logits,
                 "labels": labels,
                 "set_idx": set_idx,
+                # --- distill ranking extras (may be None) ---
+                "ranking_student_logits": ranking_student_logits,
+                "ranking_teacher_logits": ranking_teacher_logits,
+                "ranking_set_idx": ranking_set_idx,
             }
+
 
 
     @torch.no_grad()
@@ -1800,6 +2391,9 @@ class Trainer:
         if self.ema is not None:
             payload["ema_shadow"] = self.ema.shadow
 
+        # if self.teacher_proj is not None:
+        #     payload["teacher_proj"] = self.teacher_proj.state_dict()
+
         torch.save(payload, path)
 
     def load_checkpoint(self, path: str, map_location=None):
@@ -1830,3 +2424,6 @@ class Trainer:
             self.greater_is_better = ckpt["greater_is_better"]
         if "ema_shadow" in ckpt and self.ema is not None:
             self.ema.shadow = ckpt["ema_shadow"]
+        # if "teacher_proj" in ckpt and self.teacher_proj is not None:
+        #     self.teacher_proj.load_state_dict(ckpt["teacher_proj"])
+

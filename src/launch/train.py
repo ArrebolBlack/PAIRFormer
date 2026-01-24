@@ -172,6 +172,53 @@ def setup_wandb(cfg: DictConfig):
     return run
 
 
+# Distill 
+
+import torch
+import torch.nn as nn
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
+
+def load_model_state(model: nn.Module, ckpt_path: str, device: torch.device) -> None:
+    ckpt = torch.load(str(ckpt_path), map_location=device)
+    state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+
+    cleaned = {}
+    for k, v in state_dict.items():
+        if k.startswith("model."):
+            k = k[len("model."):]
+        if k.startswith("net."):
+            k = k[len("net."):]
+        cleaned[k] = v
+
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    if missing:
+        print(f"[Teacher] Warning: missing keys: {len(missing)}")
+    if unexpected:
+        print(f"[Teacher] Warning: unexpected keys: {len(unexpected)}")
+
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+
+def build_teacher_from_cfg(cfg: DictConfig, data_cfg: DataConfig, device: torch.device) -> nn.Module:
+    # 需要在 cfg.run 里提供：
+    #   - distill_teacher_arch: e.g. "TargetNet_Optimized"
+    #   - distill_teacher_ckpt: 路径
+    #   - distill_teacher_model: DictConfig（teacher 的 model 超参）
+    teacher_arch = str(cfg.run.distill_teacher_arch)
+    teacher_ckpt = str(cfg.run.distill_teacher_ckpt)
+
+    if not teacher_ckpt or not os.path.exists(teacher_ckpt):
+        raise FileNotFoundError(f"[Teacher] ckpt not found: {teacher_ckpt}")
+
+    teacher_model_cfg = cfg.run.distill_teacher_model
+    teacher = build_model(teacher_arch, teacher_model_cfg, data_cfg=data_cfg).to(device)
+    load_model_state(teacher, teacher_ckpt, device)
+    return teacher
+
+
 # ---------------------- #
 # 主入口
 # ---------------------- #
@@ -342,6 +389,12 @@ def main(cfg: DictConfig):
     model_name = cfg.model.get("arch", cfg.model.get("name"))
     model = build_model(model_name, cfg.model, data_cfg=data_cfg)
 
+    # ---- 构建 teacher（可选）----
+    teacher_model = None
+    if bool(cfg.run.get("distill_enabled", False)):
+        teacher_model = build_teacher_from_cfg(cfg, data_cfg=data_cfg, device=device)
+
+
     # ---- 构建 Trainer ----
     trainer = Trainer(
         model=model,
@@ -350,6 +403,7 @@ def main(cfg: DictConfig):
         run_cfg=cfg.run,
         device=device,
         logger=wandb_run,
+        teacher_model=teacher_model,   # <<<<<< Distill新增
     )
 
     # 若需要从 checkpoint 恢复
@@ -649,7 +703,6 @@ def main(cfg: DictConfig):
                 )
 
                 # ---------- (B) 使用 val 上 best_threshold 的报告（如果存在） ----------
-                res_valbest = None
                 if best_threshold is not None:
                     task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
                     task_valbest.threshold = float(best_threshold)
@@ -767,13 +820,13 @@ def main(cfg: DictConfig):
                 # ---- 如启用 WandB，把 test 的标量 metrics 也写入 summary ----
                 if wandb_run is not None:
                     prefix = f"test/{split_idx}/{tag_prefix}"
-                    # 固定 0.5
-                    for k, v in iter_scalar_metrics(metrics_fixed):
-                        wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+                    # # 固定 0.5
+                    # for k, v in iter_scalar_metrics(metrics_fixed):
+                    #     wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
                     # val best
-                    if metrics_valbest is not None:
-                        for k, v in iter_scalar_metrics(metrics_valbest):
-                            wandb_run.summary[f"{prefix}_valbest/{k}"] = v
+                    # if metrics_valbest is not None:
+                    #     for k, v in iter_scalar_metrics(metrics_valbest):
+                    #         wandb_run.summary[f"{prefix}_valbest/{k}"] = v
                     # sweep：记录 best-threshold 对应的 metrics
                     for k, v in iter_scalar_metrics(metrics_sweep):
                         wandb_run.summary[f"{prefix}_sweep/{k}"] = v

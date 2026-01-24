@@ -1,0 +1,39 @@
+{
+  "ndcg@1": 1.0,
+  "ndcg@10": 1.0,
+  "ndcg@32": 1.0,
+  "ndcg@64": 1.0,
+  "ndcg@128": 1.0,
+  "topk_overlap@1": 1.0,
+  "topk_overlap@10": 1.0,
+  "topk_overlap@32": 1.0,
+  "topk_overlap@64": 1.0,
+  "topk_overlap@128": 1.0,
+  "num_pairs": 4329,
+  "num_windows": 4329,
+  "pair_size_mean": 1.0,
+  "pair_size_median": 1.0,
+  "bucketed_by_pair_size": {
+    "strategy": "quantile",
+    "num_buckets": 5,
+    "buckets": [
+      {
+        "bucket_id": 0,
+        "count": 4329,
+        "size_min": 1,
+        "size_max": 1,
+        "size_range_hint": "[1, 1]",
+        "ndcg@1": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@32": 1.0,
+        "ndcg@64": 1.0,
+        "ndcg@128": 1.0,
+        "topk_overlap@1": 1.0,
+        "topk_overlap@10": 1.0,
+        "topk_overlap@32": 1.0,
+        "topk_overlap@64": 1.0,
+        "topk_overlap@128": 1.0
+      }
+    ]
+  }
+}

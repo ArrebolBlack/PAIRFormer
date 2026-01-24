@@ -248,6 +248,9 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     ) = task
 
     block_X, block_labels, block_set_idxs, block_esa_scores, block_pos = [], [], [], [], []
+
+    pair_counts = {}  # global_set_idx -> #valid_cts
+
     shard_line_labels = set()  # 当前 shard 内包含的“行级标签集合”
     shard_idx = 0
     saved = []
@@ -345,6 +348,8 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
             block_set_idxs.append(torch.tensor([global_set_idx], dtype=torch.long))
             block_esa_scores.append(torch.tensor([esa_score], dtype=torch.float32))
             block_pos.append(torch.tensor([pos_val], dtype=torch.float32))
+            # pair_counts 累积
+            pair_counts[global_set_idx] = pair_counts.get(global_set_idx, 0) + 1
 
             # 当该原始行第一次为当前 shard 贡献样本时，记录其 label
             if not line_contributed_to_current_shard:
@@ -364,7 +369,7 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
 
     if saved:
         total = sum(s["size"] for s in saved)
-        return saved, total
+        return saved, total, pair_counts
     return None
 
 
@@ -499,6 +504,9 @@ def build_and_cache_dataset_parallel(
 
     block_metadata: List[Dict[str, Any]] = []
     # 3) 并行处理
+    num_pairs = len(filtered_lines_with_indices)
+    pair_counts_all = [0] * num_pairs
+
     with Pool(processes=num_workers) as pool:
         for result in tqdm(
             pool.imap_unordered(process_and_save_block, tasks),
@@ -506,17 +514,56 @@ def build_and_cache_dataset_parallel(
             desc=f"Building {split_idx} blocks",
         ):
             if result:
-                shards, _ = result
+                shards, _ , pair_counts= result
                 block_metadata.extend(shards)
+                for pid, c in pair_counts.items():
+                    pair_counts_all[pid] += int(c)
+
 
     # 4) 写入 meta.json
     if block_metadata:
         # 先按 block_idx，再按 shard_idx 排序（严格顺序）
         block_metadata.sort(key=lambda x: (x["block_idx"], x["shard_idx"]))
-        alignment = getattr(data_cfg, "alignment", "esa_v1")   # ✅ 新增
+        alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")   # ✅ 新增
         hash_key = f"{data_file_path}|{alignment}"
         path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
         # path_hash = hashlib.md5(data_file_path.encode("utf-8")).hexdigest()[:8]
+
+
+        # pair counts 新增
+        uid = 0
+        for m in block_metadata:
+            m["uid_start"] = int(uid)
+            uid += int(m["size"])
+            m["uid_end"] = int(uid)
+        total_cts = uid
+
+        pair_offsets = [0] * (num_pairs + 1)
+        s = 0
+        for i in range(num_pairs):
+            s += int(pair_counts_all[i])
+            pair_offsets[i+1] = s
+
+        if pair_offsets[-1] != total_cts:
+            raise RuntimeError(
+                f"PairIndex inconsistent: sum(pair_counts)={pair_offsets[-1]} != total_cts(from blocks)={total_cts}. "
+                f"Check ordering / filtering consistency."
+            )
+        
+        pair_index_obj = {
+            "pair_counts": torch.tensor(pair_counts_all, dtype=torch.int32),
+            "pair_offsets": torch.tensor(pair_offsets, dtype=torch.int64),
+            "num_pairs": int(num_pairs),
+            "total_cts": int(total_cts),
+            "hash_key": hash_key,
+        }
+
+        pair_index_name = f"pair_index_{split_idx}_{path_hash}.pt"
+        pair_index_path = os.path.join(cache_data_path, pair_index_name)
+        atomic_torch_save(pair_index_obj, pair_index_path)
+        print(f"Saved PairIndex: {pair_index_path}")
+        # pair counts 新增结束
+
         meta_filename = f"cache_{split_idx}_{path_hash}_meta.json"
         meta_filepath = os.path.join(cache_data_path, meta_filename)
         with open(meta_filepath, "w") as f:
@@ -566,7 +613,7 @@ def get_or_build_blocks(
     """
     os.makedirs(cache_data_path, exist_ok=True)
     data_file_path = str(data_cfg.get_path(split_idx))
-    alignment = getattr(data_cfg, "alignment", "esa_v1")   # ✅ 新增
+    alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")   # ✅ 新增
     hash_key = f"{data_file_path}|{alignment}"
     path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
     # path_hash = hashlib.md5(data_file_path.encode("utf-8")).hexdigest()[:8]

@@ -1,0 +1,195 @@
+data:
+  name: mirna_miraw
+  path:
+    train: data/miRAW_Train_Validation.txt
+    val: data/miRAW_Train_Validation.txt
+    test: data/miRAW_Test_total.txt
+  with_esa: true
+  alignment: extended_seed_alignment
+  split_column: 5
+  split_map:
+    train: train
+    val: val
+model:
+  name: CheapCTSNet
+  arch: CheapCTSNet_TinyConv
+  num_channels:
+  - 16
+  - 16
+  - 32
+  num_blocks:
+  - 2
+  - 1
+  - 1
+  pool_size: 3
+  stem_kernel_size: 5
+  block_kernel_size: 3
+  skip_connection: true
+  dropout: 0.0
+  meta_mode: logit_only
+  meta_dropout: 0.2
+  emb_dim: 64
+  use_diff: true
+  logit_hidden_dim: 64
+  c1: 16
+  c2: 32
+  k1: 5
+  k2: 3
+  s1: 2
+  s2: 2
+train:
+  optimizer: adamw
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  adam_weight_decay: 0.01
+  amsgrad: false
+  lr: 0.006
+  weight_decay: 0.0
+  momentum: 0.9
+  scheduler: cosine
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+  scheduler_t_max: 100
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+  pos_weight: 1.0
+  label_smoothing: true
+  smooth_pos: 0.95
+  smooth_neg: 0.05
+  loss_type: bce_focal
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1
+  bce_lambda: 0.01
+  esa_weighting: true
+  esa_scale: 10.0
+  esa_lambda_pos: 1.0
+  esa_lambda_neg: 0.5
+  amp: true
+  grad_clip: 1.0
+  ema:
+    enabled: true
+    decay: 0.999
+  monitor: loss
+  greater_is_better: false
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5
+  ranking:
+    enabled: true
+    ks:
+    - 1
+    - 10
+    - 32
+    - 64
+    - 128
+    compute_topk_overlap: true
+    bucket:
+      strategy: quantile
+      num_buckets: 5
+run:
+  mode: train
+  num_epochs: 100
+  batch_size: 256
+  num_workers: 4
+  pin_memory: true
+  cache_path: ${paths.cache_root}
+  resume: false
+  checkpoint: null
+  reduction: max
+  train_reduction: none
+  eval_reduction: ${run.reduction}
+  test_reduction: ${run.reduction}
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+  ckpt_subdir: checkpoints
+  eval_subdir: eval
+  ckpt_dir: ${hydra:run.dir}/${run.ckpt_subdir}
+  eval_dir: ${hydra:run.dir}/${run.eval_subdir}
+  eval_test_after_train: true
+  test_splits:
+  - test
+  eval_test_with_last: true
+  eval_test_with_best: false
+  eval_collect_teacher_logits: true
+  distill_feat_mode: student_proj
+  distill_teacher_feat_dim: 384
+  distill_student_emb_dim: 64
+  distill_alpha_schedule: cosine
+  distill_T: 2.0
+  distill_alpha_start: 0.8
+  distill_alpha_end: 0.5
+  distill_beta_kd: 1
+  distill_beta_feat: 0.1
+  distill_beta_rel: 1
+  distill_rel_max_b: 256
+  distill_enabled: true
+  distill_need_feat: true
+  distill_teacher_amp: true
+  distill_teacher_arch: TargetNet_Optimized
+  distill_teacher_ckpt: checkpoints/miRAW_TargetNet_Optimized_dp-0.1/checkpoints/last.pt
+  distill_teacher_model:
+    name: targetnet_optimized
+    arch: TargetNet_Optimized
+    num_channels:
+    - 16
+    - 16
+    - 32
+    - 32
+    num_blocks:
+    - 1
+    - 1
+    - 1
+    - 1
+    pool_size: 3
+    stem_kernel_size: 5
+    block_kernel_size: 3
+    skip_connection: true
+    dropout: 0.5
+    multi_scale: false
+    se_type: basic
+    use_bn: false
+    se_reduction: 8
+    target_output_length: 12
+    arch_variant: opt4_tiny
+eval:
+  save_dir: eval_outputs
+  do_threshold_sweep: true
+  sweep_num_thresholds: 101
+  use_val_best_threshold: false
+  best_threshold_path: null
+  save_metrics_json: true
+  save_report_txt: true
+  save_threshold_csv: true
+  save_curves_png: true
+  roc_curve_file: roc_curve.png
+  pr_curve_file: pr_curve.png
+logging:
+  wandb:
+    enabled: true
+    project: CheapCTSNet
+    entity: null
+    mode: online
+    group: miRAW_baseline
+    tags:
+    - CheapCTSNet
+  eval:
+    use_wandb: false
+    wandb_prefix: eval
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+experiment_name: ${experiment.name}
+experiment:
+  name: CheapCTSNet.yaml
+  task: window_level_train
+seed: 2020
+device: cuda

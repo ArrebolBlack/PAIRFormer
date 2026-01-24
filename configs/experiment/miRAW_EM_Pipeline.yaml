@@ -1,0 +1,270 @@
+# @package _global_
+# configs/experiment/miRAW_EM_Pipeline.yaml
+# New EM pipeline (Stage-1/Stage-2 with caches): train_em.py + TokenProvider + UpdatePolicy + TrainerEM
+
+# ===================== 实验元信息 =====================
+experiment_name: "miRAW_EM_Pipeline"
+experiment:
+  name: "miRAW_EM_Pipeline"
+  task: "em_pair_level_train"   # 仅作标识；train_em.py 不依赖这个字段也能跑
+
+seed: 2020
+device: "cuda"
+
+# ===================== 路径命名空间 paths =====================
+paths:
+  output_root: "outputs"
+  cache_root: "cache"
+  logs_root: "logs"
+
+# ===================== 数据配置 data（沿用旧 DataConfig 语义） =====================
+data:
+  name: mirna_miraw
+  path:
+    train: "data/miRAW_Train_Validation.txt"
+    val:   "data/miRAW_Train_Validation.txt"
+    test:  "data/miRAW_Test_total.txt"
+  with_esa: true
+
+# ===================== 运行配置 run（train_em.py 会用到的字段） =====================
+run:
+  mode: train
+
+  # --- split 控制（train_em.py 使用 split/val_split 构造 ChunkedCTSDataset） ---
+  split: "train"
+  val_split: "val"
+
+  # --- dataloader ---
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+  num_epochs: 100
+
+  # --- token budget ---
+  kmax: 128
+
+  # --- PairBatchBuilderCPU 可选字段（影响 batch_cpu 是否带 pos/esa_scores） ---
+  include_pos: true
+  include_esa: true
+
+  # --- cache 根目录（ChunkedCTSDataset 使用）---
+  cache_path: "${paths.cache_root}"
+
+  # --- checkpoint / eval 输出子目录（train_em.py 会构造 ckpt_dir/eval_dir） ---
+  ckpt_subdir: "checkpoints"
+  eval_subdir: "eval"
+  ckpt_dir: "${hydra:run.dir}/${run.ckpt_subdir}"
+  eval_dir: "${hydra:run.dir}/${run.eval_subdir}"
+
+  resume: false
+  checkpoint: null
+
+  # （可选）训练完是否跑 test：train_em.py 当前未实现自动 test，这里先保留占位
+  eval_test_after_train: false
+  test_splits: ["test"]
+  eval_test_with_last: true
+  eval_test_with_best: false
+
+# ===================== EM 相关（Controller / E-step 离线刷新触发） =====================
+
+em:
+  # 单一真源：直接引用 token_provider.policy，避免双份 policy 漂移
+  update_policy: ${token_provider.policy}
+
+  controller:
+    refresh_on_rank0_only: true
+    barrier_after_refresh: true
+    rebuild_train_loader_after_selection_refresh: true
+    verbose: true
+
+  # （可选）一些 runner 相关参数如果你想集中放 em 下也可以：
+  inst_emb_dim: 384
+  inst_version: "inst_v0"
+  cheap_emb_dim: 64
+  cheap_version: "cheap_v0"
+  sel_version: "sel_v0"
+
+
+# ===================== EM cache root（实例/selection/cheap 的 memmap 根目录） =====================
+# train_em.py 默认 em_cache_root=cache_root；这里显式给出，避免混淆
+em_cache_root: "${paths.cache_root}"
+
+# ===================== Instance 预训练 ckpt（可选） =====================
+# train_em.py 会尝试加载；如果为空则从随机/当前权重开始
+instance_ckpt_path: null
+
+# ===================== TokenProvider（新 pipeline 核心开关） =====================
+token_provider:
+  # cache miss 处理：Gate 6 推荐 error（fail-fast）
+  cache_missing: "error"     # ["error", "online_fallback", "zero"]
+
+  use_amp: false
+  normalize_tokens: false
+
+  # token 拼接策略：token = [inst_emb, inst_logit, esa, pos]
+  assemble:
+    use_inst_emb: true
+    use_inst_logit: true
+    use_esa: true
+    use_pos: true
+
+  # UpdatePolicy：step-level（train_instance/use_cache）+ epoch-level refresh（离线 rebuild）
+  # Gate 6 最小可跑：全部固定 cached + refresh=0
+  policy:
+    warmup_epochs: 0
+
+    # ---------- step-level (instance) ----------
+    instance_mode: "cached"              # ["cached","online","hybrid"]
+    instance_update_every_steps: 0
+    instance_update_every_epochs: 0
+    instance_update_steps: 0
+
+    # ---------- step-level (cheap) ----------
+    cheap_mode: "cached"                 # 先保留字段；后续 Gate 7 你再接 cheap online/selector
+    cheap_update_every_steps: 0
+    cheap_update_every_epochs: 0
+    cheap_update_steps: 0
+
+    # ---------- epoch-level refresh (offline rebuild) ----------
+    refresh_cheap_cache_every_epochs: 0
+    refresh_selection_cache_every_epochs: 0
+    refresh_instance_cache_every_epochs: 0
+
+    refresh_selection_follows_cheap: true
+    refresh_instance_follows_selection: true
+
+# ===================== 模型：CheapModel（沿用 CheapCTSNet.yaml，供未来 Gate7/离线 refresh 用） =====================
+# 注意：Gate 6 最小跑通时你可以不实际用 cheap_model，但字段保留用于完整控制与复用
+cheap_model:
+  name: CheapCTSNet
+  arch: CheapCTSNet_TinyConv
+  meta_mode: logit_only
+  meta_dropout: 0.2
+  emb_dim: 64
+  use_diff: true
+  dropout: 0.0
+  logit_hidden_dim: 64
+  c1: 16
+  c2: 32
+  k1: 5
+  k2: 3
+  s1: 2
+  s2: 2
+
+# ===================== 模型：InstanceModel（沿用 miRAW_TargetNet_Optimized） =====================
+# train_em.py 会从以下任一节点取 instance 配置：instance_model / cts_model / model_instance
+instance_model:
+  name: targetnet_optimized
+  arch: TargetNet_Optimized
+
+  num_channels:      [16, 16, 32, 32]
+  num_blocks:        [1, 1, 1, 1]
+  pool_size:         3
+  stem_kernel_size:  5
+  block_kernel_size: 3
+  skip_connection:   true
+  dropout:           0.5
+
+  multi_scale:       false
+  se_type:           "basic"
+  use_bn:            false
+  se_reduction:      8
+  target_output_length: 12
+  arch_variant:      "opt4_tiny"
+
+# ===================== 模型：Aggregator（沿用 pair_agg_set_transformer baseline） =====================
+# train_em.py 用 cfg.model 作为 aggregator config
+model:
+  arch: PairSetTransformerAggregator
+  name: pair_set_transformer_v0
+
+  # IMPORTANT:
+  # 默认 in_dim=387 对应 token_provider.assemble 全开：
+  #   384(inst_emb) + 1(inst_logit) + 1(esa) + 1(pos) = 387
+  # 如果你关掉 esa/pos/logit，需要同步修改 in_dim。
+  in_dim: 387
+
+  d_model: 256
+  n_heads: 8
+  dim_ff: 512
+  dropout: 0.1
+  ff_activation: gelu
+
+  # Set Transformer encoder
+  n_layers: 3
+  block_type: isab
+  num_inducing_points: 16
+
+  # PMA decoder
+  num_seeds: 1
+  use_output_sab: false
+
+# ===================== TrainerEM（新 pipeline 的训练控制） =====================
+trainer_em:
+  num_epochs: ${run.num_epochs}
+  log_every: 50
+  grad_accum_steps: 1
+  clip_grad_norm: 0.0
+  use_amp: false
+
+  # optimizer 超参（TrainerEM 内部是 AdamW，两套：agg/inst）
+  lr_agg: 3e-4
+  wd_agg: 1e-2
+  lr_inst: 1e-5
+  wd_inst: 0.0
+
+  # scheduler（对齐 TrainerEMConfig：none/plateau/cosine/step）
+  scheduler_agg: "cosine"
+  scheduler_inst: "none"
+  scheduler_t_max: ${run.num_epochs}
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+
+  # monitor/best
+  monitor: "loss"
+  greater_is_better: false
+
+  # EMA（默认只对 agg）
+  ema_enabled: true
+  ema_decay: 0.999
+
+# ===================== 任务与评估（复用旧 evaluator/metrics 语义） =====================
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5
+  ranking:
+    enabled: true
+    ks: [1, 10, 32, 64, 128]
+    compute_topk_overlap: true
+    bucket:
+      strategy: quantile
+      num_buckets: 5
+
+eval:
+  save_dir: "eval_outputs"
+  do_threshold_sweep: true
+  sweep_num_thresholds: 101
+  use_val_best_threshold: false
+  best_threshold_path: null
+  save_metrics_json: true
+  save_report_txt: true
+  save_threshold_csv: true
+  save_curves_png: true
+  roc_curve_file: "roc_curve.png"
+  pr_curve_file: "pr_curve.png"
+
+# ===================== 日志 logging / wandb =====================
+logging:
+  wandb:
+    enabled: true
+    project: "miRAW_EM_Pipeline"
+    entity: null
+    mode: "online"
+    group: "em_pipeline"
+    tags: ["EM", "PairAgg", "SetTransformer"]
+  eval:
+    use_wandb: false
+    wandb_prefix: "eval"

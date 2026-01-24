@@ -1,0 +1,39 @@
+{
+  "accuracy": 0.7435897435897436,
+  "precision": 0.7072330654420207,
+  "recall": 0.8426812585499316,
+  "f1": 0.7690387016229713,
+  "roc_auc": 0.8306932083869172,
+  "pr_auc": 0.8109668395641136,
+  "confusion_matrix": [
+    [
+      1371,
+      765
+    ],
+    [
+      345,
+      1848
+    ]
+  ],
+  "specificity": 0.6418539325842697,
+  "fpr": 0.35814606741573035,
+  "fnr": 0.1573187414500684,
+  "npv": 0.798951048951049,
+  "fdr": 0.2927669345579793,
+  "threshold": 0.5,
+  "ts/global/spearman_rho": 0.7262276450521484,
+  "ts/global/spearman_p": 0.0,
+  "ts/global/n": 4329.0,
+  "ts/by_set/spearman_by_set_mean": NaN,
+  "ts/by_set/spearman_by_set_weighted": NaN,
+  "ts/by_set/num_sets_used": 0.0,
+  "ts/by_set/min_size": 20.0,
+  "ts/topk/min_size": 20.0,
+  "ts/topk/topk_overlap@64_mean": NaN,
+  "ts/topk/topk_overlap@64_weighted": NaN,
+  "ts/topk/topk_overlap@128_mean": NaN,
+  "ts/topk/topk_overlap@128_weighted": NaN,
+  "ts/topk/topk_overlap@256_mean": NaN,
+  "ts/topk/topk_overlap@256_weighted": NaN,
+  "ts/topk/num_sets_used": 0.0
+}

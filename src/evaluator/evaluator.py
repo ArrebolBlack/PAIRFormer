@@ -36,7 +36,7 @@ src/evaluator/evaluator.py
   本模块假设外部已完成 wandb.init()，若未初始化则不会报错，只是静默跳过。
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union, Iterable, Tuple
 from pathlib import Path
 import json
 import os
@@ -61,8 +61,13 @@ from .metrics import (
     compute_metrics,
     sweep_thresholds,
     find_best_threshold_by_f1,
+    compute_pair_ranking_metrics_from_teacher,
+    spearman_global,
+    spearman_by_set,
+    topk_overlap_by_set,
 )
 
+import time
 
 from src.trainer.trainer import aggregate_by_set_idx
 
@@ -104,6 +109,34 @@ def _get_cfg_value(cfg: Any, key: str, default: Any) -> Any:
         return cfg[key]
     except Exception:
         return default
+
+# ---------------------- #
+# 辅助函数
+# ---------------------- #
+
+
+def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
+    """
+    只迭代 metrics 里“可以当成标量”的项：
+    - 跳过 list / dict / np.ndarray 等复杂对象
+    - numpy 标量会转成 Python float/int
+    - 不能 float(...) 的一律丢弃
+    """
+    for k, v in metrics.items():
+        # 跳过明显不是标量的
+        if isinstance(v, (list, dict, np.ndarray)):
+            continue
+
+        # numpy 标量 -> Python 标量
+        if isinstance(v, (np.generic,)):
+            v = v.item()
+
+        try:
+            v_float = float(v)
+        except (TypeError, ValueError):
+            continue
+
+        yield k, v_float
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +355,62 @@ def evaluate_with_trainer(
     labels_np = to_np(labels)
     set_idx_np = to_np(set_idx)
 
+    # -------------------------
+    # (0) distill ranking (CTS-level within each pair)
+    # -------------------------
+    ranking_metrics = None
+    ts_metrics = None
+
+
+    rank_s = to_np(outputs.get("ranking_student_logits", None))
+    rank_t = to_np(outputs.get("ranking_teacher_logits", None))
+    rank_g = to_np(outputs.get("ranking_set_idx", None))
+
+    # 仅当 trainer.predict 提供了 ranking 三元组时才计算（即 distill-only）
+    if (rank_s is not None) and (rank_t is not None) and (rank_g is not None):
+        # 可选：从 task_cfg 读取 ranking 配置；没配就用默认
+        ranking_cfg = _get_cfg_value(task_cfg, "ranking", None)
+        enabled = bool(_get_cfg_value(ranking_cfg, "enabled", True))
+
+        if enabled:
+            ks = _get_cfg_value(ranking_cfg, "ks", [1, 3, 5, 10])
+            compute_overlap = bool(_get_cfg_value(ranking_cfg, "compute_topk_overlap", True))
+
+            bucket_cfg = _get_cfg_value(ranking_cfg, "bucket", None)
+            bucket_strategy = _get_cfg_value(bucket_cfg, "strategy", "quantile") if bucket_cfg is not None else "quantile"
+            num_buckets = int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
+            fixed_edges = _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+
+            ranking_metrics = compute_pair_ranking_metrics_from_teacher(
+                student_logits_window=rank_s,
+                teacher_logits_window=rank_t,     # teacher in [0,1]
+                set_idx_window=rank_g,
+                ks=ks,
+                relevance_transform="sigmoid",
+                gain="identity",
+                compute_topk_overlap=compute_overlap,
+                bucket_strategy=bucket_strategy if bucket_strategy not in [None, "null"] else None,
+                num_buckets=num_buckets,
+                fixed_edges=fixed_edges,
+                return_details=False,             # 避免 numpy 数组进 json
+            )
+
+            # ------------------------------------------------------------------
+            # ✅ Round0: teacher-student agreement metrics (Spearman + topK overlap)
+            # ------------------------------------------------------------------
+            ts_metrics = None
+            if (rank_s is not None) and (rank_t is not None) and (rank_g is not None):
+                ts_metrics = {}
+                ts_metrics.update({f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()})
+                ts_metrics.update({f"by_set/{k}": v for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()})
+
+                ov = topk_overlap_by_set(rank_t, rank_s, rank_g, ks=(64, 128, 256), min_size=20)
+                ts_metrics.update({f"topk/{k}": float(v) for k, v in ov.items()})
+
+                # 挂到 result 里（下面 result 出来后再塞也行；我这里先存在局部变量）
+
+
+
     # 3) 可选：window→set 聚合
     if aggregate_sets and (set_labels is not None) and (set_idx_np is not None):
         y_true, y_pred_raw = aggregate_by_set_idx(
@@ -362,9 +451,514 @@ def evaluate_with_trainer(
 
     # 可选：在 result 里标记 tag，方便上层使用
     result["tag"] = tag
+
+
+    # -------------------------
+    # (6) attach & save ranking metrics (distill-only)
+    # -------------------------
+    if ranking_metrics is not None:
+        result["ranking_metrics"] = ranking_metrics
+
+        # 落地单独文件：不污染原 metrics.json
+        out_dir = Path(output_dir)
+        rank_path = out_dir / "ranking_metrics.json"
+        with open(rank_path, "w", encoding="utf-8") as f:
+            json.dump(ranking_metrics, f, indent=2, ensure_ascii=False)
+        print(f"[Evaluator] ranking metrics saved to {rank_path}")
+
+        # 可选：再写一个合并版，方便集中查看（不覆盖原 metrics.json）
+        flat_rank = {}
+        for k, v in ranking_metrics.items():
+            if isinstance(v, (int, float, np.floating, np.integer)):
+                flat_rank[f"rank/{k}"] = float(v)
+
+        merged = dict(result["metrics"])
+        merged.update(flat_rank)
+        save_metrics(merged, str(out_dir), filename="metrics_with_ranking.json")
+
+        # 可选：W&B 记录（log_to_wandb 会跳过 dict，所以这里显式 log 一次标量）
+        use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
+        if use_wandb and _WANDB_AVAILABLE and wandb.run is not None:
+            prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
+            wandb.log({f"{prefix}/{kk}": vv for kk, vv in flat_rank.items()})
+
+    # -------------------------
+    # (7) attach & save teacher-student metrics (Round0)
+    # -------------------------
+    if ts_metrics is not None:
+        result["teacher_student_metrics"] = ts_metrics
+
+        out_dir = Path(output_dir)
+        ts_path = out_dir / "teacher_student_metrics.json"
+        with open(ts_path, "w", encoding="utf-8") as f:
+            json.dump(ts_metrics, f, indent=2, ensure_ascii=False)
+        print(f"[Evaluator] teacher-student metrics saved to {ts_path}")
+
+        # 合并进一个 “方便总览” 的 json（不覆盖原 metrics.json）
+        merged = dict(result["metrics"])
+        for k, v in ts_metrics.items():
+            # 只放标量，避免 json 出问题
+            if isinstance(v, (int, float, np.floating, np.integer)):
+                merged[f"ts/{k}"] = float(v)
+        save_metrics(merged, str(out_dir), filename="metrics_with_ts.json")
+
+        # 可选：W&B 记录
+        use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
+        if use_wandb and _WANDB_AVAILABLE and wandb.run is not None:
+            prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
+            wandb.log({f"{prefix}/ts/{k}": v for k, v in ts_metrics.items() if isinstance(v, (int, float, np.floating, np.integer))})
+
+
+    # -------------------------
+    # (8) pretty print (safe)
+    # -------------------------
+    parts = []
+
+    if ts_metrics is not None:
+        g = float(ts_metrics.get("global/spearman_rho", float("nan")))
+        w = float(ts_metrics.get("by_set/spearman_by_set_weighted", float("nan")))
+        parts.append(f"Spearman(global)={g:.4f} Spearman(set,w)={w:.4f}")
+
+    if ranking_metrics is not None:
+        n10   = float(ranking_metrics.get("ndcg@10", float("nan")))
+        ov10  = float(ranking_metrics.get("topk_overlap@10", float("nan")))
+        n128  = float(ranking_metrics.get("ndcg@128", float("nan")))
+        ov128 = float(ranking_metrics.get("topk_overlap@128", float("nan")))
+        parts.append(
+            f"NDCG@10={n10:.4f} TopKOverlap@10={ov10:.4f} | "
+            f"NDCG@128={n128:.4f} TopKOverlap@128={ov128:.4f}"
+        )
+
+    if parts:
+        print(f"[{tag}] " + " | ".join(parts))
+    else:
+        print(f"[{tag}] (no ranking/teacher-student metrics to print)")
+
     return result
 
 
+# ---------------------------------------------------------------------------
+# 2.5 替换 evaluate_with_trainer，一次predict计算全部指标
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def evaluate_test_abc_once(
+    trainer: Any,
+    loader: Any,  # DataLoader
+    task_cfg_base: DictConfig,
+    logging_cfg: Any,  # DictConfig or dict
+    *,
+    test_root: Union[str, Path],
+    split_idx: str,
+    tag_prefix: str,
+    set_labels: Optional[List[float]] = None,
+    aggregate_sets: bool = True,
+    best_threshold: Optional[float] = None,   # val 上的 best_threshold（可选）
+    fixed_threshold: float = 0.5,
+    enable_A_fixed: bool = False,             # 你现在快速迭代默认关 A/B，仅开 C
+    enable_B_valbest: bool = False,
+    enable_C_sweep: bool = True,
+    sweep_num_thresholds: int = 101,
+    reduction: str = "max",
+    softmax_temp: float = 1.0,
+    topk: int = 3,
+    wandb_run: Any = None,                    # 传你 train.py 里的 wandb_run（可 None）
+) -> Dict[str, Any]:
+    """
+    一次 predict，ranking/ts 只算一次；二分类指标按 A/B/C 三种阈值策略分别计算。
+    - A: 固定阈值 fixed_threshold（默认 0.5），输出到 test_root/thr0_5
+    - B: 使用 val best_threshold（若提供），输出到 test_root/val_best
+    - C: test 上 sweep（找 best thr），输出到 test_root/sweep
+
+    返回：
+      {
+        "res_fixed": Optional[dict],
+        "res_valbest": Optional[dict],
+        "res_sweep": Optional[dict],
+        "ranking_metrics": Optional[dict],
+        "teacher_student_metrics": Optional[dict],
+      }
+    """
+    test_root = Path(test_root)
+    test_root.mkdir(parents=True, exist_ok=True)
+
+    # 统一计时容器（秒）
+    timers: Dict[str, float] = {}
+    t_all0 = time.perf_counter()
+    
+    # -------------------------
+    # helper: to numpy
+    # -------------------------
+    def to_np(x):
+        if x is None:
+            return None
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    # -------------------------
+    # (1) predict ONCE
+    # -------------------------
+    t0 = time.perf_counter()
+    outputs = trainer.predict(loader, use_ema=True)
+    t1 = time.perf_counter()
+    timers["predict"] = t1 - t0
+    logits = outputs.get("logits", None)
+    labels = outputs.get("labels", None)
+    set_idx = outputs.get("set_idx", None)
+
+    if logits is None or labels is None:
+        raise ValueError(
+            "[evaluate_test_abc_once] `trainer.predict` must return a dict with keys "
+            "'logits' and 'labels'."
+        )
+    t2 = time.perf_counter()
+    logits_np = to_np(logits)
+    labels_np = to_np(labels)
+    set_idx_np = to_np(set_idx)
+    t3 = time.perf_counter()
+    timers["to_np"] = t3 - t2
+
+    t_rank0 = time.perf_counter()
+    # -------------------------
+    # (2) ranking / ts metrics: compute ONCE (thr-independent)
+    # -------------------------
+    ranking_metrics = None
+    ts_metrics = None
+
+    rank_s = to_np(outputs.get("ranking_student_logits", None))
+    rank_t = to_np(outputs.get("ranking_teacher_logits", None))
+    rank_g = to_np(outputs.get("ranking_set_idx", None))
+
+    if (rank_s is not None) and (rank_t is not None) and (rank_g is not None):
+        ranking_cfg = _get_cfg_value(task_cfg_base, "ranking", None)
+        enabled = bool(_get_cfg_value(ranking_cfg, "enabled", True))
+
+        if enabled:
+            ks = _get_cfg_value(ranking_cfg, "ks", [1, 3, 5, 10])
+            compute_overlap = bool(_get_cfg_value(ranking_cfg, "compute_topk_overlap", True))
+
+            bucket_cfg = _get_cfg_value(ranking_cfg, "bucket", None)
+            bucket_strategy = _get_cfg_value(bucket_cfg, "strategy", "quantile") if bucket_cfg is not None else "quantile"
+            num_buckets = int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
+            fixed_edges = _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+
+            ranking_metrics = compute_pair_ranking_metrics_from_teacher(
+                student_logits_window=rank_s,
+                teacher_logits_window=rank_t,
+                set_idx_window=rank_g,
+                ks=ks,
+                relevance_transform="sigmoid",
+                gain="identity",
+                compute_topk_overlap=compute_overlap,
+                bucket_strategy=bucket_strategy if bucket_strategy not in [None, "null"] else None,
+                num_buckets=num_buckets,
+                fixed_edges=fixed_edges,
+                return_details=False,
+            )
+
+            # teacher-student agreement (Round0)
+            ts_metrics = {}
+            ts_metrics.update({f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()})
+            ts_metrics.update({f"by_set/{k}": v for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()})
+            ov = topk_overlap_by_set(rank_t, rank_s, rank_g, ks=(64, 128, 256), min_size=20)
+            ts_metrics.update({f"topk/{k}": float(v) for k, v in ov.items()})
+
+    t_rank1 = time.perf_counter()
+    timers["rank_ts"] = t_rank1 - t_rank0
+    # -------------------------
+    # (3) window->set aggregate ONCE (thr-independent)
+    # -------------------------
+
+    t_ag0 = time.perf_counter()
+
+    if aggregate_sets and (set_labels is not None) and (set_idx_np is not None):
+        y_true, y_pred_raw = aggregate_by_set_idx(
+            y_true_window=labels_np,
+            y_pred_window=logits_np,
+            set_idx_window=set_idx_np,
+            set_labels=set_labels,
+            reduction=reduction,
+            softmax_tau=softmax_temp,
+            topk=topk,
+        )
+    else:
+        y_true, y_pred_raw = labels_np, logits_np
+    t_ag1 = time.perf_counter()
+    timers["aggregate"] = t_ag1 - t_ag0
+    # -------------------------
+    # (4) eval logging cfg
+    # -------------------------
+    if isinstance(logging_cfg, DictConfig):
+        eval_logging_cfg = logging_cfg.get("eval", logging_cfg)
+    elif isinstance(logging_cfg, dict):
+        eval_logging_cfg = logging_cfg.get("eval", logging_cfg)
+    else:
+        eval_logging_cfg = logging_cfg
+
+    # -------------------------
+    # helper: attach/save rank+ts into a specific out_dir (keep old behavior)
+    # -------------------------
+    def attach_and_save_rank_ts(result: Dict[str, Any], out_dir: Path) -> None:
+        # ranking
+        if ranking_metrics is not None:
+            result["ranking_metrics"] = ranking_metrics
+
+            rank_path = out_dir / "ranking_metrics.json"
+            with open(rank_path, "w", encoding="utf-8") as f:
+                json.dump(ranking_metrics, f, indent=2, ensure_ascii=False)
+            print(f"[Evaluator] ranking metrics saved to {rank_path}")
+
+            flat_rank = {}
+            for k, v in ranking_metrics.items():
+                if isinstance(v, (int, float, np.floating, np.integer)):
+                    flat_rank[f"rank/{k}"] = float(v)
+
+            merged = dict(result.get("metrics", {}))
+            merged.update(flat_rank)
+            save_metrics(merged, str(out_dir), filename="metrics_with_ranking.json")
+
+            use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
+            if use_wandb and _WANDB_AVAILABLE:
+                import wandb  # type: ignore
+                if wandb.run is not None:
+                    prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
+                    wandb.log({f"{prefix}/{kk}": vv for kk, vv in flat_rank.items()})
+
+        # teacher-student
+        if ts_metrics is not None:
+            result["teacher_student_metrics"] = ts_metrics
+
+            ts_path = out_dir / "teacher_student_metrics.json"
+            with open(ts_path, "w", encoding="utf-8") as f:
+                json.dump(ts_metrics, f, indent=2, ensure_ascii=False)
+            print(f"[Evaluator] teacher-student metrics saved to {ts_path}")
+
+            merged = dict(result.get("metrics", {}))
+            for k, v in ts_metrics.items():
+                if isinstance(v, (int, float, np.floating, np.integer)):
+                    merged[f"ts/{k}"] = float(v)
+            save_metrics(merged, str(out_dir), filename="metrics_with_ts.json")
+
+            use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
+            if use_wandb and _WANDB_AVAILABLE:
+                import wandb  # type: ignore
+                if wandb.run is not None:
+                    prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
+                    wandb.log({f"{prefix}/ts/{k}": float(v) for k, v in ts_metrics.items()
+                               if isinstance(v, (int, float, np.floating, np.integer))})
+
+    # -------------------------
+    # helper: pretty print rank/ts (keep old behavior style)
+    # -------------------------
+    def pretty_print_rank_ts(tag: str) -> None:
+        parts = []
+        if ts_metrics is not None:
+            g = float(ts_metrics.get("global/spearman_rho", float("nan")))
+            w = float(ts_metrics.get("by_set/spearman_by_set_weighted", float("nan")))
+            parts.append(f"Spearman(global)={g:.4f} Spearman(set,w)={w:.4f}")
+        if ranking_metrics is not None:
+            n10   = float(ranking_metrics.get("ndcg@10", float("nan")))
+            ov10  = float(ranking_metrics.get("topk_overlap@10", float("nan")))
+            n128  = float(ranking_metrics.get("ndcg@128", float("nan")))
+            ov128 = float(ranking_metrics.get("topk_overlap@128", float("nan")))
+            parts.append(
+                f"NDCG@10={n10:.4f} TopKOverlap@10={ov10:.4f} | "
+                f"NDCG@128={n128:.4f} TopKOverlap@128={ov128:.4f}"
+            )
+        if parts:
+            print(f"[{tag}] " + " | ".join(parts))
+        else:
+            print(f"[{tag}] (no ranking/teacher-student metrics to print)")
+
+    # -------------------------
+    # helper: run ONE binary eval (thr-dependent), using cached y_true/y_pred_raw
+    # -------------------------
+    def run_one_eval(
+        *,
+        out_dir: Path,
+        task_cfg_local: DictConfig,
+        tag: str,
+        do_threshold_sweep: bool,
+    ) -> Dict[str, Any]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        t_ev0 = time.perf_counter()
+        res = evaluate_predictions(
+            y_true=y_true,
+            y_pred_raw=y_pred_raw,
+            task_cfg=task_cfg_local,
+            do_threshold_sweep=do_threshold_sweep,
+            sweep_num_thresholds=sweep_num_thresholds,
+            output_dir=str(out_dir),
+            logging_cfg=eval_logging_cfg,
+        )
+        t_ev1 = time.perf_counter()
+        # 记录每一次二分类评估耗时（A/B/C 区分）
+        timers[f"eval_pred[{tag}]"] = t_ev1 - t_ev0
+        res["tag"] = tag
+
+        # 把 rank/ts 写进每个 out_dir（保持你之前每次 eval 都会落地这些文件的行为）
+        attach_and_save_rank_ts(res, out_dir)
+
+        # 同样每次 eval 都打印 rank/ts（保持旧 evaluate_with_trainer 的行为）
+        pretty_print_rank_ts(tag)
+
+        return res
+
+    # ==========================================================
+    # A / B / C：你可以自由注释任何一个 block，不会影响下面打印/summary
+    # ==========================================================
+    res_fixed = None
+    res_valbest = None
+    res_sweep = None
+
+    # ---------- (A) fixed threshold ----------
+    if enable_A_fixed:
+        task_fixed = OmegaConf.create(OmegaConf.to_container(task_cfg_base, resolve=True))
+        task_fixed.threshold = float(fixed_threshold)
+
+        out_dir_fixed = test_root / "thr0_5"
+        print(f"[Train][Test {split_idx}][{tag_prefix}] Eval with fixed threshold = {fixed_threshold}")
+        res_fixed = run_one_eval(
+            out_dir=out_dir_fixed,
+            task_cfg_local=task_fixed,
+            tag=f"{split_idx}_{tag_prefix}_thr0.5",
+            do_threshold_sweep=False,
+        )
+
+    # ---------- (B) val best threshold ----------
+    if enable_B_valbest and (best_threshold is not None):
+        task_valbest = OmegaConf.create(OmegaConf.to_container(task_cfg_base, resolve=True))
+        task_valbest.threshold = float(best_threshold)
+
+        out_dir_valbest = test_root / "val_best"
+        print(
+            f"[Train][Test {split_idx}][{tag_prefix}] "
+            f"Eval with val best_threshold = {float(best_threshold):.4f}"
+        )
+        res_valbest = run_one_eval(
+            out_dir=out_dir_valbest,
+            task_cfg_local=task_valbest,
+            tag=f"{split_idx}_{tag_prefix}_valbest",
+            do_threshold_sweep=False,
+        )
+
+    # ---------- (C) sweep on test ----------
+    if enable_C_sweep:
+        task_sweep = OmegaConf.create(OmegaConf.to_container(task_cfg_base, resolve=True))
+        out_dir_sweep = test_root / "sweep"
+
+        print(f"[Train][Test {split_idx}][{tag_prefix}] Eval with threshold sweep on test")
+        res_sweep = run_one_eval(
+            out_dir=out_dir_sweep,
+            task_cfg_local=task_sweep,
+            tag=f"{split_idx}_{tag_prefix}_sweep",
+            do_threshold_sweep=True,
+        )
+
+    # ==========================================================
+    # 打印行为：保持你原 train.py 的格式（但对 None 安全）
+    # ==========================================================
+    if res_fixed is not None:
+        metrics_fixed = res_fixed.get("metrics", {})
+        print(f"\n[Test {split_idx}][{tag_prefix}] Fixed threshold=0.5 metrics:")
+        for k, v in iter_scalar_metrics(metrics_fixed):
+            print(f"  {k}: {v:.4f}")
+        cm_fixed = metrics_fixed.get("confusion_matrix", None)
+        if cm_fixed is not None:
+            print("  confusion_matrix:")
+            print(np.array(cm_fixed))
+
+    if res_valbest is not None:
+        metrics_valbest = res_valbest.get("metrics", {})
+        print(
+            f"\n[Test {split_idx}][{tag_prefix}] "
+            f"Using val best_threshold={float(best_threshold):.4f} metrics:"
+        )
+        for k, v in iter_scalar_metrics(metrics_valbest):
+            print(f"  {k}: {v:.4f}")
+        cm_valbest = metrics_valbest.get("confusion_matrix", None)
+        if cm_valbest is not None:
+            print("  confusion_matrix:")
+            print(np.array(cm_valbest))
+
+    if res_sweep is not None:
+        best_thr_test = res_sweep.get("best_threshold", None)
+        metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
+
+        if best_thr_test is not None and "metrics_at_best" in res_sweep:
+            print(
+                f"\n[Test {split_idx}][{tag_prefix}] "
+                f"Sweep on test metrics (best threshold={float(best_thr_test):.4f}):"
+            )
+        else:
+            thr0 = float(_get_cfg_value(task_cfg_base, "threshold", 0.5))
+            print(
+                f"\n[Test {split_idx}][{tag_prefix}] "
+                f"Sweep on test metrics (base threshold={thr0:.4f}):"
+            )
+
+        for k, v in iter_scalar_metrics(metrics_sweep):
+            print(f"  {k}: {v:.4f}")
+
+        cm_sweep = metrics_sweep.get("confusion_matrix", None)
+        if cm_sweep is not None:
+            print("  confusion_matrix:")
+            print(np.array(cm_sweep))
+
+        if best_thr_test is not None:
+            print(
+                f"[Test {split_idx}][{tag_prefix}] "
+                f"Best threshold on test (from sweep) = {float(best_thr_test):.4f}"
+            )
+        else:
+            print(
+                f"[Test {split_idx}][{tag_prefix}] "
+                "No best_threshold from sweep (unexpected if do_threshold_sweep=True)."
+            )
+
+    # ==========================================================
+    # WandB summary：保持你原 train.py 的 key 结构（但对 None 安全）
+    # ==========================================================
+    if wandb_run is not None:
+        prefix = f"test/{split_idx}/{tag_prefix}"
+
+        if res_fixed is not None:
+            metrics_fixed = res_fixed.get("metrics", {})
+            for k, v in iter_scalar_metrics(metrics_fixed):
+                wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+
+        if res_valbest is not None:
+            metrics_valbest = res_valbest.get("metrics", {})
+            for k, v in iter_scalar_metrics(metrics_valbest):
+                wandb_run.summary[f"{prefix}_valbest/{k}"] = v
+
+        if res_sweep is not None:
+            best_thr_test = res_sweep.get("best_threshold", None)
+            metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
+            for k, v in iter_scalar_metrics(metrics_sweep):
+                wandb_run.summary[f"{prefix}_sweep/{k}"] = v
+            if best_thr_test is not None:
+                wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
+    t_all1 = time.perf_counter()
+    timers["total"] = t_all1 - t_all0
+
+    # 统一打印：核心块 + 每个 eval_pred(tag)
+    core = (
+        f"[Timer][test/{split_idx}/{tag_prefix}] "
+        f"predict={timers.get('predict', 0.0):.3f}s, "
+        f"to_np={timers.get('to_np', 0.0):.3f}s, "
+        f"rank+ts={timers.get('rank_ts', 0.0):.3f}s, "
+        f"agg={timers.get('aggregate', 0.0):.3f}s, "
+        f"total={timers.get('total', 0.0):.3f}s"
+    )
+    print(core)
+    return {
+        "res_fixed": res_fixed,
+        "res_valbest": res_valbest,
+        "res_sweep": res_sweep,
+        "ranking_metrics": ranking_metrics,
+        "teacher_student_metrics": ts_metrics,
+    }
 
 # ---------------------------------------------------------------------------
 # 3. metrics / sweep / 报告 / 图像的保存 & 绘制函数

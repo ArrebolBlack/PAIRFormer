@@ -181,6 +181,13 @@ def build_dataset_and_loader(
         drop_last=drop_last,
         shuffle=shuffle,
     )
+        
+    prefetch_factor = 2 
+    persistent_workers = (num_workers > 0)
+
+    if num_workers == 0:
+        prefetch_factor = None
+        persistent_workers = False
 
     # 4) 构造 DataLoader
     loader = DataLoader(
@@ -188,8 +195,8 @@ def build_dataset_and_loader(
         batch_sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=2,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
         collate_fn=cts_collate_fn,
     )
 
