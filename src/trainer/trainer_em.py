@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,14 +15,13 @@ from tqdm import tqdm
 from src.em.token_provider import TokenProvider
 from src.em.controller import EMPipelineController
 
-# 可选：如果你希望 val 也输出 F1/AUC 等（与旧 Trainer 对齐）
-try:
-    from omegaconf import DictConfig  # type: ignore
-    from src.evaluator.metrics import compute_metrics  # type: ignore
-except Exception:
-    DictConfig = Any
-    compute_metrics = None
+from omegaconf import DictConfig
+from src.evaluator.metrics import compute_metrics
 
+import time
+from src.utils.efficiency import EffMeter  # 若你希望输出 peak CPU RSS
+
+from src.trainer.loss import BinaryClassificationLoss
 
 # ----------------------- #
 # 训练状态对象（复用旧 Trainer 语义）
@@ -97,35 +97,60 @@ class _nullcontext:
 
 @dataclass
 class TrainerEMConfig:
+    # loop control
     num_epochs: int = 10
     log_every: int = 50
     grad_accum_steps: int = 1
     clip_grad_norm: float = 0.0
     use_amp: bool = False
 
-    # optimizer 超参（默认 AdamW）
-    lr_agg: float = 1e-4
-    wd_agg: float = 0.0
+    # optimizer
+    optimizer: str = "adamw"
+    betas: Tuple[float, float] = (0.9, 0.999)
+    eps: float = 1e-8
+    amsgrad: bool = False
+
+    lr_agg: float = 3e-4
+    wd_agg: float = 1e-2
     lr_inst: float = 1e-5
     wd_inst: float = 0.0
 
-    # scheduler（尽量对齐旧 Trainer 的字符串风格：none / plateau / cosine / step）
-    scheduler_agg: str = "none"
-    scheduler_inst: str = "none"
-    scheduler_t_max: int = 10
+    # scheduler
+    scheduler_agg: str = "cosine"     # none/plateau/cosine/step
+    scheduler_inst: str = "cosine"
+    scheduler_t_max: int = num_epochs
     scheduler_step_size: int = 10
     scheduler_gamma: float = 0.1
     scheduler_factor: float = 0.2
     scheduler_patience: int = 5
 
-    # monitor（默认监控 val/loss）
-    monitor: str = "loss"
-    greater_is_better: bool = False  # loss: False
+    # loss
+    loss_type: str = "bce"          # bce/focal
+    esa_weighting: bool = False
 
-    # EMA（默认只对 agg）
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+    focal_lambda: float = 1.0
+
+    label_smoothing: bool = False
+    smooth_neg: float = 0.0
+    smooth_pos: float = 1.0
+
+    bce_lambda: float = 1.0
+    pos_weight: float = 1.0
+    bce_pos_weight: float = 1.0
+
+    esa_scale: float = 10.0
+    esa_lambda_pos: float = 1.0
+    esa_lambda_neg: float = 0.5
+
+    # monitor/best
+    monitor: str = "loss"
+    greater_is_better: bool = False
+
+    # EMA
     ema_enabled: bool = False
     ema_decay: float = 0.999
-
 
 # ----------------------- #
 # TrainerEM
@@ -171,11 +196,11 @@ class TrainerEM:
         self.token_provider_val = token_provider_val
 
         # loss（pair-level 二分类）
-        self.crit = nn.BCEWithLogitsLoss()
+        self.crit = BinaryClassificationLoss(train_cfg=self.cfg)
 
         # 两套 optimizer
-        self.opt_agg = optim.AdamW(self.agg_model.parameters(), lr=cfg.lr_agg, weight_decay=cfg.wd_agg)
-        self.opt_inst = optim.AdamW(self.instance_model.parameters(), lr=cfg.lr_inst, weight_decay=cfg.wd_inst)
+        self.opt_agg = optim.AdamW(self.agg_model.parameters(), lr=cfg.lr_agg, weight_decay=cfg.wd_agg, betas=self.cfg.betas, eps=self.cfg.eps, amsgrad=self.cfg.amsgrad)
+        self.opt_inst = optim.AdamW(self.instance_model.parameters(), lr=cfg.lr_inst, weight_decay=cfg.wd_inst, betas=self.cfg.betas, eps=self.cfg.eps, amsgrad=self.cfg.amsgrad)
 
         # 两套 scheduler（可选）
         self.sched_agg = self._build_scheduler(self.opt_agg, cfg.scheduler_agg)
@@ -199,6 +224,12 @@ class TrainerEM:
         self.model = self.agg_model                 # old evaluator may use trainer.model
         self.monitor = str(self.cfg.monitor)        # old train.py prints trainer.monitor
         self.greater_is_better = bool(self.cfg.greater_is_better)
+
+
+    def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # TrainerEM 里默认 pair-level binary；y 可能是 int -> float
+        self.crit.set_sample_weight(None)  # EM 默认不使用 sample_weight（保持可扩展）
+        return self.crit.compute(logits.view(-1), y.view(-1).float())
 
 
     def set_train_loader(self, loader: Any) -> None:
@@ -385,7 +416,7 @@ class TrainerEM:
                 if isinstance(logits, (tuple, list)):
                     logits = logits[0]
                 logits = logits.view(-1)
-                loss = self.crit(logits, y.view(-1))
+                loss = self._compute_loss(logits, y.view(-1))
 
                 # grad accumulation 标准缩放
                 loss_to_backward = loss / float(grad_accum)
@@ -450,65 +481,64 @@ class TrainerEM:
         self._log_metrics(metrics, stage="train", step=self.state.global_step)
         return metrics
 
-    @torch.inference_mode()
+
+    @torch.no_grad()
     def validate_one_epoch(self, loader: Any, *, use_ema: bool = True) -> Dict[str, float]:
-        # val：agg eval + inst eval，且强制 train_inst=False 构 token
         ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
 
-            total_loss = 0.0
-            total_seen = 0
+            total_loss, total_seen = 0.0, 0
+            all_logits, all_labels = [], []
 
-            all_logits = []
-            all_labels = []
-
-            for batch_cpu in tqdm(loader, desc=f"ValEM epoch {self.state.epoch}"):
+            for batch_cpu in tqdm(loader, desc=f"Valid epoch {self.state.epoch}"):
                 out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
 
-                tokens = out["tokens"]
-                mask = out["mask"]
-                y = out["y_pair"]
+                tokens = out.get("tokens", None)
+                y = out.get("y_pair", None)
+                mask = out.get("mask", None)
 
-                if tokens is None:
+                # tokens=None 表示全 padding / 无有效 uid，直接跳过
+                if tokens is None or y is None:
                     continue
 
+                # TokenProvider 已保证 tokens/mask/y 在 self.device，无需 .to()
                 logits = self.agg_model(tokens, attn_mask=mask)
                 if isinstance(logits, (tuple, list)):
                     logits = logits[0]
                 logits = logits.view(-1)
 
-                loss = self.crit(logits, y.view(-1))
+                y = y.view(-1).float()
+                loss = self._compute_loss(logits, y)
 
-                bs = int(y.shape[0])
-                total_loss += float(loss.detach().item()) * bs
+                bs = int(y.numel())
+                total_loss += float(loss.item()) * bs
                 total_seen += bs
 
                 all_logits.append(logits.detach().cpu())
-                all_labels.append(y.view(-1).detach().cpu())
+                all_labels.append(y.detach().cpu())
 
             avg_loss = total_loss / max(1, total_seen)
+            metrics: Dict[str, float] = {"loss": float(avg_loss)}
 
-            metrics: Dict[str, float] = {
-                "loss": avg_loss,
-                "lr_agg": float(self.opt_agg.param_groups[0].get("lr", 0.0)),
-                "lr_inst": float(self.opt_inst.param_groups[0].get("lr", 0.0)),
-            }
-
-            # 若提供 task_cfg 且 compute_metrics 可用，则输出与旧 Trainer 一致的指标
-            if (self.task_cfg is not None) and (compute_metrics is not None) and len(all_logits) > 0:
+            if len(all_labels) > 0:
                 logits_np = torch.cat(all_logits).numpy()
                 labels_np = torch.cat(all_labels).numpy()
-                m = compute_metrics(y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg)
-                for k, v in m.items():
+                cm = compute_metrics(y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg)
+                for k, v in cm.items():
                     try:
                         metrics[k] = float(v)
                     except Exception:
                         pass
 
+            # 这里给出两个 lr，避免你 train_em.py 外层打印/记录时找不到
+            metrics["lr_agg"] = float(self.opt_agg.param_groups[0].get("lr", 0.0))
+            metrics["lr_inst"] = float(self.opt_inst.param_groups[0].get("lr", 0.0))
+
             self._log_metrics(metrics, stage="val", step=self.state.global_step)
             return metrics
+
 
     # ----------------------- #
     # scheduler step / best metric（对齐旧 Trainer）
@@ -595,45 +625,23 @@ class TrainerEM:
             for k, v in ema_shadow.items():
                 self.ema.shadow[k] = v.to(self.device)
 
-    import numpy as np
-    import time
-
-    @torch.inference_mode()
-    def predict(
-        self,
-        loader: Any,
-        *,
-        set_labels: Optional[Any] = None,
-        aggregate_sets: bool = False,
-        use_ema: bool = True,
-        reduction: str = "max",
-        softmax_temp: float = 1.0,
-        topk: int = 3,
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-        """
-        Compatibility API for src.evaluator.evaluator.evaluate_with_trainer.
-
-        Returns
-        -------
-        y_true : np.ndarray, shape [N] (or [num_sets] if aggregate_sets=True)
-        y_pred_raw : np.ndarray, shape [N] (logits)
-        set_idx : Optional[np.ndarray], shape [N] (only meaningful for window->set aggregation)
-        """
+    @torch.no_grad()
+    def predict(self, loader: Any, use_ema: bool = True) -> Dict[str, Any]:
         ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
 
-            all_logits: list[torch.Tensor] = []
-            all_labels: list[torch.Tensor] = []
-            all_set_idx: list[torch.Tensor] = []
+            all_logits, all_labels = [], []
+            all_pair_id = []
 
-            for batch_cpu in tqdm(loader, desc=f"PredictEM epoch {self.state.epoch}"):
+            for batch_cpu in tqdm(loader, desc="Predict"):
                 out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
 
                 tokens = out.get("tokens", None)
-                mask = out.get("mask", None)
                 y = out.get("y_pair", None)
+                mask = out.get("mask", None)
+                pid = out.get("pair_id", None)
 
                 if tokens is None or y is None:
                     continue
@@ -643,50 +651,22 @@ class TrainerEM:
                     logits = logits[0]
                 logits = logits.view(-1)
 
+                y = y.view(-1).float()
+
                 all_logits.append(logits.detach().cpu())
-                all_labels.append(y.view(-1).detach().cpu())
+                all_labels.append(y.detach().cpu())
 
-                # optional: some evaluators want set_idx; for pair-level it can be None
-                # try to find set_idx / pair_id, but don't require it
-                sid = out.get("set_idx", None)
-                if sid is None:
-                    sid = out.get("pair_id", None)
-                if sid is not None:
-                    sid = torch.as_tensor(sid).view(-1).detach().cpu()
-                    all_set_idx.append(sid)
+                if pid is not None and torch.is_tensor(pid):
+                    all_pair_id.append(pid.detach().cpu())
 
-            if len(all_logits) == 0:
-                y_true = np.zeros((0,), dtype=np.float32)
-                y_pred = np.zeros((0,), dtype=np.float32)
-                return y_true, y_pred, None
+            out_dict: Dict[str, Any] = {
+                "logits": torch.cat(all_logits).numpy() if len(all_logits) > 0 else np.zeros((0,), dtype=np.float32),
+                "labels": torch.cat(all_labels).numpy() if len(all_labels) > 0 else np.zeros((0,), dtype=np.float32),
+            }
+            if len(all_pair_id) > 0:
+                out_dict["pair_id"] = torch.cat(all_pair_id).numpy()
+            return out_dict
 
-            y_pred_raw = torch.cat(all_logits).numpy()
-            y_true = torch.cat(all_labels).numpy()
-
-            # window->set aggregation (mostly for old window-level tasks)
-            if aggregate_sets:
-                if set_labels is None:
-                    raise ValueError("aggregate_sets=True requires set_labels.")
-                if len(all_set_idx) == 0:
-                    raise ValueError("aggregate_sets=True requires set_idx in batch/out.")
-
-                set_idx = torch.cat(all_set_idx).numpy()
-
-                # lazy import to avoid heavy import / circular
-                from src.trainer.trainer import aggregate_by_set_idx  # reuse old implementation
-
-                y_true_set, y_pred_set = aggregate_by_set_idx(
-                    y_true_window=y_true,
-                    y_pred_window=y_pred_raw,
-                    set_idx_window=set_idx,
-                    set_labels=set_labels,
-                    reduction=str(reduction),
-                    softmax_tau=float(softmax_temp),
-                    topk=int(topk),
-                )
-                return y_true_set, y_pred_set, None
-
-            return y_true, y_pred_raw, None
 
 
 
@@ -698,71 +678,123 @@ class TrainerEM:
         use_ema: bool = True,
         warmup_batches: int = 10,
         max_batches: Optional[int] = None,
+        plan_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
-        Match the keys used in old train.py:
-        infer_pairs_per_s, infer_peak_vram_gb, infer_elapsed_s, infer_total_pairs
+        End-to-end inference throughput for the EM pipeline:
+        DataLoader -> TokenProvider (cache/online/hybrid) -> agg forward
+
+        Returns keys aligned with old train.py:
+        infer_pairs_per_s, infer_peak_vram_gb, infer_peak_cpu_rss_gb,
+        infer_elapsed_s, infer_total_pairs
         """
+
         device_is_cuda = (self.device.type == "cuda")
         if device_is_cuda:
-            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_peak_memory_stats(self.device)
+
+        # 若你想记录 peak CPU RSS（与旧 Trainer 对齐）
+        meter = EffMeter(device=self.device, enabled=True)
+        meter.reset_epoch()
 
         ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
 
-            # warmup
-            n = 0
-            for batch_cpu in loader:
-                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
+            # ---- build eval plan ----
+            # 默认：cache-only（与你当前 _build_tokens_eval 的语义一致）
+            base_plan = {
+                "train_instance": False,
+                "use_instance_cache": True,
+                "train_cheap": False,
+                "use_cheap_cache": True,
+            }
+            if plan_override is not None:
+                base_plan.update(plan_override)
+
+            # 用同一个 iterator，warmup 的 batch 不进入计时窗口
+            it = iter(loader)
+
+            # ---- warmup ----
+            n_warm = 0
+            while n_warm < int(warmup_batches):
+                try:
+                    batch_cpu = next(it)
+                except StopIteration:
+                    break
+
+                out = (self.token_provider_val or self.token_provider).build_tokens(
+                    batch_cpu,
+                    epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step),
+                    plan=base_plan,
+                )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
                 y = out.get("y_pair", None)
+
                 if tokens is None or y is None:
                     continue
-                _ = self.agg_model(tokens, attn_mask=mask)
-                n += 1
-                if n >= int(warmup_batches):
-                    break
+
+                with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+                    _ = self.agg_model(tokens, attn_mask=mask)
+
+                meter.update_peak_cpu()
+                n_warm += 1
 
             if device_is_cuda:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
 
-            # timed
+            # ---- timed ----
             total_pairs = 0
-            t0 = time.time()
             nb = 0
+            t0 = time.perf_counter()
 
-            for batch_cpu in loader:
-                if (max_batches is not None) and (nb >= int(max_batches)):
+            while True:
+                if max_batches is not None and nb >= int(max_batches):
+                    break
+                try:
+                    batch_cpu = next(it)
+                except StopIteration:
                     break
 
-                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
+                out = (self.token_provider_val or self.token_provider).build_tokens(
+                    batch_cpu,
+                    epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step),
+                    plan=base_plan,
+                )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
                 y = out.get("y_pair", None)
+
                 if tokens is None or y is None:
                     continue
 
-                _ = self.agg_model(tokens, attn_mask=mask)
+                with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+                    _ = self.agg_model(tokens, attn_mask=mask)
 
-                bs = int(y.shape[0])
-                total_pairs += bs
+                total_pairs += int(y.numel())
                 nb += 1
+                meter.update_peak_cpu()
 
             if device_is_cuda:
-                torch.cuda.synchronize()
-            elapsed = time.time() - t0
+                torch.cuda.synchronize(self.device)
 
-            peak_gb = 0.0
+            t1 = time.perf_counter()
+            elapsed = max(t1 - t0, 1e-9)
+
+            peak_vram_gb = 0.0
             if device_is_cuda:
-                peak_gb = float(torch.cuda.max_memory_allocated() / 1e9)
+                peak_vram_gb = float(torch.cuda.max_memory_allocated(self.device) / (1024 ** 3))
 
-            pairs_per_s = float(total_pairs / max(elapsed, 1e-9))
+            pairs_per_s = float(total_pairs / elapsed)
+
             return {
                 "infer_pairs_per_s": pairs_per_s,
-                "infer_peak_vram_gb": peak_gb,
+                "infer_peak_vram_gb": peak_vram_gb,
+                "infer_peak_cpu_rss_gb": float(meter.stats.peak_cpu_rss_gb),
                 "infer_elapsed_s": float(elapsed),
                 "infer_total_pairs": float(total_pairs),
             }

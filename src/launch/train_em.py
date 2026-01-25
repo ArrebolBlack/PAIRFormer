@@ -1,10 +1,16 @@
 # src/launch/train_em.py
 from __future__ import annotations
 
+import multiprocessing as mp
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Iterable, Tuple
 
 import hydra
 import torch
@@ -12,6 +18,7 @@ from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 import os, json
+import hashlib
 
 from src.config.data_config import DataConfig
 from src.data.dataset import ChunkedCTSDataset
@@ -36,6 +43,12 @@ import numbers
 import numpy as np
 from src.evaluator.evaluator import evaluate_with_trainer
 
+from src.data.builder import get_or_build_blocks
+from src.evaluator.evaluator import evaluate_with_trainer
+
+from src.launch.train import iter_scalar_metrics, setup_wandb
+
+from contextlib import contextmanager
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:
     if p is None:
@@ -64,38 +77,6 @@ def _pick_device(cfg: DictConfig) -> torch.device:
         dev_req = "cuda:0" if dev_req == "cuda" else dev_req
         return torch.device(dev_req)
     return torch.device("cpu")
-
-
-def setup_wandb(cfg: DictConfig):
-    """尽量复用原 train.py 的 wandb 初始化语义。"""
-    try:
-        import wandb  # type: ignore
-    except ImportError:
-        return None
-
-    if "logging" not in cfg or "wandb" not in cfg.logging:
-        return None
-    wandb_cfg = cfg.logging.wandb
-    if not bool(wandb_cfg.get("enabled", False)):
-        return None
-
-    project = wandb_cfg.get("project", "default_project")
-    entity = wandb_cfg.get("entity", None)
-    mode = wandb_cfg.get("mode", "online")
-    group = wandb_cfg.get("group", None)
-    tags = wandb_cfg.get("tags", None)
-    run_name = cfg.get("experiment_name", None)
-
-    run = wandb.init(
-        project=project,
-        entity=entity,
-        name=run_name,
-        group=group,
-        tags=tags,
-        mode=mode,
-        config=OmegaConf.to_container(cfg, resolve=True),
-    )
-    return run
 
 
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
@@ -146,37 +127,31 @@ def main(cfg: DictConfig) -> None:
     em_cache_root = _resolve_path(str(em_cache_root_cfg), orig_cwd)
     assert em_cache_root is not None
 
+    # ---- dataset bootstrap: ensure cache blocks/meta exist (same semantics as train.py) ----
+    splits_needed = [split_train] if split_val == split_train else [split_train, split_val]
+    for sp in splits_needed:
+        get_or_build_blocks(data_cfg, sp, str(cache_root))
+
     cts_ds_train = ChunkedCTSDataset(str(cache_root), data_cfg, split_train)
     cts_ds_val = ChunkedCTSDataset(str(cache_root), data_cfg, split_val)
 
     pair_ds_train = DynamicPairDataset(cts_ds_train)
     pair_ds_val = DynamicPairDataset(cts_ds_val)
 
-    # ----------------------------
-    # 1) read meta（train/val 各自一份；val 不存在就 fallback train）
-    # ----------------------------
-    def read_split_meta(split: str):
-        sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
-        cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
-        if (not sel_meta_p.exists()) or (not cheap_meta_p.exists()):
-            return None
-        return _load_json(sel_meta_p), _load_json(cheap_meta_p)
+    # cache all split datasets lazily (train/val already built)
+    _cts_ds_by_split: Dict[str, ChunkedCTSDataset] = {
+        split_train: cts_ds_train,
+        split_val: cts_ds_val,
+    }
 
-    train_meta = read_split_meta(split_train)
-    if train_meta is None:
-        raise FileNotFoundError(f"[train_em] missing meta under em_cache_root for split={split_train}")
-    sel_meta_train, cheap_meta_train = train_meta
-
-    val_meta = read_split_meta(split_val)
-    if val_meta is None:
-        # 允许 val 复用 train（但不推荐；至少脚本不崩）
-        print(f"[train_em] WARN val meta not found for split={split_val}, fallback to train meta.")
-        sel_meta_val, cheap_meta_val = sel_meta_train, cheap_meta_train
-    else:
-        sel_meta_val, cheap_meta_val = val_meta
-
-    inst_emb_dim = int(cfg.get("inst_emb_dim", cfg.get("em", {}).get("inst_emb_dim", 384)))
-    inst_version = str(cfg.get("inst_version", cfg.get("em", {}).get("inst_version", "inst_v0")))
+    def _get_cts_ds(split: str) -> ChunkedCTSDataset:
+        if split in _cts_ds_by_split:
+            return _cts_ds_by_split[split]
+        # ensure window-level blocks exist for this split (train.py semantics)
+        get_or_build_blocks(data_cfg, split, str(cache_root))
+        ds = ChunkedCTSDataset(str(cache_root), data_cfg, split)
+        _cts_ds_by_split[split] = ds
+        return ds
 
     # ----------------------------
     # 2) build models
@@ -190,6 +165,8 @@ def main(cfg: DictConfig) -> None:
 
     # 可选：加载 instance 预训练 ckpt（仍允许后续训练）
     inst_ckpt = _resolve_path(cfg.get("instance_ckpt_path", None), orig_cwd)
+    if inst_ckpt is None:
+        raise RuntimeError("[train_em] instance_ckpt is None, do u mean from scratch?")
     if inst_ckpt is not None and inst_ckpt.exists():
         ckpt = torch.load(str(inst_ckpt), map_location="cpu")
         sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
@@ -257,6 +234,8 @@ def main(cfg: DictConfig) -> None:
             em_node.get("cheap_ckpt_path", cfg.get("cheap_ckpt_path", None)),
             orig_cwd,
         )
+        if cheap_ckpt is None:
+            raise RuntimeError("[train_em] cheap_ckpt is None, do u mean from scratch?")
         if cheap_ckpt is not None and cheap_ckpt.exists():
             ckpt = torch.load(str(cheap_ckpt), map_location="cpu")
             sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
@@ -269,8 +248,9 @@ def main(cfg: DictConfig) -> None:
             cheap_model.load_state_dict(cleaned, strict=False)
             cheap_model.to(device)
 
-    cheap_version = str(em_node.get("cheap_version", cfg.get("cheap_version", cheap_meta_train.get("cheap_version", "cheap_v0"))))
+    cheap_version = str(em_node.get("cheap_version", cfg.get("cheap_version", "cheap_v0")))
     cheap_emb_dim = int(em_node.get("cheap_emb_dim", cfg.get("cheap_emb_dim", 64)))
+    
 
     cheap_cache_node = em_node.get("cheap_cache", {})
     cheap_cache_bs = int(cheap_cache_node.get("batch_size", 256))
@@ -278,12 +258,19 @@ def main(cfg: DictConfig) -> None:
     cheap_cache_amp = bool(cheap_cache_node.get("amp", (device.type == "cuda")))
     cheap_cache_has_entropy = bool(cheap_cache_node.get("has_entropy", False))
 
-    def cheap_refresh_fn(epoch: int) -> None:
+    def cheap_refresh_fn(
+        epoch: int,
+        *,
+        overwrite: bool = True,
+        skip_if_ready: bool = False,
+        splits: Optional[Iterable[str]] = None,
+    ) -> None:
         if cheap_model is None:
             raise RuntimeError(
                 "[train_em] UpdatePolicy requests cheap refresh, but cheap_model is None. "
                 "Provide cfg.em.cheap_model (and optionally cfg.em.cheap_ckpt_path)."
             )
+        splits_use = list(splits) if splits is not None else list(refresh_splits)
         runner = CheapCacheRunner(
             data_cfg=data_cfg,
             dataset_cache_root=dataset_cache_root,
@@ -291,9 +278,9 @@ def main(cfg: DictConfig) -> None:
             device=str(device),
         )
         c = CheapCacheBuildConfig(
-            splits=list(refresh_splits),
-            overwrite=True,
-            skip_if_ready=False,
+            splits=splits_use,
+            overwrite=bool(overwrite),
+            skip_if_ready=bool(skip_if_ready),
             batch_size=int(cheap_cache_bs),
             num_workers=int(cheap_cache_nw),
             pin_memory=True,
@@ -310,32 +297,84 @@ def main(cfg: DictConfig) -> None:
     # =========================================================
     # 3.2 Selection refresh：run_selection_cache(...)
     # =========================================================
-    # selector_module 你必须能构造出来；这里提供一个 hydra instantiate 的默认路径
-    selector_module = None
-    sel_mod_node = em_node.get("selector_module", em_node.get("selector", cfg.get("selector_module", cfg.get("selector", None))))
-    if sel_mod_node is not None:
-        selector_module = instantiate(sel_mod_node)
 
-    sel_version = str(em_node.get("sel_version", cfg.get("sel_version", sel_meta_train.get("sel_version", "sel_v0"))))
+    def _oc_select(cfg: DictConfig, key: str, default=None):
+        try:
+            return OmegaConf.select(cfg, key, default=default)
+        except Exception:
+            return default
+
+    def _stable_cfg_hash(obj: Any) -> str:
+        # obj should be a plain container (dict/list/primitive)
+        s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
+
+    # 1) 从 cfg 取 selector module 节点（必须包含 _target_）
+    sel_mod_node = (
+        _oc_select(cfg, "em.selector_module")
+        or _oc_select(cfg, "em.selector")
+        or _oc_select(cfg, "selector_module")
+        or _oc_select(cfg, "selector")
+    )
+
+    if sel_mod_node is None:
+        raise KeyError(
+            "[train_em] Missing selector config. Provide cfg.em.selector_module "
+            "(recommended) or cfg.em.selector / cfg.selector_module / cfg.selector, "
+            "and it must be hydra-instantiateable (contain _target_)."
+        )
+
+    # 2) instantiate selector module
+    selector_module = instantiate(sel_mod_node)
+
+    # 3) sel_version：默认“auto”，由 selector config 稳定 hash 得到（超参一变 -> 版本变）
+    sel_version_cfg = (
+        _oc_select(cfg, "em.sel_version", default=None)
+        or _oc_select(cfg, "sel_version", default=None)
+    )
+
+    # 用 selector cfg 节点做 hash（最稳：包含所有超参）
+    sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
+    sel_hash = _stable_cfg_hash(sel_mod_container)
+
+    if sel_version_cfg is None or str(sel_version_cfg).lower() in ("", "none", "null", "auto"):
+        sel_version = f"sel_{sel_hash}"
+    else:
+        sel_version = str(sel_version_cfg)
+
+    # 4) selection_cache runner knobs
     sel_node = em_node.get("selection_cache", {})
     sel_pair_batch_size = int(sel_node.get("pair_batch_size", 64))
 
-    def selection_refresh_fn(epoch: int) -> None:
-        if selector_module is None:
-            raise RuntimeError(
-                "[train_em] UpdatePolicy requests selection refresh, but selector_module is None. "
-                "Provide cfg.em.selector_module (or cfg.em.selector / cfg.selector)."
-            )
+    # 5) kmax 以 selector.cfg.kmax 为准（防止 config 两处不一致）
+    if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax"):
+        sel_kmax = int(selector_module.cfg.kmax)
+    else:
+        sel_kmax = int(kmax)  # fallback (should not happen)
+
+    print(f"[train_em] selector instantiated: {selector_module.__class__.__name__}")
+    if hasattr(selector_module, "version"):
+        print(f"[train_em] selector.version: {getattr(selector_module, 'version')}")
+    print(f"[train_em] sel_version: {sel_version} (hash={sel_hash}) sel_kmax={sel_kmax}")
+
+    def selection_refresh_fn(
+        epoch: int,
+        *,
+        overwrite: bool = True,
+        skip_if_ready: bool = False,
+        splits: Optional[Iterable[str]] = None,
+    ) -> None:
+        splits_use = list(splits) if splits is not None else list(refresh_splits)
         run_selection_cache(
             data_cfg=data_cfg,
             dataset_cache_root=dataset_cache_root,
             em_cache_root=em_cache_root_str,
             selector=selector_module,
-            kmax=int(kmax),
+            kmax=int(sel_kmax),
             epoch=int(epoch),
-            splits=list(refresh_splits),
-            overwrite=True,
-            skip_if_ready=False,
+            splits=splits_use,
+            overwrite=bool(overwrite),
+            skip_if_ready=bool(skip_if_ready),
             sel_version=str(sel_version),
             pair_batch_size=int(sel_pair_batch_size),
         )
@@ -349,7 +388,17 @@ def main(cfg: DictConfig) -> None:
     inst_cache_use_amp = bool(inst_node.get("use_amp", (device.type == "cuda")))
     inst_cache_norm = bool(inst_node.get("normalize_emb", False))
 
-    def instance_refresh_fn(epoch: int) -> None:
+    inst_emb_dim = int(cfg.get("em", {}).get("inst_emb_dim", 384))
+    inst_version = str(cfg.get("em", {}).get("inst_version", "inst_v0"))
+
+    def instance_refresh_fn(
+        epoch: int,
+        *,
+        overwrite: bool = True,
+        skip_if_ready: bool = False,
+        splits: Optional[Iterable[str]] = None,
+    ) -> None:
+        splits_use = list(splits) if splits is not None else list(refresh_splits)
         # 注意：instance_runner 会检查 selection/cheap meta ready + version consistency
         run_instance_cache(
             data_cfg=data_cfg,
@@ -359,14 +408,143 @@ def main(cfg: DictConfig) -> None:
             inst_version=str(inst_version),
             emb_dim=int(inst_emb_dim),
             epoch=int(epoch),
-            splits=list(refresh_splits),
-            overwrite=True,
-            skip_if_ready=False,
+            splits=splits_use,
+            overwrite=bool(overwrite),
+            skip_if_ready=bool(skip_if_ready),
             batch_size=int(inst_cache_bs),
             num_workers=int(inst_cache_nw),
             use_amp=bool(inst_cache_use_amp),
             normalize_emb=bool(inst_cache_norm),
         )
+
+    def _expected_identity(split: str) -> tuple[str, str]:
+        ds = _get_cts_ds(split)
+        path_hash = str(getattr(ds, "path_hash"))
+        dataset_hash_key = str(getattr(ds, "dataset_hash_key"))
+        return path_hash, dataset_hash_key
+
+    def _is_stage_compatible(split: str, stage: str) -> bool:
+        p = em_cache_root / "em_cache" / split / stage / "meta.json"
+        if not p.exists():
+            return False
+        d = _load_json(p)
+        if str(d.get("state", "")) != "ready":
+            return False
+
+        exp_path_hash, exp_dataset_hash_key = _expected_identity(split)
+        if str(d.get("path_hash", "")) != exp_path_hash:
+            return False
+        if str(d.get("dataset_hash_key", "")) != exp_dataset_hash_key:
+            return False
+        return True
+
+    
+    def _load_meta_if_exists(split: str, stage: str) -> Optional[Dict[str, Any]]:
+        p = em_cache_root / "em_cache" / split / stage / "meta.json"
+        if not p.exists():
+            return None
+        return _load_json(p)
+
+    def _selection_ready_and_match(split: str) -> bool:
+        meta = _load_meta_if_exists(split, "selection")
+        if meta is None:
+            return False
+        if str(meta.get("state", "")) != "ready":
+            return False
+        # 关键：sel_version 必须一致
+        if str(meta.get("sel_version", "")) != str(sel_version):
+            return False
+        # 关键：cheap_version_used 必须一致（否则 selection 依赖的 cheap 变了）
+        if str(meta.get("cheap_version_used", "")) != str(cheap_version):
+            return False
+        return True
+
+
+    # =========================================================
+    # BOOTSTRAP (build missing caches OR overwrite all)
+    # MUST run BEFORE reading meta / building loaders / token_providers
+    # =========================================================
+    bootstrap_node = em_node.get("bootstrap", {})
+    bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
+
+    # 推荐默认 True：每次 train 都强制重建，避免旧 meta/version/path_hash 踩雷
+    bootstrap_overwrite_all = bool(bootstrap_node.get("overwrite_all", True))
+
+    # overwrite_all=False 时：只补缺；此时建议 skip_if_ready=True
+    bootstrap_skip_if_ready = bool(bootstrap_node.get("skip_if_ready", (not bootstrap_overwrite_all)))
+
+    bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
+
+    if bootstrap_enabled:
+        need_cheap = bootstrap_overwrite_all or any(
+            not _is_stage_compatible(sp, "cheap") for sp in refresh_splits
+        )
+        need_sel = bootstrap_overwrite_all or any(
+            not _selection_ready_and_match(sp) for sp in refresh_splits
+        )
+        need_inst = bootstrap_overwrite_all or any(
+            not _is_stage_compatible(sp, "instance") for sp in refresh_splits
+        )
+
+        # dependency closure
+        if need_cheap:
+            need_sel = True
+            need_inst = True
+        if need_sel:
+            need_inst = True
+
+        if need_cheap or need_sel or need_inst:
+            print(
+                "[train_em] BOOTSTRAP plan: "
+                f"overwrite_all={bootstrap_overwrite_all} "
+                f"need_cheap={need_cheap} need_sel={need_sel} need_inst={need_inst} "
+                f"splits={refresh_splits}"
+            )
+
+        if need_cheap:
+            cheap_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+
+        if need_sel:
+            selection_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+
+        if need_inst:
+            instance_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+
+    # ----------------------------
+    # 1) read meta（train/val 各自一份；val 不存在就 fallback train）
+    # ----------------------------
+    def read_split_meta(split: str):
+        sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
+        cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
+        if (not sel_meta_p.exists()) or (not cheap_meta_p.exists()):
+            return None
+        return _load_json(sel_meta_p), _load_json(cheap_meta_p)
+
+    train_meta = read_split_meta(split_train)
+    if train_meta is None:
+        raise FileNotFoundError(f"[train_em] missing meta under em_cache_root for split={split_train}")
+    sel_meta_train, cheap_meta_train = train_meta
+
+    val_meta = read_split_meta(split_val)
+    if val_meta is None:
+        # 允许 val 复用 train（但不推荐；至少脚本不崩）
+        print(f"[train_em] WARN val meta not found for split={split_val}, fallback to train meta.")
+        sel_meta_val, cheap_meta_val = sel_meta_train, cheap_meta_train
+    else:
+        sel_meta_val, cheap_meta_val = val_meta
+
 
 
     # ----------------------------
@@ -447,13 +625,6 @@ def main(cfg: DictConfig) -> None:
         if hasattr(tp, "cheap_version_used"):
             tp.cheap_version_used = str(meta.get("cheap_version_used", getattr(tp, "cheap_version_used", "cheap_v0")))
 
-    def _is_stage_ready(split: str, stage: str) -> bool:
-        p = em_cache_root / "em_cache" / split / stage / "meta.json"
-        if not p.exists():
-            return False
-        d = _load_json(p)
-        return str(d.get("state", "")) == "ready"
-
 
     def _notify_token_providers_cache_refreshed(plan: Dict[str, bool]) -> None:
         for tp in [token_provider_train, token_provider_val]:
@@ -464,6 +635,37 @@ def main(cfg: DictConfig) -> None:
     train_loader = build_train_loader()
     val_loader = build_val_loader()
     #TODO：我坚持 refresh val，那就要给 controller 增加 build_val_loader_fn 并在 do_sel 时同时 rebuild val_loader（Trainer 也要 set_val_loader）
+
+
+    def build_eval_loader_for_split(split: str) -> DataLoader:
+        ds = _get_cts_ds(split)
+        pair_ds = DynamicPairDataset(ds)
+        meta = _load_sel_meta(split)  # 每次都 reload 最新 selection meta
+        cpu_builder = PairBatchBuilderCPU(
+            cts_ds=ds,
+            em_cache_root=em_cache_root,
+            split=split,
+            cfg=PairBatchBuilderCPUConfig(
+                kmax=kmax,
+                include_pos=bool(run_cfg.get("include_pos", True)),
+                include_esa=bool(run_cfg.get("include_esa", True)),
+                pin_memory=True,
+            ),
+            expected_path_hash=str(meta["path_hash"]),
+            expected_dataset_hash_key=str(meta["dataset_hash_key"]),
+        )
+        return DataLoader(
+            pair_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=persistent_workers,
+            collate_fn=cpu_builder,
+            drop_last=False,
+        )
+
+
 
     # ---------------------------------------------------------
     # total_cts MUST be split-local uid space size (uid in [0, total_cts))
@@ -542,35 +744,103 @@ def main(cfg: DictConfig) -> None:
     token_provider_val.policy = policy
 
 
+    def _read_split_meta_required(split: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
+        cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
+        if (not sel_meta_p.exists()) or (not cheap_meta_p.exists()):
+            raise FileNotFoundError(f"[train_em] missing meta under em_cache_root for split={split}")
+        return _load_json(sel_meta_p), _load_json(cheap_meta_p)
+
+    def build_token_provider_for_split(split: str, *, require_ready: bool = True) -> TokenProvider:
+        sel_meta, cheap_meta = _read_split_meta_required(split)
+        ds = _get_cts_ds(split)
+        total_cts_local = int(len(ds))
+
+        sel_version_used = str(sel_meta.get("sel_version", sel_version_train))
+        cheap_version_used = str(sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version)))
+
+        tp = TokenProvider(
+            cfg=token_provider_cfg,
+            instance_model=instance_model,
+            device=device,
+            em_cache_root=str(em_cache_root),
+            split=split,
+            path_hash=str(sel_meta["path_hash"]),
+            dataset_hash_key=str(sel_meta["dataset_hash_key"]),
+            total_cts=total_cts_local,
+            inst_emb_dim=inst_emb_dim,
+            inst_version=inst_version,
+            sel_version_used=sel_version_used,
+            cheap_version_used=cheap_version_used,
+            require_ready=bool(require_ready),
+        )
+        # share same policy object (not critical for eval, but consistent)
+        tp.policy = policy
+        return tp
+
+
+
     # ----------------------------
     # 6) TrainerEMConfig（兼容 cfg.trainer_em 或 cfg.em.trainer_em）
     # ----------------------------
-    tr_node = cfg.get("trainer_em", cfg.get("em", {}).get("trainer_em", None))
+    tr_node = cfg.get("trainer_em", None)
     if tr_node is None:
-        tr_cfg = TrainerEMConfig(
-            num_epochs=int(run_cfg.get("num_epochs", 10)),
-            lr_agg=float(cfg.get("train", {}).get("lr", 1e-4)) if "train" in cfg else 1e-4,
-            lr_inst=float(cfg.get("train", {}).get("lr_instance", 1e-5)) if "train" in cfg else 1e-5,
-            wd_agg=float(cfg.get("train", {}).get("weight_decay", 0.0)) if "train" in cfg else 0.0,
-            wd_inst=float(cfg.get("train", {}).get("weight_decay_instance", 0.0)) if "train" in cfg else 0.0,
-            use_amp=bool(cfg.get("train", {}).get("use_amp", False)) if "train" in cfg else False,
-        )
-    else:
-        tr_cfg = TrainerEMConfig(
-            num_epochs=int(tr_node.get("num_epochs", run_cfg.get("num_epochs", 10))),
-            log_every=int(tr_node.get("log_every", 50)),
-            grad_accum_steps=int(tr_node.get("grad_accum_steps", 1)),
-            clip_grad_norm=float(tr_node.get("clip_grad_norm", 0.0)),
-            use_amp=bool(tr_node.get("use_amp", False)),
-            lr_agg=float(tr_node.get("lr_agg", 1e-4)),
-            wd_agg=float(tr_node.get("wd_agg", 0.0)),
-            lr_inst=float(tr_node.get("lr_inst", 1e-5)),
-            wd_inst=float(tr_node.get("wd_inst", 0.0)),
-            monitor=str(tr_node.get("monitor", "loss")),
-            greater_is_better=bool(tr_node.get("greater_is_better", False)),
-            ema_enabled=bool(tr_node.get("ema_enabled", False)),
-            ema_decay=float(tr_node.get("ema_decay", 0.999)),
-        )
+        raise ValueError("Missing config node: cfg.trainer_em (or cfg.em.trainer_em).")
+    
+    
+    # betas 需要转成 tuple[float,float]
+    betas = tr_node.get("betas", [0.9, 0.999])
+    betas = (float(betas[0]), float(betas[1]))
+
+    tr_cfg = TrainerEMConfig(
+        # loop
+        num_epochs=int(tr_node.get("num_epochs", cfg.run.num_epochs if "run" in cfg else 10)),
+        log_every=int(tr_node.get("log_every", 50)),
+        grad_accum_steps=int(tr_node.get("grad_accum_steps", 1)),
+        clip_grad_norm=float(tr_node.get("clip_grad_norm", 0.0)),
+        use_amp=bool(tr_node.get("use_amp", False)),
+
+        # loss
+        loss_type=str(tr_node.get("loss_type", "bce")),
+        esa_weighting=bool(tr_node.get("esa_weighting", False)),
+        focal_alpha=float(tr_node.get("focal_alpha", 0.25)),
+        focal_gamma=float(tr_node.get("focal_gamma", 2.0)),
+        focal_lambda=float(tr_node.get("focal_lambda", 1.0)),
+        label_smoothing=bool(tr_node.get("label_smoothing", False)),
+        smooth_neg=float(tr_node.get("smooth_neg", 0.0)),
+        smooth_pos=float(tr_node.get("smooth_pos", 1.0)),
+        bce_lambda=float(tr_node.get("bce_lambda", 1.0)),
+        pos_weight=float(tr_node.get("pos_weight", 1.0)),
+        bce_pos_weight=float(tr_node.get("bce_pos_weight", tr_node.get("pos_weight", 1.0))),
+        esa_scale=float(tr_node.get("esa_scale", 10.0)),
+        esa_lambda_pos=float(tr_node.get("esa_lambda_pos", 1.0)),
+        esa_lambda_neg=float(tr_node.get("esa_lambda_neg", 0.5)),
+
+        # optimizer
+        optimizer=str(tr_node.get("optimizer", "adamw")),
+        betas=betas,
+        eps=float(tr_node.get("eps", 1e-8)),
+        amsgrad=bool(tr_node.get("amsgrad", False)),
+        lr_agg=float(tr_node.get("lr_agg", 3e-4)),
+        wd_agg=float(tr_node.get("wd_agg", 1e-2)),
+        lr_inst=float(tr_node.get("lr_inst", 1e-5)),
+        wd_inst=float(tr_node.get("wd_inst", 0.0)),
+
+        # scheduler
+        scheduler_agg=str(tr_node.get("scheduler_agg", "none")),
+        scheduler_inst=str(tr_node.get("scheduler_inst", "none")),
+        scheduler_t_max=int(tr_node.get("scheduler_t_max", tr_node.get("num_epochs", 10))),
+        scheduler_step_size=int(tr_node.get("scheduler_step_size", 10)),
+        scheduler_gamma=float(tr_node.get("scheduler_gamma", 0.1)),
+        scheduler_factor=float(tr_node.get("scheduler_factor", 0.2)),
+        scheduler_patience=int(tr_node.get("scheduler_patience", 5)),
+
+        # monitor/ema
+        monitor=str(tr_node.get("monitor", "loss")),
+        greater_is_better=bool(tr_node.get("greater_is_better", False)),
+        ema_enabled=bool(tr_node.get("ema_enabled", False)),
+        ema_decay=float(tr_node.get("ema_decay", 0.999)),
+    )
 
     trainer = TrainerEM(
         cfg=tr_cfg,
@@ -579,7 +849,7 @@ def main(cfg: DictConfig) -> None:
         instance_model=instance_model,
         token_provider=token_provider_train,
         token_provider_val=token_provider_val,
-        controller=None,  # 我们在入口脚本里按 epoch 控制 E-step，风格更接近原 train.py
+        controller=None,
         train_loader=train_loader,
         val_loader=val_loader,
         logger=wandb_run,
@@ -595,6 +865,16 @@ def main(cfg: DictConfig) -> None:
         else:
             print(f"[train_em] No checkpoint found at {ckpt_path}, start from scratch.")
 
+    @contextmanager
+    def _swap_token_provider_val(tr: TrainerEM, tp_new: TokenProvider):
+        old = tr.token_provider_val
+        tr.token_provider_val = tp_new
+        try:
+            yield
+        finally:
+            tr.token_provider_val = old
+
+
     # ---- Controller：注入 refresh_fn（只走 python，不走 cmd）----
     ctrl = EMPipelineController(
         cfg=ctrl_cfg,
@@ -607,31 +887,7 @@ def main(cfg: DictConfig) -> None:
         instance_refresh_fn=instance_refresh_fn,
     )
 
-    # ---------------------------------------------------------
-    # BOOTSTRAP: if instance cache is missing/not-ready, build once before training
-    # ---------------------------------------------------------
-    need_inst_train = not _is_stage_ready(split_train, "instance")
-    need_inst_val = (split_val != split_train) and (not _is_stage_ready(split_val, "instance"))
 
-    if need_inst_train or need_inst_val:
-        print(f"[train_em] BOOTSTRAP instance cache: train_need={need_inst_train} val_need={need_inst_val}")
-
-        # selection 必须 ready（否则 instance_runner 会失败）
-        need_sel_train = not _is_stage_ready(split_train, "selection")
-        need_sel_val = (split_val != split_train) and (not _is_stage_ready(split_val, "selection"))
-        if need_sel_train or need_sel_val:
-            print(f"[train_em] BOOTSTRAP selection cache (required by instance): train_need={need_sel_train} val_need={need_sel_val}")
-            selection_refresh_fn(0)
-
-        # build instance once (overwrite=True in your instance_refresh_fn)
-        instance_refresh_fn(0)
-
-        # 让 token_provider reopen memmap
-        _notify_token_providers_cache_refreshed({
-            "refresh_cheap_cache": False,
-            "refresh_selection_cache": bool(need_sel_train or need_sel_val),
-            "refresh_instance_cache": True,
-        })
 
     # ----------------------------
     # 7) 主训练循环（复用原 train.py 风格）
@@ -701,6 +957,231 @@ def main(cfg: DictConfig) -> None:
                 f"[Epoch {epoch+1}] Improved {monitor_name}: "
                 f"{prev_best:.6f} → {trainer.state.best_metric:.6f}. Saved best checkpoint."
             )
+
+
+    # train_em.py (after training loop)
+    val_eval_dir = Path(eval_dir) / "val"
+    val_eval_dir.mkdir(parents=True, exist_ok=True)
+
+    val_eval_result = evaluate_with_trainer(
+        trainer=trainer,                 # TrainerEM 实例
+        loader=val_loader,
+        task_cfg=cfg.task,
+        logging_cfg=cfg.logging,
+        output_dir=str(val_eval_dir),
+        set_labels=None,
+        aggregate_sets=False,            # EM pair-level
+        tag="val",
+        do_threshold_sweep=cfg.eval.do_threshold_sweep,
+        sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
+        reduction=cfg.run.get("eval_reduction", "max"),
+        softmax_temp=cfg.run.get("eval_softmax_temp", 1.0),
+        topk=cfg.run.get("eval_topk", 3),
+    )
+
+    best_threshold = val_eval_result.get("best_threshold", None)
+    metrics = val_eval_result.get("metrics", {})
+
+    print("\n[TrainEM] Final val metrics:")
+    for k, v in iter_scalar_metrics(metrics):
+        print(f"  {k}: {v:.4f}")
+    if best_threshold is not None:
+        print(f"[TrainEM] Best threshold on val = {float(best_threshold):.4f}")
+
+
+
+    # ============================================================
+    # Optional: evaluate on test split(s) after training (train.py semantics)
+    # - EM pipeline is pair-level: set_labels=None, aggregate_sets=False
+    # - For correctness, each test split must use its own PairBatchBuilderCPU + TokenProvider(split=...)
+    # ============================================================
+    if bool(run_cfg.get("eval_test_after_train", False)):
+        print("\n[TrainEM] eval_test_after_train=True, start evaluating on test set...")
+
+        eval_with_last = bool(run_cfg.get("eval_test_with_last", True))
+        eval_with_best = bool(run_cfg.get("eval_test_with_best", False))
+
+        best_ckpt_path_cfg = run_cfg.get("best_ckpt_path", None)
+        default_best_ckpt_path = str(ckpt_dir / "best.pt")
+        best_ckpt_path = best_ckpt_path_cfg or default_best_ckpt_path
+
+        test_splits = run_cfg.get("test_splits", ["test"])
+        if isinstance(test_splits, str):
+            test_splits = [test_splits]
+        test_splits = [str(x) for x in list(test_splits)]
+
+        # ---- ensure window blocks exist for test splits (train.py semantics) ----
+        for sp in test_splits:
+            get_or_build_blocks(data_cfg, sp, str(cache_root))
+
+        # ---- ensure EM caches exist for test splits (cheap/selection/instance) ----
+        def _refresh_em_caches_for_split(split: str, epoch_for_build: int) -> None:
+            # 强制用“当前模型权重快照”重建 test caches，确保一致
+            cheap_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+            selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+            instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+
+        def run_test_eval_for_current_trainer(tag_prefix: str) -> None:
+            """
+            Mirrors train.py:
+              eval/test/<split>/<tag_prefix>/{thr0_5,val_best,sweep}
+            and writes scalar metrics to wandb summary if enabled.
+            """
+            for split_idx in test_splits:
+                
+                print(f"[TrainEM][{tag_prefix}] Building test loader/token_provider for split='{split_idx}'")
+
+                _refresh_em_caches_for_split(split_idx, epoch_for_build=int(trainer.state.epoch))
+                
+                test_loader = build_eval_loader_for_split(split_idx)
+                tp_test = build_token_provider_for_split(split_idx, require_ready=True)
+
+                test_root = Path(eval_dir) / "test" / str(split_idx) / tag_prefix
+                test_root.mkdir(parents=True, exist_ok=True)
+
+                # ---------- (A) fixed threshold = 0.5 ----------
+                task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+                task_fixed.threshold = 0.5
+                out_dir_fixed = test_root / "thr0_5"
+                out_dir_fixed.mkdir(parents=True, exist_ok=True)
+
+                print(f"[TrainEM][Test {split_idx}][{tag_prefix}] Eval fixed threshold=0.5")
+                with _swap_token_provider_val(trainer, tp_test):
+                    res_fixed = evaluate_with_trainer(
+                        trainer=trainer,
+                        loader=test_loader,
+                        task_cfg=task_fixed,
+                        logging_cfg=cfg.logging,
+                        output_dir=str(out_dir_fixed),
+                        set_labels=None,
+                        aggregate_sets=False,
+                        tag=f"{split_idx}_{tag_prefix}_thr0.5",
+                        do_threshold_sweep=False,
+                        sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
+                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
+                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                    )
+
+                # ---------- (B) val best_threshold (if exists) ----------
+                res_valbest = None
+                if best_threshold is not None:
+                    task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+                    task_valbest.threshold = float(best_threshold)
+                    out_dir_valbest = test_root / "val_best"
+                    out_dir_valbest.mkdir(parents=True, exist_ok=True)
+                    print(
+                        f"[TrainEM][Test {split_idx}][{tag_prefix}] "
+                        f"Eval val best_threshold={float(best_threshold):.4f}"
+                    )
+                    with _swap_token_provider_val(trainer, tp_test):
+                        res_valbest = evaluate_with_trainer(
+                            trainer=trainer,
+                            loader=test_loader,
+                            task_cfg=task_valbest,
+                            logging_cfg=cfg.logging,
+                            output_dir=str(out_dir_valbest),
+                            set_labels=None,
+                            aggregate_sets=False,
+                            tag=f"{split_idx}_{tag_prefix}_valbest",
+                            do_threshold_sweep=False,
+                            sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
+                            reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
+                            softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                            topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                        )
+                else:
+                    print(f"[TrainEM][Test {split_idx}][{tag_prefix}] Skip val-best eval because best_threshold is None.")
+
+                # ---------- (C) sweep on test ----------
+                task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+                out_dir_sweep = test_root / "sweep"
+                out_dir_sweep.mkdir(parents=True, exist_ok=True)
+                print(f"[TrainEM][Test {split_idx}][{tag_prefix}] Eval threshold sweep on test")
+                with _swap_token_provider_val(trainer, tp_test):
+                    res_sweep = evaluate_with_trainer(
+                        trainer=trainer,
+                        loader=test_loader,
+                        task_cfg=task_sweep,
+                        logging_cfg=cfg.logging,
+                        output_dir=str(out_dir_sweep),
+                        set_labels=None,
+                        aggregate_sets=False,
+                        tag=f"{split_idx}_{tag_prefix}_sweep",
+                        do_threshold_sweep=True,
+                        sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
+                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
+                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                    )
+
+                best_thr_test = res_sweep.get("best_threshold", None)
+
+                # ---- print scalar metrics (train.py style) ----
+                metrics_fixed = res_fixed.get("metrics", {})
+                print(f"\n[Test {split_idx}][{tag_prefix}] Fixed threshold=0.5 metrics:")
+                for k, v in iter_scalar_metrics(metrics_fixed):
+                    print(f"  {k}: {v:.4f}")
+
+                metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
+                if metrics_valbest is not None:
+                    print(
+                        f"\n[Test {split_idx}][{tag_prefix}] "
+                        f"Using val best_threshold={float(best_threshold):.4f} metrics:"
+                    )
+                    for k, v in iter_scalar_metrics(metrics_valbest):
+                        print(f"  {k}: {v:.4f}")
+
+                metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
+                if best_thr_test is not None and "metrics_at_best" in res_sweep:
+                    print(
+                        f"\n[Test {split_idx}][{tag_prefix}] "
+                        f"Sweep metrics (best threshold={float(best_thr_test):.4f}):"
+                    )
+                else:
+                    try:
+                        base_thr = float(task_sweep.threshold)
+                    except Exception:
+                        base_thr = float("nan")
+                    print(f"\n[Test {split_idx}][{tag_prefix}] Sweep metrics (base threshold={base_thr:.4f}):")
+
+                for k, v in iter_scalar_metrics(metrics_sweep):
+                    print(f"  {k}: {v:.4f}")
+
+                if best_thr_test is not None:
+                    print(f"[Test {split_idx}][{tag_prefix}] Best threshold on test = {float(best_thr_test):.4f}")
+
+                # ---- wandb summary ----
+                if wandb_run is not None:
+                    prefix = f"test/{split_idx}/{tag_prefix}"
+                    for k, v in iter_scalar_metrics(metrics_fixed):
+                        wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+                    if metrics_valbest is not None:
+                        for k, v in iter_scalar_metrics(metrics_valbest):
+                            wandb_run.summary[f"{prefix}_valbest/{k}"] = v
+                    for k, v in iter_scalar_metrics(metrics_sweep):
+                        wandb_run.summary[f"{prefix}_sweep/{k}"] = v
+                    if best_thr_test is not None:
+                        try:
+                            wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
+                        except Exception:
+                            pass
+
+        # ---- evaluate with current trainer state (LAST) ----
+        if eval_with_last:
+            print("\n[TrainEM] Evaluating on test set with LAST checkpoint (current trainer state)...")
+            run_test_eval_for_current_trainer(tag_prefix="last")
+
+        # ---- optionally load BEST ckpt then evaluate ----
+        if eval_with_best:
+            if best_ckpt_path is not None and os.path.exists(str(best_ckpt_path)):
+                print(f"\n[TrainEM] Loading BEST checkpoint from: {best_ckpt_path}")
+                trainer.load_checkpoint(str(best_ckpt_path), map_location=device)
+                print("[TrainEM] Evaluating on test set with BEST checkpoint...")
+                run_test_eval_for_current_trainer(tag_prefix="best")
+            else:
+                print(f"\n[TrainEM] Skipped eval_test_with_best=True because best checkpoint not found at: {best_ckpt_path}")
+
 
     # wandb finish
     if wandb_run is not None:

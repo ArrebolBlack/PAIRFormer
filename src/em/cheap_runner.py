@@ -219,6 +219,9 @@ class CheapCacheRunner:
         cfg: CheapCacheBuildConfig,
     ) -> None:
         # 1) window-level dataset + loader (must be shuffle=False)
+
+        # IMPORTANT: must be deterministic order (uid-aligned) when writing memmap by offset.
+        # DO NOT set shuffle=True here, otherwise uid->(logit,emb) mapping breaks.
         ds, loader = build_dataset_and_loader(
             data_cfg=self.data_cfg,
             split_idx=str(split),

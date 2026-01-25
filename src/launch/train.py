@@ -821,12 +821,12 @@ def main(cfg: DictConfig):
                 if wandb_run is not None:
                     prefix = f"test/{split_idx}/{tag_prefix}"
                     # # 固定 0.5
-                    # for k, v in iter_scalar_metrics(metrics_fixed):
-                    #     wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+                    for k, v in iter_scalar_metrics(metrics_fixed):
+                        wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
                     # val best
-                    # if metrics_valbest is not None:
-                    #     for k, v in iter_scalar_metrics(metrics_valbest):
-                    #         wandb_run.summary[f"{prefix}_valbest/{k}"] = v
+                    if metrics_valbest is not None:
+                        for k, v in iter_scalar_metrics(metrics_valbest):
+                            wandb_run.summary[f"{prefix}_valbest/{k}"] = v
                     # sweep：记录 best-threshold 对应的 metrics
                     for k, v in iter_scalar_metrics(metrics_sweep):
                         wandb_run.summary[f"{prefix}_sweep/{k}"] = v

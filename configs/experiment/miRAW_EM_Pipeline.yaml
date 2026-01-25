@@ -21,9 +21,12 @@ paths:
 data:
   name: mirna_miraw
   path:
-    train: "data/miRAW_Train_Validation.txt"
-    val:   "data/miRAW_Train_Validation.txt"
-    test:  "data/miRAW_Test_total.txt"
+    # train: "data/miRAW_Train_Validation.txt"
+    # val:   "data/miRAW_Train_Validation.txt"
+    # test:  "data/miRAW_Test_total.txt"
+    train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    test: "data/miRAW_Test_0,6-9.txt"
   with_esa: true
 
 # ===================== 运行配置 run（train_em.py 会用到的字段） =====================
@@ -41,7 +44,7 @@ run:
   num_epochs: 100
 
   # --- token budget ---
-  kmax: 128
+  kmax: 512
 
   # --- PairBatchBuilderCPU 可选字段（影响 batch_cpu 是否带 pos/esa_scores） ---
   include_pos: true
@@ -60,10 +63,25 @@ run:
   checkpoint: null
 
   # （可选）训练完是否跑 test：train_em.py 当前未实现自动 test，这里先保留占位
-  eval_test_after_train: false
+  eval_test_after_train: true
   test_splits: ["test"]
   eval_test_with_last: true
   eval_test_with_best: false
+  best_ckpt_path: null            # 可选；默认用 ckpt_dir/best.pt
+
+  # MIL 聚合（pair-level 这边不再需要 bag-level MIL）
+  train_reduction: none       # Stage-1: window-level TargetNet 的 bag 聚合方式（这里不启用）
+  eval_reduction: none        # pair-level 一般就 none；如果你还想对 pair 再做 max，可以改成 max
+  test_reduction: none
+
+  # softmax 温度 / topk（如果后面 eval/test 想做 top-k 聚合可以继续用）
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+
 
 # ===================== EM 相关（Controller / E-step 离线刷新触发） =====================
 
@@ -82,16 +100,53 @@ em:
   inst_version: "inst_v0"
   cheap_emb_dim: 64
   cheap_version: "cheap_v0"
-  sel_version: "sel_v0"
+
+  bootstrap:
+    enabled: true
+    overwrite_all: true     # 强烈建议 True
+    # overwrite_all: false  # 如果你要省时间才改 false
+    # skip_if_ready: true   # overwrite_all=false 时建议 true
+    epoch: 0
+
+
+  # 1) selector module（Hydra 可 instantiate）
+  selector_module:
+    _target_: src.selectors.selector_module.SelectorModule
+    cfg:
+      _target_: src.selectors.st_selector.STSelectorConfig
+      kmax: ${run.kmax}               # 保持和 run.kmax 一致，避免 shape 不一致
+      k1_ratio: 1
+      score_use_sigmoid: false
+      exploration_sigma: 0.0
+      base_seed: ${seed}
+      pos_bin_eps: 1e-6
+      use_hash_dedup: true
+      hash_seed: ${seed}
+      score_norm_z: true
+      score_norm_eps: 1e-6
+      quota_top_t: 8
+      quota_tau_w: 1.0
+
+  # 2) sel_version 建议留空/auto：由 train_em 自动算 hash（见下面代码修复）
+  sel_version: null
+
+  # 3) selection cache 的 runner 参数
+  selection_cache:
+    pair_batch_size: 256
+
 
 
 # ===================== EM cache root（实例/selection/cheap 的 memmap 根目录） =====================
 # train_em.py 默认 em_cache_root=cache_root；这里显式给出，避免混淆
 em_cache_root: "${paths.cache_root}"
 
+# ===================== Cheap 预训练 ckpt（可选） =====================
+# train_em.py 会尝试加载；如果为空则从随机/当前权重开始
+cheap_ckpt_path: "checkpoints/CheapCTSNet/checkpoints/last.pt"
+
 # ===================== Instance 预训练 ckpt（可选） =====================
 # train_em.py 会尝试加载；如果为空则从随机/当前权重开始
-instance_ckpt_path: null
+instance_ckpt_path: "checkpoints/miRAW_TargetNet_Optimized_dp-0.1/checkpoints/last.pt"
 
 # ===================== TokenProvider（新 pipeline 核心开关） =====================
 token_provider:
@@ -199,36 +254,97 @@ model:
   num_seeds: 1
   use_output_sab: false
 
-# ===================== TrainerEM（新 pipeline 的训练控制） =====================
+##########################################################
+  # arch: PairTransformerAggregator
+  # name: pair_agg_v0
+
+  # # IMPORTANT: in_dim 必须等于 PairLevelDataset.token_dim
+  # #   token_dim = emb_dim + 2(+1 if pos_in_token)
+  # #   比如 emb_dim=512:
+  # #     pos_in_token = true  -> in_dim = 515
+  # #     pos_in_token = false -> in_dim = 514
+  # # in_dim: 515
+  # in_dim: 387     # TargetNet_Optimized embedding dim = 384
+
+  # d_model: 256
+  # n_layers: 3
+  # n_heads: 8
+  # dim_ff: 512
+  # dropout: 0.1
+  # ff_activation: gelu
+
+  # max_len: 512
+  # use_cls_token: true
+  # pos_encoding_type: sinusoidal   # 用你的 TransformerEncoder 支持的类型
+  # causal: false
+
+  # # 连续位置编码（只在 pos_in_token=false 时真正起作用）
+  # use_rel_pos: false              # base: 不用连续位置编码
+  # rel_pos_encoding_type: sinusoidal # [mlp, rope, sinusoidal]
+  # rel_pos_hidden_dim: 32
+
+
+
+# ===================== TrainerEM（EM pipeline 的训练控制） =====================
 trainer_em:
+  # --- loop control ---
   num_epochs: ${run.num_epochs}
   log_every: 50
   grad_accum_steps: 1
   clip_grad_norm: 0.0
   use_amp: false
 
-  # optimizer 超参（TrainerEM 内部是 AdamW，两套：agg/inst）
+  # --- loss（从旧 train: 整体迁移过来）---
+  loss_type: focal            # bce / focal
+  esa_weighting: true         # 是否使用 ESA 加权（pair-level 如不需要可 false）
+
+  # focal / smoothing / bce 相关
+  focal_alpha: 0.4
+  focal_gamma: 1.0
+  focal_lambda: 1.0
+
+  label_smoothing: true
+  smooth_neg: 0.05
+  smooth_pos: 0.95
+
+  bce_lambda: 0.01
+  pos_weight: 1.0             # 若用于 BCEWithLogitsLoss(pos_weight)
+  bce_pos_weight: 1.0         # 兼容你旧代码可能用到的字段名
+
+  # esa weighting（window-size/score weighting）
+  esa_scale: 10.0
+  esa_lambda_pos: 1.0
+  esa_lambda_neg: 0.5
+
+  # --- optimizer（共享超参；agg/inst 只分 lr/wd）---
+  optimizer: adamw
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  amsgrad: false
+
+  # 两套 optimizer：agg / inst
   lr_agg: 3e-4
   wd_agg: 1e-2
   lr_inst: 1e-5
   wd_inst: 0.0
 
-  # scheduler（对齐 TrainerEMConfig：none/plateau/cosine/step）
-  scheduler_agg: "cosine"
-  scheduler_inst: "none"
+  # --- scheduler（对齐 TrainerEMConfig：none/plateau/cosine/step）---
+  scheduler_agg: cosine
+  scheduler_inst: none
   scheduler_t_max: ${run.num_epochs}
   scheduler_step_size: 10
   scheduler_gamma: 0.1
   scheduler_factor: 0.2
   scheduler_patience: 5
 
-  # monitor/best
-  monitor: "loss"
+  # --- monitor/best ---
+  monitor: loss
   greater_is_better: false
 
-  # EMA（默认只对 agg）
+  # --- EMA（默认只对 agg）---
   ema_enabled: true
   ema_decay: 0.999
+
 
 # ===================== 任务与评估（复用旧 evaluator/metrics 语义） =====================
 task:

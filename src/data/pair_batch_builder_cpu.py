@@ -154,10 +154,34 @@ class PairBatchBuilderCPU:
         y_pair = torch.zeros((B,), dtype=torch.float32, device="cpu")
         valid_start = start_uids_t >= 0
 
+
+        '''
+        这里观察dump_cts_embedding.py得，原来老pipeline的处理是直接跳过这种空pair
+        于是修改DynamicPairDataset初始化时过滤空pair
+        所以如果还遇到，就直接raise error
+
+        但是这样做不是很符合语义，没扫出CTS就应该判负
+        DynamicPairDataset保留2版，这里也保留2版，可以自行调整
+        '''
+        # # 约定：空 pair 作为合法样本，y_pair=0（y_pair 已经默认是 0）
+        # # 同时必须强制该样本没有任何有效 token，避免后续 gather 误读 uid
+        # empty = ~valid_start  # 空 pair：没有任何 CTS
+        # if empty.any():
+        #     sel_uids[empty] = -1
+        #     mask[empty] = False  # 注意：你的 mask=True 表示有效位置（因为后面 nonzero(mask)）
+        #     # 可选：如果你还想保留提示但不刷屏，可以改成每 N step 打一次
+        #     # bad = empty.nonzero(as_tuple=False).view(-1)[:10].tolist()
+        #     # print(f"[PairBatchBuilderCPU] Info: empty pairs treated as y_pair=0. idx(first10)={bad}")
+
+        # # 重新确保 mask 和 sel_uids 一致（防御式）
+        # mask = mask & (sel_uids >= 0)
+
+        # 检测到空pair（不含CTS）报错
         if not valid_start.all():
             bad = (~valid_start).nonzero(as_tuple=False).view(-1)[:10].tolist()
-            # raise RuntimeError(f"[PairBatchBuilderCPU] found empty pairs (no CTS). idx(first10)={bad}")
-            print(f"[PairBatchBuilderCPU] Warning: found empty pairs (no CTS). idx(first10)={bad}")
+            raise RuntimeError(f"[PairBatchBuilderCPU] found empty pairs (no CTS). idx(first10)={bad}")
+            # print(f"[PairBatchBuilderCPU] Warning: found empty pairs (no CTS). idx(first10)={bad}")
+
 
         if valid_start.any():
             meta_y = self.cts_ds.batch_gather_by_uid(start_uids_t[valid_start], fields=("labels",))
