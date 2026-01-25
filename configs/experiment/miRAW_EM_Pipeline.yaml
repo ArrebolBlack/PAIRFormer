@@ -39,7 +39,7 @@ run:
 
   # --- dataloader ---
   batch_size: 256
-  num_workers: 8
+  num_workers: 16
   pin_memory: true
   num_epochs: 100
 
@@ -62,7 +62,7 @@ run:
   resume: false
   checkpoint: null
 
-  # （可选）训练完是否跑 test：train_em.py 当前未实现自动 test，这里先保留占位
+  # 训练完是否跑 test：train_em.py 
   eval_test_after_train: true
   test_splits: ["test"]
   eval_test_with_last: true
@@ -83,11 +83,29 @@ run:
   test_softmax_temp: 1.0
 
 
+  # 入口 bootstrap 永远 overwrite
+  # 当进入联合训练（instance更新）后，
+  # 如果 train/val 选择 cached：每次instance update 后都 refresh instance cache 
+  # 如果 train/val 选择 online：不refresh instance cache，并且train/val都走 online
+  # 注意：instance模型要训练（反传）时，必须online，这里的cached是指发生在训练之后，用当前inst model权重重建cache，用于后续使用
+  # 适配 —— warmup训练aggregator，然后同时训练，一直online
+  # val_online: false   # 推荐 true：val 永远在线，不重建 val instance cache
+
+  # 写cache路径
+  train_instance_mode: "cached" # ["cached", "online"]
+  val_instance_mode: "cached" # ["cached", "online"]
+  force_overwrite_bootstrap: true
+  refresh_instance_after_update: true
+
+  # 全程online路径
+  # train_instance_mode: online
+  # val_instance_mode: online
+  # force_overwrite_bootstrap: true
+  # refresh_instance_after_update: false
+
 # ===================== EM 相关（Controller / E-step 离线刷新触发） =====================
 
 em:
-  # 单一真源：直接引用 token_provider.policy，避免双份 policy 漂移
-  update_policy: ${token_provider.policy}
 
   controller:
     refresh_on_rank0_only: true
@@ -101,12 +119,25 @@ em:
   cheap_emb_dim: 64
   cheap_version: "cheap_v0"
 
+  cheap_cache:
+    batch_size: 10240
+    num_workers: 16
+    amp: true 
+    has_entropy: false 
+
+  instance_cache:
+    batch_size: 10240
+    num_workers: 16
+    use_amp: True
+    normalize_emb: false
+
+  # 注意：这里的控制转移到 run.force_overwrite_bootstrap 了
   bootstrap:
     enabled: true
-    overwrite_all: true     # 强烈建议 True
-    # overwrite_all: false  # 如果你要省时间才改 false
-    # skip_if_ready: true   # overwrite_all=false 时建议 true
-    epoch: 0
+    # overwrite_all: true     # 强烈建议 True
+    # # overwrite_all: false  # 如果你要省时间才改 false
+    # # skip_if_ready: true   # overwrite_all=false 时建议 true
+    # epoch: 0
 
 
   # 1) selector module（Hydra 可 instantiate）
@@ -132,8 +163,34 @@ em:
 
   # 3) selection cache 的 runner 参数
   selection_cache:
-    pair_batch_size: 256
+    pair_batch_size: 10240  # 只影响“写入 selection cache 的 flush 频率”   selector实际按pair串行计算
 
+
+  # UpdatePolicy：step-level（train_instance/use_cache）+ epoch-level refresh（离线 rebuild）
+  # Gate 6 最小可跑：全部固定 cached + refresh=0
+  # 这里的policy是policy_train, policy_eval 默认都cached
+  policy:
+    warmup_epochs: 0
+
+    # ---------- step-level (instance) ----------
+    instance_mode: "cached"              # ["cached","online","hybrid"]
+    instance_update_every_epochs: 4  
+    instance_update_steps: 0          # <=0 代表“整 epoch online”（本 patch 新增语义）
+    # 建议：不要再用 refresh_instance_cache_every_epochs 做定时刷新  
+
+    # ---------- step-level (cheap) ----------
+    cheap_mode: "cached"                 # 先保留字段；后续 Gate 7 你再接 cheap online/selector
+    cheap_update_every_steps: 0
+    cheap_update_every_epochs: 0
+    cheap_update_steps: 0
+
+    # ---------- epoch-level refresh (offline rebuild) ----------
+    refresh_cheap_cache_every_epochs: 0
+    refresh_selection_cache_every_epochs: 0
+    refresh_instance_cache_every_epochs: 0
+
+    refresh_selection_follows_cheap: true
+    refresh_instance_follows_selection: true
 
 
 # ===================== EM cache root（实例/selection/cheap 的 memmap 根目录） =====================
@@ -162,31 +219,6 @@ token_provider:
     use_inst_logit: true
     use_esa: true
     use_pos: true
-
-  # UpdatePolicy：step-level（train_instance/use_cache）+ epoch-level refresh（离线 rebuild）
-  # Gate 6 最小可跑：全部固定 cached + refresh=0
-  policy:
-    warmup_epochs: 0
-
-    # ---------- step-level (instance) ----------
-    instance_mode: "cached"              # ["cached","online","hybrid"]
-    instance_update_every_steps: 0
-    instance_update_every_epochs: 0
-    instance_update_steps: 0
-
-    # ---------- step-level (cheap) ----------
-    cheap_mode: "cached"                 # 先保留字段；后续 Gate 7 你再接 cheap online/selector
-    cheap_update_every_steps: 0
-    cheap_update_every_epochs: 0
-    cheap_update_steps: 0
-
-    # ---------- epoch-level refresh (offline rebuild) ----------
-    refresh_cheap_cache_every_epochs: 0
-    refresh_selection_cache_every_epochs: 0
-    refresh_instance_cache_every_epochs: 0
-
-    refresh_selection_follows_cheap: true
-    refresh_instance_follows_selection: true
 
 # ===================== 模型：CheapModel（沿用 CheapCTSNet.yaml，供未来 Gate7/离线 refresh 用） =====================
 # 注意：Gate 6 最小跑通时你可以不实际用 cheap_model，但字段保留用于完整控制与复用
@@ -230,6 +262,8 @@ instance_model:
 # ===================== 模型：Aggregator（沿用 pair_agg_set_transformer baseline） =====================
 # train_em.py 用 cfg.model 作为 aggregator config
 model:
+
+
   arch: PairSetTransformerAggregator
   name: pair_set_transformer_v0
 

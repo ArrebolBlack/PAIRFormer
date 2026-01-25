@@ -432,6 +432,18 @@ class MemmapCacheStore:
         self._sel_uids[pair_ids, :] = sel_uids.detach().cpu().numpy()
         self._sel_len[pair_ids] = sel_len.detach().cpu().numpy()
 
+    def write_selection_slice(self, start_pair_id: int, sel_uids: torch.Tensor, sel_len: torch.Tensor) -> None:
+        if self._sel_uids is None or self._sel_len is None:
+            raise RuntimeError("SelectionCache not opened.")
+        start = int(start_pair_id)
+        B = int(sel_uids.shape[0])
+        end = start + B
+
+        # 注意：sel_uids/sel_len 已在 CPU 上时，.numpy() 通常不复制，但仍有少量开销
+        self._sel_uids[start:end, :] = sel_uids.detach().cpu().numpy()
+        self._sel_len[start:end] = sel_len.detach().cpu().numpy()
+
+
     def read_selection(self, pair_ids: Union[List[int], torch.Tensor], K: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._sel_uids is None or self._sel_len is None:
             raise RuntimeError("SelectionCache not opened.")

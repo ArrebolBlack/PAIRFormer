@@ -109,6 +109,7 @@ class TokenProvider:
         self,
         *,
         cfg: TokenProviderConfig,
+        policy: Optional[UpdatePolicy] = None,
         instance_model: torch.nn.Module,
         device: torch.device,
         em_cache_root: str,
@@ -136,8 +137,11 @@ class TokenProvider:
         self.device = device
         self.instance_model = instance_model
 
-        # 兼容：你不传 plan 时，TokenProvider 自己也能决策
-        self.policy = UpdatePolicy(cfg.policy)
+        # 重要：policy 只允许单一来源（上层注入优先）
+        # - 若上层注入 policy：TokenProvider 仅使用它，不再创建新 policy
+        # - 若未注入：才根据 cfg.policy 创建（兼容旧用法）
+        self._owns_policy = (policy is None)
+        self.policy = policy if policy is not None else UpdatePolicy(self.cfg.policy)
 
         # store identity
         self._em_cache_root = str(em_cache_root)
@@ -181,7 +185,9 @@ class TokenProvider:
             self._reopen_instance_store(require_ready=False)
 
     def on_epoch_begin(self, epoch: int) -> None:
-        self.policy.on_epoch_begin(epoch)
+        # 仅当TokenProvider自己创建policy时才调用，避免controller与token provider双重触发on_epoch_begin
+        if self._owns_policy:
+            self.policy.on_epoch_begin(epoch)
 
     def build_tokens(
         self,

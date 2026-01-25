@@ -80,6 +80,15 @@ class EMPipelineController:
         self._selection_refresh_fn = selection_refresh_fn
         self._instance_refresh_fn = instance_refresh_fn
 
+
+        self.last_refresh_plan: Dict[str, bool] = {
+            "refresh_cheap_cache": False,
+            "refresh_selection_cache": False,
+            "refresh_instance_cache": False,
+        }
+
+
+
     def _log(self, msg: str) -> None:
         if self.cfg.verbose and _is_rank0():
             print(msg, flush=True)
@@ -92,6 +101,7 @@ class EMPipelineController:
 
     def maybe_refresh_and_rebuild(self, *, epoch: int) -> Optional[Any]:
         refresh_plan = self.policy.refresh_plan(epoch)
+        self.last_refresh_plan = dict(refresh_plan)  # 记录实际使用的 plan
         # refresh_plan = dict(self.policy.refresh_plan(epoch))  # ✅ copy，允许我们改写
         do_cheap = bool(refresh_plan.get("refresh_cheap_cache", False))
         do_sel = bool(refresh_plan.get("refresh_selection_cache", False))

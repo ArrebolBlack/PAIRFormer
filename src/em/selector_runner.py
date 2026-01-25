@@ -34,7 +34,7 @@ class SelectionCacheBuildConfig:
     epoch: int = 0  # for exploration reproducibility (train only)
 
     # performance knobs
-    pair_batch_size: int = 64  # write_selection in batch; 1 => per-pair
+    pair_batch_size: int = 256  # write_selection in batch; 1 => per-pair
     progress_bar: bool = True
 
     def __post_init__(self):
@@ -201,6 +201,15 @@ class SelectionCacheRunner:
         logit_list: List[torch.Tensor] = []
         emb_list: List[Optional[torch.Tensor]] = []
 
+
+        '''
+        selector 优化1
+        把 selection 写入从 fancy indexing 改为切片写入
+        几乎没变化
+        去掉 torch.tensor(pair_ids_buf) 的构造与再次转 numpy
+        避免 fancy indexing 写 memmap（通常比切片慢）
+        让 pair_batch_size 的影响更“真实”（大 batch 写入更有效率）
+        '''
         def _flush_batch() -> None:
             if not pair_ids_buf:
                 return
@@ -214,16 +223,29 @@ class SelectionCacheRunner:
                 epoch=epoch,
                 pair_ids=pair_ids_buf,
             )
-            store.write_selection(
-                pair_ids=torch.tensor(pair_ids_buf, dtype=torch.long, device="cpu"),
+            # store.write_selection(
+            #     pair_ids=torch.tensor(pair_ids_buf, dtype=torch.long, device="cpu"),
+            #     sel_uids=sel_uids_b,   # [B,kmax]
+            #     sel_len=sel_len_b,     # [B]
+            # )
+
+            # pair_ids_buf 在这里是连续递增的
+            start = pair_ids_buf[0]
+            # （可选）做一次断言，确保连续，debug 期用
+            # assert pair_ids_buf[-1] == start + len(pair_ids_buf) - 1
+
+            store.write_selection_slice(
+                start_pair_id=start,
                 sel_uids=sel_uids_b,   # [B,kmax]
                 sel_len=sel_len_b,     # [B]
             )
+
             pair_ids_buf.clear()
             uids_list.clear()
             pos_list.clear()
             logit_list.clear()
             emb_list.clear()
+
 
         for pair_id in it:
             s, e = ds.get_pair_slice(int(pair_id))

@@ -7,6 +7,11 @@ try:
 except RuntimeError:
     pass
 
+import warnings
+from Bio import BiopythonDeprecationWarning
+warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
+
+
 import json
 import os
 from pathlib import Path
@@ -116,6 +121,30 @@ def main(cfg: DictConfig) -> None:
     batch_size = int(run_cfg.get("batch_size", 256))
     num_workers = int(run_cfg.get("num_workers", 8))
 
+
+
+    # TODO：临时修改标记
+    train_instance_mode = run_cfg.get("train_instance_mode", "cached")
+    val_instance_mode   = run_cfg.get("val_instance_mode", "cached")
+
+    train_use_inst_cache_default = (train_instance_mode == "cached")
+    val_use_inst_cache_default   = (val_instance_mode == "cached")
+
+    # Hard requirement from you: entry must overwrite caches (avoid cross-run contamination)
+    force_overwrite_bootstrap = bool(run_cfg.get("force_overwrite_bootstrap", True))
+
+    # After instance-update epoch: rebuild instance cache only if that split uses cached mode
+    refresh_instance_after_update = bool(
+        run_cfg.get("refresh_instance_after_update", (train_use_inst_cache_default or val_use_inst_cache_default))
+    )
+
+    print(
+        f"[train_em] instance modes: train={train_instance_mode} val={val_instance_mode} | "
+        f"force_overwrite_bootstrap={force_overwrite_bootstrap} "
+        f"refresh_instance_after_update={refresh_instance_after_update}"
+    )
+     # TODO：临时修改标记
+
     # cache_root
     default_cache = cfg.get("paths", {}).get("cache_root", "cache")
     cache_root_cfg = run_cfg.get("cache_path", default_cache)
@@ -196,11 +225,17 @@ def main(cfg: DictConfig) -> None:
     # ---------------------------------------------------------
     em_node = cfg.get("em", {})
 
-    policy_node = em_node.get("update_policy", None)
+    policy_node = em_node.get("policy", None)
     if policy_node is None:
         raise KeyError("[train_em] missing cfg.em.update_policy for scheme-B.")
     pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
-    policy = UpdatePolicy(UpdatePolicyConfig(**pol_cfg_dict))
+    
+    policy_train = UpdatePolicy(UpdatePolicyConfig(**pol_cfg_dict))
+    policy_eval = UpdatePolicy(UpdatePolicyConfig(
+        warmup_epochs=0,
+        instance_mode=("cached" if val_use_inst_cache_default else "online"),  # TODO：临时修改标记
+        cheap_mode="cached",
+    ))
 
     ctrl_node = em_node.get("controller", None)
     if ctrl_node is None:
@@ -347,6 +382,7 @@ def main(cfg: DictConfig) -> None:
     sel_pair_batch_size = int(sel_node.get("pair_batch_size", 64))
 
     # 5) kmax 以 selector.cfg.kmax 为准（防止 config 两处不一致）
+    # 在config文件中，em.selector_module.cfg.kmax: ${run.kmax} ，已经实现绑定。
     if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax"):
         sel_kmax = int(selector_module.cfg.kmax)
     else:
@@ -399,6 +435,7 @@ def main(cfg: DictConfig) -> None:
         splits: Optional[Iterable[str]] = None,
     ) -> None:
         splits_use = list(splits) if splits is not None else list(refresh_splits)
+
         # 注意：instance_runner 会检查 selection/cheap meta ready + version consistency
         run_instance_cache(
             data_cfg=data_cfg,
@@ -467,11 +504,15 @@ def main(cfg: DictConfig) -> None:
     bootstrap_node = em_node.get("bootstrap", {})
     bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
 
-    # 推荐默认 True：每次 train 都强制重建，避免旧 meta/version/path_hash 踩雷
-    bootstrap_overwrite_all = bool(bootstrap_node.get("overwrite_all", True))
+    # # 推荐默认 True：每次 train 都强制重建，避免旧 meta/version/path_hash 踩雷
+    # bootstrap_overwrite_all = bool(bootstrap_node.get("overwrite_all", True))
 
-    # overwrite_all=False 时：只补缺；此时建议 skip_if_ready=True
-    bootstrap_skip_if_ready = bool(bootstrap_node.get("skip_if_ready", (not bootstrap_overwrite_all)))
+    # # overwrite_all=False 时：只补缺；此时建议 skip_if_ready=True
+    # bootstrap_skip_if_ready = bool(bootstrap_node.get("skip_if_ready", (not bootstrap_overwrite_all)))
+    # TODO：临时修改标记
+    bootstrap_overwrite_all = True if force_overwrite_bootstrap else bool(bootstrap_node.get("overwrite_all", True))
+    bootstrap_skip_if_ready = False if bootstrap_overwrite_all else bool(bootstrap_node.get("skip_if_ready", True))
+
 
     bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
 
@@ -693,9 +734,11 @@ def main(cfg: DictConfig) -> None:
     tp_cfg_node = cfg.get("token_provider", cfg.get("em", {}).get("token_provider", None))
     if tp_cfg_node is None:
         raise KeyError("[train_em] missing token_provider config. Expected cfg.token_provider or cfg.em.token_provider")
+    
 
     token_provider_cfg = TokenProviderConfig(
-        policy=tp_cfg_node.policy,
+        # 这里期待的类型是 UpdatePolicyConfig
+        policy=UpdatePolicyConfig(**pol_cfg_dict),
         assemble=tp_cfg_node.assemble,
         use_amp=bool(tp_cfg_node.get("use_amp", False)),
         normalize_tokens=bool(tp_cfg_node.get("normalize_tokens", False)),
@@ -711,6 +754,7 @@ def main(cfg: DictConfig) -> None:
 
     token_provider_train = TokenProvider(
         cfg=token_provider_cfg,
+        policy=policy_train,
         instance_model=instance_model,
         device=device,
         em_cache_root=str(em_cache_root),
@@ -722,10 +766,12 @@ def main(cfg: DictConfig) -> None:
         inst_version=inst_version,
         sel_version_used=sel_version_train,
         cheap_version_used=cheap_version_used_train,
+        require_ready=train_use_inst_cache_default,    # TODO：临时修改标记
     )
 
     token_provider_val = TokenProvider(
         cfg=token_provider_cfg,
+        policy=policy_eval,
         instance_model=instance_model,
         device=device,
         em_cache_root=str(em_cache_root),
@@ -737,11 +783,8 @@ def main(cfg: DictConfig) -> None:
         inst_version=inst_version,
         sel_version_used=sel_version_val,
         cheap_version_used=cheap_version_used_val,
+        require_ready=val_use_inst_cache_default,     # TODO：临时修改标记
     )
-
-    # ---- 共享同一个 policy ----
-    token_provider_train.policy = policy
-    token_provider_val.policy = policy
 
 
     def _read_split_meta_required(split: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -761,6 +804,7 @@ def main(cfg: DictConfig) -> None:
 
         tp = TokenProvider(
             cfg=token_provider_cfg,
+            policy=policy_eval,
             instance_model=instance_model,
             device=device,
             em_cache_root=str(em_cache_root),
@@ -774,8 +818,7 @@ def main(cfg: DictConfig) -> None:
             cheap_version_used=cheap_version_used,
             require_ready=bool(require_ready),
         )
-        # share same policy object (not critical for eval, but consistent)
-        tp.policy = policy
+
         return tp
 
 
@@ -878,7 +921,7 @@ def main(cfg: DictConfig) -> None:
     # ---- Controller：注入 refresh_fn（只走 python，不走 cmd）----
     ctrl = EMPipelineController(
         cfg=ctrl_cfg,
-        update_policy=policy,
+        update_policy=policy_train, 
         token_providers=[token_provider_train, token_provider_val],
         build_train_loader_fn=build_train_loader,          # selection refresh 后重建 train loader
         on_loader_rebuilt_fn=trainer.set_train_loader,     # 直接让 trainer 换 loader
@@ -894,16 +937,53 @@ def main(cfg: DictConfig) -> None:
     # ----------------------------
     num_epochs = int(tr_cfg.num_epochs)
 
+    # Unified schedule:
+    # - warmup_epochs: Agg-only (cached)
+    # - every instance_update_every_epochs: instance-update epoch (online train instance), then refresh instance cache for train+val
+    warmup_epochs = int(pol_cfg_dict.get("warmup_epochs", 0))
+    inst_every = int(pol_cfg_dict.get("instance_update_every_epochs", 0))
+    if inst_every < 0:
+        inst_every = 0
+
+    val_online_cfg = bool(run_cfg.get("val_online", False))
+    if val_online_cfg:
+        print("[train_em] WARN run.val_online will be ignored in unified scheme (val always cached).")
+ 
+
     for epoch in range(trainer.state.epoch, num_epochs):
         trainer.state.epoch = epoch
         # 只调用一次：包含 policy.on_epoch_begin + token_providers.on_epoch_begin
         ctrl.on_epoch_begin(epoch)
 
-        # （可选）如果你想在 refresh 前先拿到计划，用于后续重建 val loader
-        refresh_plan = policy.refresh_plan(epoch)
+        # # 方案A：判断本 epoch 是否为“整轮 instance-update”
+        # # 注意：is_instance_update_epoch 依赖 policy.on_epoch_begin 已被调用（ctrl.on_epoch_begin 已做）
+        # do_inst_epoch = bool(policy_train.is_instance_update_epoch())
+
+        # Decide instance-update epoch deterministically (epoch-level)
+        do_inst_epoch = False
+        if inst_every > 0 and epoch >= warmup_epochs:
+            do_inst_epoch = (((epoch - warmup_epochs) % inst_every) == 0)
+
+
+        trainer.set_instance_trainable(do_inst_epoch)
+        if do_inst_epoch:
+            print(f"[TrainEM][epoch={epoch}] Instance-update epoch: UNFREEZE instance_model.")
+        else:
+            print(f"[TrainEM][epoch={epoch}] Agg-only epoch: FREEZE instance_model.")
+
+        # Force train token plan for the whole epoch (avoid step_plan semantics drift)
+        if do_inst_epoch:
+            # online + train instance
+            trainer.set_train_plan_override({"train_instance": True, "use_instance_cache": False})
+        else:
+            # cached only
+            # trainer.set_train_plan_override({"train_instance": False, "use_instance_cache": True})
+            trainer.set_train_plan_override({"train_instance": False, "use_instance_cache": train_use_inst_cache_default}) # TODO：临时修改标记
+
 
         # E-step + rebuild train loader（单卡）
         new_loader = ctrl.maybe_refresh_and_rebuild(epoch=epoch)
+        refresh_plan = dict(ctrl.last_refresh_plan)  # ✅ 正确时机：refresh 后再读
         if new_loader is not None:
             train_loader = new_loader
             # 这一句其实 controller 已经通过 on_loader_rebuilt_fn 调过了；保留也无害
@@ -919,13 +999,81 @@ def main(cfg: DictConfig) -> None:
             _sync_token_provider_identity(token_provider_val, split_val)
 
 
-
         train_metrics = trainer.train_one_epoch(train_loader)
         train_loss = float(train_metrics.get("loss", 0.0))
         print(f"[Epoch {epoch+1}/{num_epochs}] Train loss = {train_loss:.4f}")
 
+        # 方案A关键：如果本 epoch 更新了 instance，则训练完成后立刻 refresh instance cache (train+val)，再做 val
+        did_train_inst = float(train_metrics.get("train_inst_pct", 0.0)) > 0.0
+        # if do_inst_epoch and did_train_inst:
+        #     print(f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for splits={refresh_splits} after instance update...")
+        #     instance_refresh_fn(
+        #         epoch,
+        #         overwrite=True,
+        #         skip_if_ready=False,
+        #         splits=refresh_splits,
+        #     )
+        #     # 通知 token_provider reopen memmap（避免 stale mmap handle）
+        #     _notify_token_providers_cache_refreshed({"refresh_instance_cache": True})
+
+        # TODO：临时修改标记
+        post_update_splits = []
+        if train_use_inst_cache_default:
+            post_update_splits.append(split_train)
+        if (split_val != split_train) and val_use_inst_cache_default:
+            post_update_splits.append(split_val)
+
+        if do_inst_epoch and did_train_inst and refresh_instance_after_update and len(post_update_splits) > 0:
+            print(f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for splits={post_update_splits} after instance update...")
+            instance_refresh_fn(epoch, overwrite=True, skip_if_ready=False, splits=post_update_splits)
+            _notify_token_providers_cache_refreshed({"refresh_instance_cache": True})
+            
+        # did_train_inst = float(train_metrics.get("train_inst_pct", 0.0)) > 0.0
+
+        # # 额外优化开关：val 永远 online（不写 cache），从而省掉 val instance cache 重建
+        # val_online = bool(run_cfg.get("val_online", True))
+
+        # if do_inst_epoch and did_train_inst:
+        #     if val_online:
+        #         print(f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for TRAIN only (val will be online)...")
+        #         instance_refresh_fn(
+        #             epoch,
+        #             overwrite=True,
+        #             skip_if_ready=False,
+        #             splits=[split_train],
+        #         )
+        #         # 只让 train TP reopen（val TP 不用 cache）
+        #         if hasattr(token_provider_train, "on_cache_refreshed"):
+        #             token_provider_train.on_cache_refreshed({"refresh_instance_cache": True})
+        #     else:
+        #         print(f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for splits={refresh_splits} after instance update...")
+        #         instance_refresh_fn(
+        #             epoch,
+        #             overwrite=True,
+        #             skip_if_ready=False,
+        #             splits=refresh_splits,
+        #         )
+        #         _notify_token_providers_cache_refreshed({"refresh_instance_cache": True})
+ 
+
+
         prev_best = trainer.state.best_metric
-        val_metrics = trainer.validate_one_epoch(val_loader, use_ema=True)
+        # val_metrics = trainer.validate_one_epoch(val_loader, use_ema=True)
+        # if val_online:
+        #     # 强制 online：不读 cache，不写 cache，语义永远对应当前 instance+agg
+        #     val_metrics = trainer.validate_one_epoch(val_loader, use_ema=True, use_instance_cache=False)
+        # else:
+        #     val_metrics = trainer.validate_one_epoch(val_loader, use_ema=True, use_instance_cache=True)
+
+        # Unified: val always uses cache (and cache has been refreshed if this was an instance-update epoch)
+        # val_metrics = trainer.validate_one_epoch(val_loader, use_ema=True, use_instance_cache=True)
+        val_metrics = trainer.validate_one_epoch(  # TODO：临时修改标记
+            val_loader,
+            use_ema=True,
+            use_instance_cache=val_use_inst_cache_default,
+        )
+
+
         val_loss = float(val_metrics.get("loss", 0.0))
 
         # scheduler + best

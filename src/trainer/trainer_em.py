@@ -195,6 +195,10 @@ class TrainerEM:
 
         self.token_provider_val = token_provider_val
 
+        # epoch-level override for train token plan (force cached/online deterministically)
+        # If set, _build_tokens_train will use it instead of policy.step_plan(...)
+        self._train_plan_override: Optional[Dict[str, bool]] = None
+
         # loss（pair-level 二分类）
         self.crit = BinaryClassificationLoss(train_cfg=self.cfg)
 
@@ -225,6 +229,13 @@ class TrainerEM:
         self.monitor = str(self.cfg.monitor)        # old train.py prints trainer.monitor
         self.greater_is_better = bool(self.cfg.greater_is_better)
 
+
+    def set_train_plan_override(self, plan: Optional[Dict[str, bool]]) -> None:
+        """
+        If not None, force train-time token plan for the whole epoch.
+        Typical use: Agg-only epoch -> cached; Instance-update epoch -> online.
+        """
+        self._train_plan_override = (None if plan is None else dict(plan))
 
     def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # TrainerEM 里默认 pair-level binary；y 可能是 int -> float
@@ -301,7 +312,12 @@ class TrainerEM:
     # ----------------------- #
         
     def _build_tokens_train(self, batch_cpu: Dict[str, Any], *, epoch: int, global_step: int) -> Dict[str, Any]:
-        plan = self.token_provider.policy.step_plan(epoch, global_step)   # dict
+      
+        # Use epoch-level override if provided; otherwise fall back to policy.
+        plan = self._train_plan_override
+        if plan is None:
+            plan = self.token_provider.policy.step_plan(epoch, global_step)   # dict
+        plan = dict(plan)
 
         # 关键：只有在“online 且 train_instance=True”时才把 instance_model 置为 train
         train_inst = bool(plan.get("train_instance", False)) and (not bool(plan.get("use_instance_cache", True)))
@@ -316,17 +332,32 @@ class TrainerEM:
         )
 
     @torch.inference_mode()
-    def _build_tokens_eval(self, batch_cpu: Dict[str, Any], *, epoch: int) -> Dict[str, Any]:
+    def _build_tokens_eval(
+        self,
+        batch_cpu: Dict[str, Any],
+        *,
+        epoch: int,
+        use_instance_cache: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         tp = self.token_provider_val or self.token_provider
         self.instance_model.eval()
-        # val 永远不训练 instance，且尽量用 cache（缺 cache 才由 TokenProvider 决策 cache_missing 策略）
+
+        # eval 永远不训练 instance；是否用 cache 由上层显式指定（便于 online val）
         plan = {
             "train_instance": False,
-            "use_instance_cache": True,
             "train_cheap": False,
-            "use_cheap_cache": True,
         }
+        if use_instance_cache is not None:
+            plan["use_instance_cache"] = bool(use_instance_cache)
         return tp.build_tokens(batch_cpu, epoch=epoch, global_step=self.state.global_step, plan=plan)
+
+
+    def set_instance_trainable(self, trainable: bool) -> None:
+        """
+        方案A：Agg-only epoch 冻结 instance；Instance-update epoch 解冻。
+        这里只控制 requires_grad，train/eval 仍由 step_plan 决定（你的 _build_tokens_train 已做）。
+        """
+        self.instance_model.requires_grad_(bool(trainable))
 
     # ----------------------- #
     # fit
@@ -423,6 +454,15 @@ class TrainerEM:
 
             self.scaler.scale(loss_to_backward).backward()
             agg_accum_has_grad = True
+            '''
+            风险修复：Instance optimizer 可能在“无梯度”窗口被 step（导致纯 weight decay 漂移）
+            风险来源：
+            如果 TokenProvider 因为 cache missing / fallback / 逻辑 bug，返回了 train_instance=True，但实际 tokens 仍来自 cache（或在内部 detach() / inference_mode()），
+            那么 instance 参数不会有 grad，但你仍会 step(opt_inst)；AdamW 会做 weight decay，造成参数漂移（silent）。
+            TODO：          
+            最小修复（把“是否 step”从逻辑标志改成“是否真的产生梯度”），可以and这个梯度存在标志。
+            在这之前可以检查TokenProvider是否会出现bug。
+            '''
             if train_inst:
                 inst_accum_has_grad = True
 
@@ -483,17 +523,33 @@ class TrainerEM:
 
 
     @torch.no_grad()
-    def validate_one_epoch(self, loader: Any, *, use_ema: bool = True) -> Dict[str, float]:
+    def validate_one_epoch(
+        self,
+        loader: Any,
+        *,
+        use_ema: bool = True,
+        use_instance_cache: Optional[bool] = None,
+    ) -> Dict[str, float]:
         ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
 
+            n_steps = 0
+            n_used_cache = 0
+
             total_loss, total_seen = 0.0, 0
             all_logits, all_labels = [], []
 
             for batch_cpu in tqdm(loader, desc=f"Valid epoch {self.state.epoch}"):
-                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
+                out = self._build_tokens_eval(
+                    batch_cpu,
+                    epoch=self.state.epoch,
+                    use_instance_cache=use_instance_cache,
+                )
+
+                n_steps += 1
+                n_used_cache += int(bool(out.get("used_cache", False)))
 
                 tokens = out.get("tokens", None)
                 y = out.get("y_pair", None)
@@ -535,6 +591,7 @@ class TrainerEM:
             # 这里给出两个 lr，避免你 train_em.py 外层打印/记录时找不到
             metrics["lr_agg"] = float(self.opt_agg.param_groups[0].get("lr", 0.0))
             metrics["lr_inst"] = float(self.opt_inst.param_groups[0].get("lr", 0.0))
+            metrics["used_cache_pct"] = 100.0 * (n_used_cache / max(1, n_steps))
 
             self._log_metrics(metrics, stage="val", step=self.state.global_step)
             return metrics

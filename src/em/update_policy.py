@@ -46,10 +46,17 @@ class UpdatePolicyConfig:
 
 
 class _HybridWindow:
+
     def __init__(self) -> None:
         self._remaining: int = 0
 
     def on_epoch_begin(self, *, epoch: int, every_epochs: int, window_steps: int) -> None:
+        """
+        IMPORTANT:
+          - 必须在每个 epoch begin 都“显式重置”窗口，否则 _remaining 会跨 epoch 泄露。
+          - window_steps<=0 的“整 epoch online”语义不在这里实现（交给 UpdatePolicy 的 epoch_force 标志）。
+        """
+        self._remaining = 0
         if every_epochs > 0 and window_steps > 0 and (epoch % every_epochs == 0):
             self._remaining = int(window_steps)
 
@@ -77,25 +84,53 @@ class UpdatePolicy:
         self.cfg = cfg
         self._inst_win = _HybridWindow()
         self._cheap_win = _HybridWindow()
+        # 方案：epoch级别强制开启整轮 online（当 *_update_steps<=0 且 epoch%every_epochs==0）
+        self._inst_epoch_force_online: bool = False
+        self._cheap_epoch_force_online: bool = False
 
     def on_epoch_begin(self, epoch: int) -> None:
-        if epoch < int(self.cfg.warmup_epochs):
-            return
 
-        # epoch-trigger windows
+        # 每个 epoch 都要先 reset，避免跨 epoch 泄露
+        self._inst_epoch_force_online = False
+        self._cheap_epoch_force_online = False
+
+        # reset hybrid windows（on_epoch_begin 内部会清零）
         if self.cfg.instance_mode == "hybrid":
             self._inst_win.on_epoch_begin(
                 epoch=epoch,
                 every_epochs=int(self.cfg.instance_update_every_epochs),
                 window_steps=int(self.cfg.instance_update_steps),
             )
-
         if self.cfg.cheap_mode == "hybrid":
             self._cheap_win.on_epoch_begin(
                 epoch=epoch,
                 every_epochs=int(self.cfg.cheap_update_every_epochs),
                 window_steps=int(self.cfg.cheap_update_steps),
             )
+
+        if epoch < int(self.cfg.warmup_epochs):
+            return
+        
+        # 方案：当 update_steps<=0 且 epoch 命中 every_epochs 时，强制整 epoch online
+        if self.cfg.instance_mode == "hybrid":
+            every_epochs = int(self.cfg.instance_update_every_epochs)
+            window_steps = int(self.cfg.instance_update_steps)
+            if every_epochs > 0 and (epoch % every_epochs == 0) and window_steps <= 0:
+                self._inst_epoch_force_online = True
+
+        if self.cfg.cheap_mode == "hybrid":
+            every_epochs = int(self.cfg.cheap_update_every_epochs)
+            window_steps = int(self.cfg.cheap_update_steps)
+            if every_epochs > 0 and (epoch % every_epochs == 0) and window_steps <= 0:
+                self._cheap_epoch_force_online = True
+
+
+    def is_instance_update_epoch(self) -> bool:
+        """
+        方案A使用：在 on_epoch_begin() 之后调用，判断本 epoch 是否为“整轮 instance-update 窗口”。
+        """
+        return bool(self._inst_epoch_force_online)
+
 
     def _plan_one(
         self,
@@ -131,25 +166,32 @@ class UpdatePolicy:
         return False, True
 
     def step_plan(self, epoch: int, global_step: int) -> Dict[str, bool]:
-        train_inst, use_inst_cache = self._plan_one(
-            mode=self.cfg.instance_mode,
-            epoch=epoch,
-            global_step=global_step,
-            win=self._inst_win,
-            every_steps=int(self.cfg.instance_update_every_steps),
-            every_epochs=int(self.cfg.instance_update_every_epochs),
-            window_steps=int(self.cfg.instance_update_steps),
-        )
 
-        train_cheap, use_cheap_cache = self._plan_one(
-            mode=self.cfg.cheap_mode,
-            epoch=epoch,
-            global_step=global_step,
-            win=self._cheap_win,
-            every_steps=int(self.cfg.cheap_update_every_steps),
-            every_epochs=int(self.cfg.cheap_update_every_epochs),
-            window_steps=int(self.cfg.cheap_update_steps),
-        )
+        if self.cfg.instance_mode == "hybrid" and self._inst_epoch_force_online:
+            train_inst, use_inst_cache = True, False
+        else:
+            train_inst, use_inst_cache = self._plan_one(
+                mode=self.cfg.instance_mode,
+                epoch=epoch,
+                global_step=global_step,
+                win=self._inst_win,
+                every_steps=int(self.cfg.instance_update_every_steps),
+                every_epochs=int(self.cfg.instance_update_every_epochs),
+                window_steps=int(self.cfg.instance_update_steps),
+            )
+
+        if self.cfg.cheap_mode == "hybrid" and self._cheap_epoch_force_online:
+            train_cheap, use_cheap_cache = True, False
+        else:
+            train_cheap, use_cheap_cache = self._plan_one(
+                mode=self.cfg.cheap_mode,
+                epoch=epoch,
+                global_step=global_step,
+                win=self._cheap_win,
+                every_steps=int(self.cfg.cheap_update_every_steps),
+                every_epochs=int(self.cfg.cheap_update_every_epochs),
+                window_steps=int(self.cfg.cheap_update_steps),
+            )
 
         return {
             "train_instance": bool(train_inst),

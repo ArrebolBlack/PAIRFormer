@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Literal
 
+import numpy as np
+
 import math
 import heapq
 import torch
@@ -199,11 +201,20 @@ def _axis_simhash_keys(emb_cpu: torch.Tensor, idx: torch.Tensor, bits: int, seed
 # Step B: pos bins + per-bin top-m heaps (O(n log m))
 # -----------------------------------------------------------------------------
 
+'''
+selector优化2：把Step B 里excluded_set 的 Python set membership 换成 bool mask
+
+if i in excluded_set: continue
+这是每个 token 都做一次 Python set 查询，对吞吐很伤（尤其 n 很大时）。
+替换成 numpy bool mask 能大幅减少 Python 层开销。
+'''
+
 def _build_candidates_by_pos_bins(
     *,
     score_np,              # numpy float32, shape [n]
     pos_np,                # numpy float32, shape [n]
-    excluded_set: set,     # indices in [0..n-1] to exclude (S1)
+    # excluded_set: set,     # indices in [0..n-1] to exclude (S1)
+    excluded_mask: Optional[np.ndarray],  # shape [n], dtype bool
     B: int,
     m: int,
     pos_eps: float,
@@ -222,7 +233,8 @@ def _build_candidates_by_pos_bins(
     # local bindings for speed
     Bm1 = B - 1
     for i in range(pos_np.shape[0]):
-        if i in excluded_set:
+        # if i in excluded_set:
+        if excluded_mask is not None and excluded_mask[i]:
             continue
         s = float(score_np[i])
         p = float(pos_np[i])
@@ -544,16 +556,21 @@ def selector_fn(
         K1 = K
     K2 = K - K1
 
+    excluded_mask = None
     if K1 > 0:
         # topk on CPU
         top1_val, top1_idx = torch.topk(score, k=K1, largest=True, sorted=False)  # indices in [0..n-1]
         # Keep S1 order stable by score desc (optional but makes debugging easier)
         s1_order = torch.argsort(top1_val, descending=True)
         S1_idx = top1_idx.index_select(0, s1_order).to(dtype=torch.long)
-        S1_set = set(int(i) for i in S1_idx.tolist())
+        # S1_set = set(int(i) for i in S1_idx.tolist())
+        excluded_mask = np.zeros((n,), dtype=np.bool_)
+        excluded_mask[S1_idx.cpu().numpy()] = True
+    
     else:
         S1_idx = torch.empty((0,), dtype=torch.long, device="cpu")
-        S1_set = set()
+        # S1_set = set()
+        excluded_mask = None
 
     if K2 <= 0:
         sel_u = uids_cpu.index_select(0, S1_idx).to(dtype=torch.int32)
@@ -573,7 +590,8 @@ def selector_fn(
     heaps = _build_candidates_by_pos_bins(
         score_np=score_np,
         pos_np=pos_np,
-        excluded_set=S1_set,
+        # excluded_set=S1_set,
+        excluded_mask=excluded_mask,
         B=B,
         m=m,
         pos_eps=float(cfg.pos_bin_eps),
