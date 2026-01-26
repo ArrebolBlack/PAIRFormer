@@ -129,6 +129,8 @@ class PairSetTransformerAggregator(nn.Module):
             mask = mask.clone()
             mask[empty, 0] = True
 
+        x = x.to(dtype=self.input_proj.weight.dtype)
+
         # input proj + zero-out pad tokens (important to avoid pad leaking via residuals)
         h = self.input_proj(x)                      # [B,L,D]
         h = h * mask.unsqueeze(-1).float()
