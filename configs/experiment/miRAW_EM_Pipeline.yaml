@@ -174,7 +174,7 @@ em:
 
     # ---------- step-level (instance) ----------
     instance_mode: "cached"              # ["cached","online","hybrid"]
-    instance_update_every_epochs: 4  
+    instance_update_every_epochs: 0  
     instance_update_steps: 0          # <=0 代表“整 epoch online”（本 patch 新增语义）
     # 建议：不要再用 refresh_instance_cache_every_epochs 做定时刷新  
 
