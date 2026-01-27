@@ -38,13 +38,13 @@ run:
   val_split: "val"
 
   # --- dataloader ---
-  batch_size: 256
+  batch_size: 64
   num_workers: 16
   pin_memory: true
   num_epochs: 100
 
   # --- token budget ---
-  kmax: 512
+  kmax: 64
 
   # --- PairBatchBuilderCPU 可选字段（影响 batch_cpu 是否带 pos/esa_scores） ---
   include_pos: true
@@ -66,7 +66,7 @@ run:
   eval_test_after_train: true
   test_splits: ["test"]
   eval_test_with_last: true
-  eval_test_with_best: false
+  eval_test_with_best: true
   best_ckpt_path: null            # 可选；默认用 ckpt_dir/best.pt
 
   # MIL 聚合（pair-level 这边不再需要 bag-level MIL）
@@ -92,8 +92,8 @@ run:
   # val_online: false   # 推荐 true：val 永远在线，不重建 val instance cache
 
   # 写cache路径
-  train_instance_mode: "cached" # ["cached", "online"]
-  val_instance_mode: "cached" # ["cached", "online"]
+  train_instance_mode: "online" # ["cached", "online"]
+  val_instance_mode: "online" # ["cached", "online"]
   force_overwrite_bootstrap: true
   refresh_instance_after_update: true
 
@@ -145,6 +145,11 @@ em:
     _target_: src.selectors.selector_module.SelectorModule
     cfg:
       _target_: src.selectors.st_selector.STSelectorConfig
+    # # 截断K版
+    # _target_: src.selectors.selector_module_prefix.SelectorModulePrefix
+    # cfg:
+    #   _target_: src.selectors.st_selector_prefix.STSelectorConfig
+      
       kmax: ${run.kmax}               # 保持和 run.kmax 一致，避免 shape 不一致
       k1_ratio: 1
       score_use_sigmoid: false
@@ -170,10 +175,10 @@ em:
   # Gate 6 最小可跑：全部固定 cached + refresh=0
   # 这里的policy是policy_train, policy_eval 默认都cached
   policy:
-    warmup_epochs: 0
+    warmup_epochs: 55
 
     # ---------- step-level (instance) ----------
-    instance_mode: "cached"              # ["cached","online","hybrid"]
+    instance_mode: "hybrid"              # ["cached","online","hybrid"]
     instance_update_every_epochs: 0  
     instance_update_steps: 0          # <=0 代表“整 epoch online”（本 patch 新增语义）
     # 建议：不要再用 refresh_instance_cache_every_epochs 做定时刷新  
@@ -359,12 +364,12 @@ trainer_em:
   # 两套 optimizer：agg / inst
   lr_agg: 3e-4
   wd_agg: 1e-2
-  lr_inst: 1e-5
+  lr_inst: 3e-4
   wd_inst: 0.0
 
   # --- scheduler（对齐 TrainerEMConfig：none/plateau/cosine/step）---
   scheduler_agg: cosine
-  scheduler_inst: none
+  scheduler_inst: cosine
   scheduler_t_max: ${run.num_epochs}
   scheduler_step_size: 10
   scheduler_gamma: 0.1
