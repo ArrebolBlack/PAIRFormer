@@ -24,9 +24,15 @@ data:
     # train: "data/miRAW_Train_Validation.txt"
     # val:   "data/miRAW_Train_Validation.txt"
     # test:  "data/miRAW_Test_total.txt"
-    train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    test: "data/miRAW_Test_0,6-9.txt"
+
+    # train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    # val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    # test: "data/miRAW_Test_0,6-9.txt"
+
+    train: "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    val:   "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    test: "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test_0,6-9.txt"
+
   with_esa: true
 
 # ===================== 运行配置 run（train_em.py 会用到的字段） =====================
