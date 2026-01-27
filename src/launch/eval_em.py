@@ -137,13 +137,8 @@ def main(cfg: DictConfig) -> None:
 
     # ---- eval splits ----
     # 兼容：run.eval_splits / run.eval_split / run.val_split / run.split
-    eval_splits = run_cfg.get("eval_splits", None)
-    if eval_splits is None:
-        split_eval = str(run_cfg.get("eval_split", run_cfg.get("val_split", run_cfg.get("split", "val"))))
-        eval_splits = [split_eval]
-    elif isinstance(eval_splits, str):
-        eval_splits = [eval_splits]
-    eval_splits = [str(x) for x in list(eval_splits)]
+    eval_splits = run_cfg.get("test_splits", None)
+
     if len(eval_splits) == 0:
         raise ValueError("[eval_em] eval_splits is empty.")
 
