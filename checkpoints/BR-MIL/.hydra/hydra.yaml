@@ -1,0 +1,181 @@
+hydra:
+  run:
+    dir: ${paths.output_root}/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  launcher:
+    _target_: hydra._internal.core_plugins.basic_launcher.BasicLauncher
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    max_batch_size: null
+    params: null
+  help:
+    app_name: ${hydra.job.name}
+    header: '${hydra.help.app_name} is powered by Hydra.
+
+      '
+    footer: 'Powered by Hydra (https://hydra.cc)
+
+      Use --hydra-help to view Hydra specific help
+
+      '
+    template: '${hydra.help.header}
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (group=option)
+
+
+      $APP_CONFIG_GROUPS
+
+
+      == Config ==
+
+      Override anything in the config (foo.bar=value)
+
+
+      $CONFIG
+
+
+      ${hydra.help.footer}
+
+      '
+  hydra_help:
+    template: 'Hydra (${hydra.runtime.version})
+
+      See https://hydra.cc for more info.
+
+
+      == Flags ==
+
+      $FLAGS_HELP
+
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (For example, append hydra/job_logging=disabled
+      to command line)
+
+
+      $HYDRA_CONFIG_GROUPS
+
+
+      Use ''--cfg hydra'' to Show the Hydra config.
+
+      '
+    hydra_help: ???
+  hydra_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][HYDRA] %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers:
+      - console
+    loggers:
+      logging_example:
+        level: DEBUG
+    disable_existing_loggers: false
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        formatter: simple
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
+    root:
+      level: INFO
+      handlers:
+      - console
+      - file
+    disable_existing_loggers: false
+  env: {}
+  mode: RUN
+  searchpath: []
+  callbacks: {}
+  output_subdir: .hydra
+  overrides:
+    hydra:
+    - hydra.mode=RUN
+    task:
+    - experiment=miRAW_EM_Pipeline
+    - em.selector_module.cfg.k1_ratio=0.5
+    - run.batch_size=64
+    - run.kmax=64
+    - run.eval_test_with_best=true
+    - em.policy.instance_mode=hybrid
+    - em.policy.instance_update_every_epochs=1
+    - em.policy.warmup_epochs=55
+    - run.num_epochs=100
+    - run.train_instance_mode=online
+    - run.val_instance_mode=online
+    - trainer_em.lr_agg=3e-4
+    - trainer_em.scheduler_agg=cosine
+    - trainer_em.lr_inst=3e-4
+    - trainer_em.scheduler_inst=cosine
+    - logging.wandb.group=SetTransformer_Find_SOTA_2
+    - logging.wandb.tags=[EM,PairAgg,SetTransformer,HybridPolicy]
+    - experiment_name="SOTA2"
+  job:
+    name: train_em
+    chdir: null
+    override_dirname: em.policy.instance_mode=hybrid,em.policy.instance_update_every_epochs=1,em.policy.warmup_epochs=55,em.selector_module.cfg.k1_ratio=0.5,experiment=miRAW_EM_Pipeline,experiment_name="SOTA2",logging.wandb.group=SetTransformer_Find_SOTA_2,logging.wandb.tags=[EM,PairAgg,SetTransformer,HybridPolicy],run.batch_size=64,run.eval_test_with_best=true,run.kmax=64,run.num_epochs=100,run.train_instance_mode=online,run.val_instance_mode=online,trainer_em.lr_agg=3e-4,trainer_em.lr_inst=3e-4,trainer_em.scheduler_agg=cosine,trainer_em.scheduler_inst=cosine
+    id: ???
+    num: ???
+    config_name: config
+    env_set: {}
+    env_copy: []
+    config:
+      override_dirname:
+        kv_sep: '='
+        item_sep: ','
+        exclude_keys: []
+  runtime:
+    version: 1.3.2
+    version_base: '1.3'
+    cwd: /root/autodl-tmp/PAIRFormer
+    config_sources:
+    - path: hydra.conf
+      schema: pkg
+      provider: hydra
+    - path: /root/autodl-tmp/PAIRFormer/configs
+      schema: file
+      provider: main
+    - path: ''
+      schema: structured
+      provider: schema
+    output_dir: /root/autodl-tmp/PAIRFormer/outputs/SOTA2/2026-01-27_07-46-58
+    choices:
+      experiment: miRAW_EM_Pipeline
+      paths: default
+      logging: default
+      eval: default
+      run: default
+      task: binary_classification
+      train: default
+      model: TargetNet
+      data: miRNA_miRAW
+      hydra/env: default
+      hydra/callbacks: null
+      hydra/job_logging: default
+      hydra/hydra_logging: default
+      hydra/hydra_help: default
+      hydra/help: default
+      hydra/sweeper: basic
+      hydra/launcher: basic
+      hydra/output: default
+  verbose: false
