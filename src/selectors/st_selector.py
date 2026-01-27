@@ -600,6 +600,9 @@ def selector_fn(
     # --------------------
     # Step C: per-bin Axis-SimHash dedup -> C'
     # --------------------
+    if cfg.use_hash_dedup and emb_cpu is None:
+        raise RuntimeError("[STSelector] use_hash_dedup=True but cheap_emb is None. Cannot run emb-diversity ablation.")
+
     if cfg.use_hash_dedup:
         bits, cap_c = _hash_params_from_L(L)
         if emb_cpu is None:

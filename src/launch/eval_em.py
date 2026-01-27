@@ -31,7 +31,6 @@ from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilde
 from src.data.builder import get_or_build_blocks
 
 from src.models.registry import build_model
-
 from src.em.token_provider import TokenProvider, TokenProviderConfig
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
 
@@ -47,14 +46,14 @@ from src.launch.train import iter_scalar_metrics, setup_wandb
 
 
 # -----------------------------------------------------------------------------
-# Helpers (keep consistent with train_em.py)
+# Helpers (COPY from train_em.py)
 # -----------------------------------------------------------------------------
-def _resolve_path(p: Optional[str], base: Path) -> Optional[Path]:
+def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:
     if p is None:
         return None
     pp = Path(os.path.expandvars(os.path.expanduser(str(p))))
     if not pp.is_absolute():
-        pp = base / pp
+        pp = orig_cwd / pp
     return pp
 
 
@@ -101,25 +100,148 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
+def _resolve_ckpt_path(p: Optional[str], *, run_dir: Path, orig_cwd: Path, ckpt_dir: Path) -> Path:
+    """
+    与 train_em.py 行为一致：优先 run_dir 相对路径，其次 orig_cwd。
+    若 p=None：默认 ckpt_dir/best.pt。
+    """
+    if p is None:
+        cand_best = ckpt_dir / "best.pt"
+        if cand_best.exists():
+            return cand_best
+        cand_last = ckpt_dir / "last.pt"
+        return cand_last
+
+    raw = Path(os.path.expandvars(os.path.expanduser(str(p))))
+    if raw.is_absolute():
+        return raw
+
+    cand1 = run_dir / raw
+    if cand1.exists():
+        return cand1
+
+    cand2 = orig_cwd / raw
+    return cand2
+
+
+def _load_em_checkpoint_into_models(
+    ckpt_path: Path,
+    *,
+    agg_model: torch.nn.Module,
+    instance_model: torch.nn.Module,
+    device: torch.device,
+) -> None:
+    """
+    目的：避免依赖 TrainerEM/token_provider，严格做到“bootstrap 后最后构建 Trainer”。
+    但又不能猜测 ckpt 结构 -> 这里实现一个“兼容常见格式”的 deterministic loader：
+      - 若 ckpt 含明确字段：agg_state_dict / instance_state_dict / agg_model / instance_model
+      - 否则尝试从 ckpt["state_dict"] 或 ckpt 本体 (dict) 里按 key overlap 自动分配
+    若都失败：直接 raise（让你回去看 TrainerEM.save_checkpoint 的真实格式）。
+    """
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    if not isinstance(ckpt, dict):
+        raise RuntimeError(f"[eval_em] checkpoint is not a dict: {ckpt_path}")
+
+    # 1) direct keys
+    cand_agg = None
+    cand_inst = None
+
+    for k in ("agg_state_dict", "agg_model_state_dict", "aggregator_state_dict", "agg_model", "aggregator"):
+        if k in ckpt and isinstance(ckpt[k], dict):
+            cand_agg = ckpt[k]
+            break
+
+    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict", "instance_model", "inst_model", "cts_model"):
+        if k in ckpt and isinstance(ckpt[k], dict):
+            cand_inst = ckpt[k]
+            break
+
+    # 2) fallback: unified state_dict
+    if cand_agg is None or cand_inst is None:
+        sd_all = None
+        if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            sd_all = ckpt["state_dict"]
+        elif "model_state_dict" in ckpt and isinstance(ckpt["model_state_dict"], dict):
+            sd_all = ckpt["model_state_dict"]
+        else:
+            # sometimes ckpt itself is a state_dict-like dict of tensors
+            if all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+                sd_all = ckpt
+
+        if sd_all is not None:
+            sd_all = _strip_prefix_state_dict(sd_all)
+
+            agg_keys = set(agg_model.state_dict().keys())
+            inst_keys = set(instance_model.state_dict().keys())
+
+            agg_sd: Dict[str, Any] = {}
+            inst_sd: Dict[str, Any] = {}
+
+            # first pass: direct match
+            for k, v in sd_all.items():
+                if k in agg_keys:
+                    agg_sd[k] = v
+                if k in inst_keys:
+                    inst_sd[k] = v
+
+            # second pass: prefix patterns (agg_model./instance_model.)
+            if len(agg_sd) == 0 or len(inst_sd) == 0:
+                for k, v in sd_all.items():
+                    if k.startswith("agg_model.") or k.startswith("aggregator."):
+                        kk = k.split(".", 1)[1]
+                        if kk in agg_keys:
+                            agg_sd[kk] = v
+                    if k.startswith("instance_model.") or k.startswith("inst_model.") or k.startswith("cts_model."):
+                        kk = k.split(".", 1)[1]
+                        if kk in inst_keys:
+                            inst_sd[kk] = v
+
+            if cand_agg is None and len(agg_sd) > 0:
+                cand_agg = agg_sd
+            if cand_inst is None and len(inst_sd) > 0:
+                cand_inst = inst_sd
+
+    if cand_agg is None or cand_inst is None:
+        raise RuntimeError(
+            "[eval_em] Cannot locate both agg/instance state_dict in ckpt. "
+            f"ckpt_path={ckpt_path}. Please check TrainerEM.save_checkpoint format."
+        )
+
+    cand_agg = _strip_prefix_state_dict(cand_agg)
+    cand_inst = _strip_prefix_state_dict(cand_inst)
+
+    miss_a, unexp_a = agg_model.load_state_dict(cand_agg, strict=False)
+    miss_i, unexp_i = instance_model.load_state_dict(cand_inst, strict=False)
+
+    if miss_a:
+        print(f"[eval_em] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}")
+    if unexp_a:
+        print(f"[eval_em] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}")
+    if miss_i:
+        print(f"[eval_em] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}")
+    if unexp_i:
+        print(f"[eval_em] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}")
+
+    agg_model.to(device)
+    instance_model.to(device)
+
+
 @contextmanager
-def _swap_token_provider(tr: TrainerEM, tp_new: TokenProvider):
-    old_tp = getattr(tr, "token_provider", None)
-    old_tpv = getattr(tr, "token_provider_val", None)
-    tr.token_provider = tp_new
+def _swap_token_provider_val(tr: TrainerEM, tp_new: TokenProvider):
+    old = tr.token_provider_val
     tr.token_provider_val = tp_new
     try:
         yield
     finally:
-        tr.token_provider = old_tp
-        tr.token_provider_val = old_tpv
+        tr.token_provider_val = old
 
 
 # -----------------------------------------------------------------------------
-# Main: "test-only" evaluation from checkpoint, mirroring train_em.py test routine
+# Main (structure mirrors train_em.py; difference: no training, load ckpt, go test)
 # -----------------------------------------------------------------------------
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
-    # ---- Basic env ----
+    # ---- 基本环境 ----
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
@@ -127,9 +249,8 @@ def main(cfg: DictConfig) -> None:
     orig_cwd = Path(get_original_cwd())
     run_dir = Path.cwd()
 
+    # ---- ckpt/eval dir（复用 train_em.py 风格）----
     run_cfg = cfg.run if ("run" in cfg and cfg.run is not None) else {}
-
-    # ---- dirs ----
     ckpt_dir_cfg = run_cfg.get("ckpt_dir", run_cfg.get("ckpt_subdir", "checkpoints"))
     eval_dir_cfg = run_cfg.get("eval_dir", run_cfg.get("eval_subdir", "eval"))
     ckpt_dir = Path(str(ckpt_dir_cfg))
@@ -144,10 +265,17 @@ def main(cfg: DictConfig) -> None:
     # ---- wandb ----
     wandb_run = setup_wandb(cfg)
 
-    # ---- data cfg ----
+    # ----------------------------
+    # 0) data cfg / runtime knobs (ONLY use keys from your config)
+    # ----------------------------
     data_cfg = DataConfig.from_omegaconf(cfg.data)
 
-    # ---- test splits ----
+    kmax = int(run_cfg.get("kmax", 512))
+    batch_size = int(run_cfg.get("batch_size", 256))
+    num_workers = int(run_cfg.get("num_workers", 8))
+
+    force_overwrite_bootstrap = bool(run_cfg.get("force_overwrite_bootstrap", True))
+
     test_splits = run_cfg.get("test_splits", ["test"])
     if isinstance(test_splits, str):
         test_splits = [test_splits]
@@ -155,33 +283,15 @@ def main(cfg: DictConfig) -> None:
     if len(test_splits) == 0:
         raise ValueError("[eval_em] run.test_splits is empty.")
 
-    # ---- runtime knobs ----
-    kmax = int(run_cfg.get("kmax", 512))
-    batch_size = int(run_cfg.get("batch_size", 256))
-    num_workers = int(run_cfg.get("num_workers", 8))
-
-    # eval instance mode (cached/online)
-    eval_instance_mode = str(run_cfg.get("eval_instance_mode", "cached")).lower()
-    eval_use_inst_cache_default = (eval_instance_mode == "cached")
-
-    # hard overwrite caches at entry (avoid cross-run contamination)
-    force_overwrite_bootstrap = bool(run_cfg.get("force_overwrite_bootstrap", True))
-
-    # optional: always build instance cache even if eval_instance_mode=online
-    always_build_instance_cache = bool(run_cfg.get("always_build_instance_cache", eval_use_inst_cache_default))
-
-    # optional: val best threshold for "val_best" test eval
-    best_threshold_cfg = run_cfg.get("best_threshold", run_cfg.get("val_best_threshold", None))
-    best_threshold = float(best_threshold_cfg) if best_threshold_cfg is not None else None
-
     print(
         f"[eval_em] test_splits={test_splits} | "
-        f"eval_instance_mode={eval_instance_mode} (use_cache={eval_use_inst_cache_default}) | "
-        f"always_build_instance_cache={always_build_instance_cache} | "
-        f"force_overwrite_bootstrap={force_overwrite_bootstrap}"
+        f"force_overwrite_bootstrap={force_overwrite_bootstrap} | "
+        f"kmax={kmax} batch_size={batch_size} num_workers={num_workers}"
     )
 
-    # ---- cache roots ----
+    # ----------------------------
+    # cache roots (same as train_em.py)
+    # ----------------------------
     default_cache = cfg.get("paths", {}).get("cache_root", "cache")
     cache_root_cfg = run_cfg.get("cache_path", default_cache)
     cache_root = _resolve_path(str(cache_root_cfg), orig_cwd)
@@ -194,13 +304,12 @@ def main(cfg: DictConfig) -> None:
     dataset_cache_root = str(cache_root)
     em_cache_root_str = str(em_cache_root)
 
-    # ---- ensure window-level blocks exist (train.py semantics) ----
+    # ensure window-level blocks exist (train.py semantics)
     for sp in test_splits:
         get_or_build_blocks(data_cfg, sp, str(cache_root))
 
-    # ---- build datasets lazily by split ----
+    # lazy datasets
     _cts_ds_by_split: Dict[str, ChunkedCTSDataset] = {}
-
     def _get_cts_ds(split: str) -> ChunkedCTSDataset:
         if split in _cts_ds_by_split:
             return _cts_ds_by_split[split]
@@ -209,9 +318,9 @@ def main(cfg: DictConfig) -> None:
         _cts_ds_by_split[split] = ds
         return ds
 
-    # -----------------------------------------------------------------------------
-    # Build models (instance + agg + optional cheap + selector)
-    # -----------------------------------------------------------------------------
+    # ----------------------------
+    # 2) build models (same nodes as train_em.py)
+    # ----------------------------
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
     if inst_cfg is None:
         raise KeyError("[eval_em] missing instance model config: cfg.instance_model / cfg.cts_model / cfg.model_instance")
@@ -224,9 +333,24 @@ def main(cfg: DictConfig) -> None:
     agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
     agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device)
 
+    # ----------------------------
+    # 3) policy + runners + selector (COPY train_em.py)
+    # ----------------------------
     em_node = cfg.get("em", {})
 
-    # ---- cheap model (required to rebuild cheap cache) ----
+    policy_node = em_node.get("policy", None)
+    if policy_node is None:
+        raise KeyError("[eval_em] missing cfg.em.policy")
+    pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
+
+    # eval policy: ALWAYS cached for test (train_em test routine uses require_ready=True)
+    policy_eval = UpdatePolicy(UpdatePolicyConfig(
+        warmup_epochs=0,
+        instance_mode="cached",
+        cheap_mode="cached",
+    ))
+
+    # ---- cheap model ----
     cheap_model = None
     cheap_arch_cfg = em_node.get("cheap_model", cfg.get("cheap_model", None))
     if cheap_arch_cfg is not None:
@@ -237,7 +361,9 @@ def main(cfg: DictConfig) -> None:
             em_node.get("cheap_ckpt_path", cfg.get("cheap_ckpt_path", None)),
             orig_cwd,
         )
-        if cheap_ckpt is not None and cheap_ckpt.exists():
+        if cheap_ckpt is None:
+            raise RuntimeError("[eval_em] cheap_ckpt_path is None (required to rebuild cheap cache).")
+        if cheap_ckpt.exists():
             ckpt = torch.load(str(cheap_ckpt), map_location="cpu")
             sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
             cheap_model.load_state_dict(_strip_prefix_state_dict(sd), strict=False)
@@ -246,44 +372,6 @@ def main(cfg: DictConfig) -> None:
     cheap_version = str(em_node.get("cheap_version", cfg.get("cheap_version", "cheap_v0")))
     cheap_emb_dim = int(em_node.get("cheap_emb_dim", cfg.get("cheap_emb_dim", 64)))
 
-    # ---- selector module (Hydra instantiate) ----
-    sel_mod_node = (
-        _oc_select(cfg, "em.selector_module")
-        or _oc_select(cfg, "em.selector")
-        or _oc_select(cfg, "selector_module")
-        or _oc_select(cfg, "selector")
-    )
-    if sel_mod_node is None:
-        raise KeyError(
-            "[eval_em] Missing selector config. Provide cfg.em.selector_module "
-            "(recommended) or cfg.em.selector / cfg.selector_module / cfg.selector, "
-            "and it must be hydra-instantiateable (contain _target_)."
-        )
-    selector_module = instantiate(sel_mod_node)
-
-    # ---- sel_version (auto hash by selector node) ----
-    sel_version_cfg = (_oc_select(cfg, "em.sel_version", default=None) or _oc_select(cfg, "sel_version", default=None))
-    sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
-    sel_hash = _stable_cfg_hash(sel_mod_container)
-    if sel_version_cfg is None or str(sel_version_cfg).lower() in ("", "none", "null", "auto"):
-        sel_version = f"sel_{sel_hash}"
-    else:
-        sel_version = str(sel_version_cfg)
-
-    # selector kmax is source of truth
-    if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax"):
-        sel_kmax = int(selector_module.cfg.kmax)
-    else:
-        sel_kmax = int(kmax)
-
-    print(f"[eval_em] selector instantiated: {selector_module.__class__.__name__}")
-    if hasattr(selector_module, "version"):
-        print(f"[eval_em] selector.version: {getattr(selector_module, 'version')}")
-    print(f"[eval_em] sel_version: {sel_version} (hash={sel_hash}) sel_kmax={sel_kmax}")
-
-    # -----------------------------------------------------------------------------
-    # Refresh fns (cheap / selection / instance)
-    # -----------------------------------------------------------------------------
     cheap_cache_node = em_node.get("cheap_cache", {})
     cheap_cache_bs = int(cheap_cache_node.get("batch_size", 256))
     cheap_cache_nw = int(cheap_cache_node.get("num_workers", num_workers))
@@ -298,10 +386,7 @@ def main(cfg: DictConfig) -> None:
         splits: Optional[Iterable[str]] = None,
     ) -> None:
         if cheap_model is None:
-            raise RuntimeError(
-                "[eval_em] Need to rebuild cheap cache but cheap_model is None. "
-                "Provide cfg.em.cheap_model (and optionally cfg.em.cheap_ckpt_path)."
-            )
+            raise RuntimeError("[eval_em] cheap_model is None, cannot build cheap cache.")
         splits_use = list(splits) if splits is not None else list(test_splits)
         runner = CheapCacheRunner(
             data_cfg=data_cfg,
@@ -325,6 +410,39 @@ def main(cfg: DictConfig) -> None:
             emb_dim=int(cheap_emb_dim),
             cfg=c,
         )
+
+    # ---- selector module + sel_version ----
+    sel_mod_node = (
+        _oc_select(cfg, "em.selector_module")
+        or _oc_select(cfg, "em.selector")
+        or _oc_select(cfg, "selector_module")
+        or _oc_select(cfg, "selector")
+    )
+    if sel_mod_node is None:
+        raise KeyError("[eval_em] Missing selector config: cfg.em.selector_module (must contain _target_).")
+
+    selector_module = instantiate(sel_mod_node)
+
+    sel_version_cfg = (
+        _oc_select(cfg, "em.sel_version", default=None)
+        or _oc_select(cfg, "sel_version", default=None)
+    )
+    sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
+    sel_hash = _stable_cfg_hash(sel_mod_container)
+    if sel_version_cfg is None or str(sel_version_cfg).lower() in ("", "none", "null", "auto"):
+        sel_version = f"sel_{sel_hash}"
+    else:
+        sel_version = str(sel_version_cfg)
+
+    if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax"):
+        sel_kmax = int(selector_module.cfg.kmax)
+    else:
+        sel_kmax = int(kmax)
+
+    print(f"[eval_em] selector instantiated: {selector_module.__class__.__name__}")
+    if hasattr(selector_module, "version"):
+        print(f"[eval_em] selector.version: {getattr(selector_module, 'version')}")
+    print(f"[eval_em] sel_version: {sel_version} (hash={sel_hash}) sel_kmax={sel_kmax}")
 
     sel_node = em_node.get("selection_cache", {})
     sel_pair_batch_size = int(sel_node.get("pair_batch_size", 64))
@@ -351,6 +469,7 @@ def main(cfg: DictConfig) -> None:
             pair_batch_size=int(sel_pair_batch_size),
         )
 
+    # ---- instance cache runner knobs ----
     inst_node = em_node.get("instance_cache", {})
     inst_cache_bs = int(inst_node.get("batch_size", 1024))
     inst_cache_nw = int(inst_node.get("num_workers", num_workers))
@@ -385,68 +504,12 @@ def main(cfg: DictConfig) -> None:
             normalize_emb=bool(inst_cache_norm),
         )
 
-    # -----------------------------------------------------------------------------
-    # Bootstrap: cheap + selection first (instance cache MUST be built AFTER ckpt load)
-    # -----------------------------------------------------------------------------
-    bootstrap_epoch0 = int(em_node.get("bootstrap", {}).get("epoch", 0))
-    bootstrap_overwrite_all = True if force_overwrite_bootstrap else bool(em_node.get("bootstrap", {}).get("overwrite_all", True))
-    bootstrap_skip_if_ready = False if bootstrap_overwrite_all else bool(em_node.get("bootstrap", {}).get("skip_if_ready", True))
-
-    print(
-        "[eval_em] BOOTSTRAP plan (pre-ckpt): "
-        f"overwrite_all={bootstrap_overwrite_all} skip_if_ready={bootstrap_skip_if_ready} splits={test_splits}"
-    )
-    cheap_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
-    selection_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
-
-    # -----------------------------------------------------------------------------
-    # Build DataLoader(s) after selection is ready
-    # -----------------------------------------------------------------------------
-    persistent_workers = False  # eval + refresh caches -> never keep persistent workers
-
-    def _load_sel_meta(split: str) -> Dict[str, Any]:
-        p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
-        return _load_json(p)
-
-    def build_eval_loader_for_split(split: str) -> DataLoader:
-        ds = _get_cts_ds(split)
-        pair_ds = DynamicPairDataset(ds)
-        meta = _load_sel_meta(split)
-        cpu_builder = PairBatchBuilderCPU(
-            cts_ds=ds,
-            em_cache_root=em_cache_root,
-            split=split,
-            cfg=PairBatchBuilderCPUConfig(
-                kmax=int(kmax),
-                include_pos=bool(run_cfg.get("include_pos", True)),
-                include_esa=bool(run_cfg.get("include_esa", True)),
-                pin_memory=True,
-            ),
-            expected_path_hash=str(meta["path_hash"]),
-            expected_dataset_hash_key=str(meta["dataset_hash_key"]),
-        )
-        return DataLoader(
-            pair_ds,
-            batch_size=int(batch_size),
-            shuffle=False,
-            num_workers=int(num_workers),
-            pin_memory=True,
-            persistent_workers=persistent_workers,
-            collate_fn=cpu_builder,
-            drop_last=False,
-        )
-
-    # -----------------------------------------------------------------------------
-    # TokenProvider configs + builder (needs selection+cheap meta ready)
-    # -----------------------------------------------------------------------------
-    policy_node = em_node.get("policy", None)
-    if policy_node is None:
-        raise KeyError("[eval_em] missing cfg.em.policy (UpdatePolicyConfig node).")
-    pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
-
+    # ----------------------------
+    # 4) TokenProviderConfig + builders (COPY train_em.py style)
+    # ----------------------------
     tp_cfg_node = cfg.get("token_provider", cfg.get("em", {}).get("token_provider", None))
     if tp_cfg_node is None:
-        raise KeyError("[eval_em] missing token_provider config. Expected cfg.token_provider or cfg.em.token_provider")
+        raise KeyError("[eval_em] missing token_provider config: cfg.token_provider")
 
     token_provider_cfg = TokenProviderConfig(
         policy=UpdatePolicyConfig(**pol_cfg_dict),
@@ -463,12 +526,7 @@ def main(cfg: DictConfig) -> None:
             raise FileNotFoundError(f"[eval_em] missing meta under em_cache_root for split={split}")
         return _load_json(sel_meta_p), _load_json(cheap_meta_p)
 
-    def build_token_provider_for_split(
-        split: str,
-        *,
-        policy: UpdatePolicy,
-        require_ready: bool,
-    ) -> TokenProvider:
+    def build_token_provider_for_split(split: str, *, require_ready: bool = True) -> TokenProvider:
         sel_meta, cheap_meta = _read_split_meta_required(split)
         ds = _get_cts_ds(split)
         total_cts_local = int(len(ds))
@@ -476,9 +534,9 @@ def main(cfg: DictConfig) -> None:
         sel_version_used = str(sel_meta.get("sel_version", "sel_v0"))
         cheap_version_used = str(sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version)))
 
-        return TokenProvider(
+        tp = TokenProvider(
             cfg=token_provider_cfg,
-            policy=policy,
+            policy=policy_eval,
             instance_model=instance_model,
             device=device,
             em_cache_root=str(em_cache_root),
@@ -492,10 +550,44 @@ def main(cfg: DictConfig) -> None:
             cheap_version_used=cheap_version_used,
             require_ready=bool(require_ready),
         )
+        return tp
 
-    # -----------------------------------------------------------------------------
-    # Trainer config (reuse cfg.trainer_em)
-    # -----------------------------------------------------------------------------
+    def _load_sel_meta(split: str) -> Dict[str, Any]:
+        p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
+        return _load_json(p)
+
+    # eval loader builder (COPY train_em.py)
+    def build_eval_loader_for_split(split: str) -> DataLoader:
+        ds = _get_cts_ds(split)
+        pair_ds = DynamicPairDataset(ds)
+        meta = _load_sel_meta(split)
+        cpu_builder = PairBatchBuilderCPU(
+            cts_ds=ds,
+            em_cache_root=em_cache_root,
+            split=split,
+            cfg=PairBatchBuilderCPUConfig(
+                kmax=kmax,
+                include_pos=bool(run_cfg.get("include_pos", True)),
+                include_esa=bool(run_cfg.get("include_esa", True)),
+                pin_memory=True,
+            ),
+            expected_path_hash=str(meta["path_hash"]),
+            expected_dataset_hash_key=str(meta["dataset_hash_key"]),
+        )
+        return DataLoader(
+            pair_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=False,  # eval 阶段别用 persistent
+            collate_fn=cpu_builder,
+            drop_last=False,
+        )
+
+    # ----------------------------
+    # 5) TrainerEMConfig (COPY train_em.py)
+    # ----------------------------
     tr_node = cfg.get("trainer_em", None)
     if tr_node is None:
         raise ValueError("[eval_em] Missing config node: cfg.trainer_em.")
@@ -504,14 +596,12 @@ def main(cfg: DictConfig) -> None:
     betas = (float(betas[0]), float(betas[1]))
 
     tr_cfg = TrainerEMConfig(
-        # loop (not used, but keep ckpt compatibility)
         num_epochs=int(tr_node.get("num_epochs", run_cfg.get("num_epochs", 1))),
         log_every=int(tr_node.get("log_every", 50)),
         grad_accum_steps=int(tr_node.get("grad_accum_steps", 1)),
         clip_grad_norm=float(tr_node.get("clip_grad_norm", 0.0)),
         use_amp=bool(tr_node.get("use_amp", False)),
 
-        # loss
         loss_type=str(tr_node.get("loss_type", "bce")),
         esa_weighting=bool(tr_node.get("esa_weighting", False)),
         focal_alpha=float(tr_node.get("focal_alpha", 0.25)),
@@ -527,7 +617,6 @@ def main(cfg: DictConfig) -> None:
         esa_lambda_pos=float(tr_node.get("esa_lambda_pos", 1.0)),
         esa_lambda_neg=float(tr_node.get("esa_lambda_neg", 0.5)),
 
-        # optimizer (not used in eval, but often stored in ckpt)
         optimizer=str(tr_node.get("optimizer", "adamw")),
         betas=betas,
         eps=float(tr_node.get("eps", 1e-8)),
@@ -537,7 +626,6 @@ def main(cfg: DictConfig) -> None:
         lr_inst=float(tr_node.get("lr_inst", 1e-5)),
         wd_inst=float(tr_node.get("wd_inst", 0.0)),
 
-        # scheduler
         scheduler_agg=str(tr_node.get("scheduler_agg", "none")),
         scheduler_inst=str(tr_node.get("scheduler_inst", "none")),
         scheduler_t_max=int(tr_node.get("scheduler_t_max", tr_node.get("num_epochs", 10))),
@@ -546,236 +634,235 @@ def main(cfg: DictConfig) -> None:
         scheduler_factor=float(tr_node.get("scheduler_factor", 0.2)),
         scheduler_patience=int(tr_node.get("scheduler_patience", 5)),
 
-        # monitor/ema
         monitor=str(tr_node.get("monitor", "loss")),
         greater_is_better=bool(tr_node.get("greater_is_better", False)),
         ema_enabled=bool(tr_node.get("ema_enabled", False)),
         ema_decay=float(tr_node.get("ema_decay", 0.999)),
     )
 
-    # -----------------------------------------------------------------------------
-    # Resolve checkpoint path (prefer run_dir-relative like train_em.py)
-    # -----------------------------------------------------------------------------
-    ckpt_path_cfg = (
-        run_cfg.get("checkpoint", None)
-        or run_cfg.get("eval_checkpoint", None)
-        or run_cfg.get("ckpt_path", None)
-    )
-
-    def _resolve_ckpt_path(p: Optional[str]) -> Path:
-        if p is None:
-            cand_best = ckpt_dir / "best.pt"
-            if cand_best.exists():
-                return cand_best
-            cand_last = ckpt_dir / "last.pt"
-            return cand_last
-        raw = Path(os.path.expandvars(os.path.expanduser(str(p))))
-        if raw.is_absolute():
-            return raw
-        # prefer Hydra run_dir relative first (matches train_em behavior)
-        cand1 = run_dir / raw
-        if cand1.exists():
-            return cand1
-        # then orig_cwd relative
-        cand2 = orig_cwd / raw
-        return cand2
-
-    ckpt_path = _resolve_ckpt_path(ckpt_path_cfg)
+    # ----------------------------
+    # 6) Resolve checkpoint (MUST use run.checkpoint)
+    # ----------------------------
+    ckpt_path_cfg = run_cfg.get("checkpoint", None)
+    ckpt_path = _resolve_ckpt_path(ckpt_path_cfg, run_dir=run_dir, orig_cwd=orig_cwd, ckpt_dir=ckpt_dir)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"[eval_em] checkpoint not found: {ckpt_path}")
 
     tag_prefix = str(run_cfg.get("test_tag", f"ckpt_{ckpt_path.stem}"))
-    use_ema = bool(run_cfg.get("use_ema", True))
-
     print(f"[eval_em] Will load checkpoint: {ckpt_path}")
     print(f"[eval_em] Test tag_prefix: {tag_prefix}")
 
-    # -----------------------------------------------------------------------------
-    # Create ONE trainer, load ckpt ONCE (models updated), then build instance cache, then test-eval each split.
-    # -----------------------------------------------------------------------------
-    # temp token provider: online + require_ready=False (instance cache not built yet)
-    policy_tmp_online = UpdatePolicy(UpdatePolicyConfig(
-        warmup_epochs=0,
-        instance_mode="online",
-        cheap_mode="cached",
-    ))
+    # ----------------------------
+    # 7) BOOTSTRAP for TEST (cheap + selection only)
+    #    IMPORTANT: do NOT build instance cache before loading ckpt weights
+    # ----------------------------
+    bootstrap_epoch0 = int(em_node.get("bootstrap", {}).get("epoch", 0))
+    bootstrap_overwrite_all = True if force_overwrite_bootstrap else bool(em_node.get("bootstrap", {}).get("overwrite_all", True))
+    bootstrap_skip_if_ready = False if bootstrap_overwrite_all else bool(em_node.get("bootstrap", {}).get("skip_if_ready", True))
 
-    # choose a "bootstrap split" just to construct a trainer object
+    print(
+        "[eval_em] BOOTSTRAP plan (pre-ckpt): "
+        f"overwrite_all={bootstrap_overwrite_all} skip_if_ready={bootstrap_skip_if_ready} splits={test_splits}"
+    )
+    # build cheap + selection (instance after ckpt)
+    cheap_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
+    selection_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
+
+    # ----------------------------
+    # 8) Load ckpt into (agg, inst) weights (NO trainer yet)
+    # ----------------------------
+    _load_em_checkpoint_into_models(
+        ckpt_path,
+        agg_model=agg_model,
+        instance_model=instance_model,
+        device=device,
+    )
+    print(f"[eval_em] Loaded checkpoint weights into models: {ckpt_path}")
+
+    # ----------------------------
+    # 9) Build INSTANCE cache for test splits (must match sel_version from step7)
+    # ----------------------------
+    print(
+        "[eval_em] BOOTSTRAP plan (post-ckpt): "
+        f"build_instance_cache=True overwrite=True splits={test_splits}"
+    )
+    instance_refresh_fn(epoch=bootstrap_epoch0, overwrite=True, skip_if_ready=False, splits=test_splits)
+
+    # ----------------------------
+    # 10) Build Trainer AFTER bootstrap+ckpt+instance_cache (as you要求)
+    # ----------------------------
     bootstrap_split = test_splits[0]
-    loader_boot = build_eval_loader_for_split(bootstrap_split)
-    tp_tmp = build_token_provider_for_split(bootstrap_split, policy=policy_tmp_online, require_ready=False)
+    test_loader_boot = build_eval_loader_for_split(bootstrap_split)
+    tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=True)
 
     trainer = TrainerEM(
         cfg=tr_cfg,
         device=device,
         agg_model=agg_model,
         instance_model=instance_model,
-        token_provider=tp_tmp,
-        token_provider_val=tp_tmp,
+        token_provider=tp_boot,
+        token_provider_val=tp_boot,
         controller=None,
-        train_loader=loader_boot,  # dummy
-        val_loader=loader_boot,
+        train_loader=test_loader_boot,  # dummy
+        val_loader=test_loader_boot,    # dummy
         logger=wandb_run,
         task_cfg=(cfg.task if "task" in cfg else None),
     )
 
-    trainer.load_checkpoint(str(ckpt_path), map_location=device)
-    print(f"[eval_em] Loaded checkpoint into TrainerEM: {ckpt_path}")
+    # ----------------------------
+    # 11) TEST routine (COPY train_em.py test section)
+    # ----------------------------
+    # optional val-best threshold from run.best_threshold (if user provides)
+    best_threshold_cfg = run_cfg.get("best_threshold", None)
+    best_threshold = float(best_threshold_cfg) if best_threshold_cfg is not None else None
 
-    # build instance cache AFTER ckpt load (this is the key fix)
-    if always_build_instance_cache:
-        epoch_for_build = int(getattr(trainer.state, "epoch", bootstrap_epoch0))
-        print(
-            "[eval_em] BOOTSTRAP plan (post-ckpt): "
-            f"build_instance_cache=True epoch={epoch_for_build} splits={test_splits}"
-        )
-        instance_refresh_fn(epoch=epoch_for_build, overwrite=True, skip_if_ready=False, splits=test_splits)
-        # notify tmp token provider if it supports reopening memmaps
-        if hasattr(tp_tmp, "on_cache_refreshed"):
-            tp_tmp.on_cache_refreshed({"refresh_instance_cache": True})
+    def _refresh_em_caches_for_split(split: str, epoch_for_build: int) -> None:
+        # 强制用“当前模型权重快照”重建 test caches，确保一致
+        cheap_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+        selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+        instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
 
-    # final eval policy (cached/online)
-    policy_eval = UpdatePolicy(UpdatePolicyConfig(
-        warmup_epochs=0,
-        instance_mode=("cached" if eval_use_inst_cache_default else "online"),
-        cheap_mode="cached",
-    ))
+    def run_test_eval_for_current_trainer(tag_prefix_local: str) -> None:
+        for split_idx in test_splits:
+            print(f"[eval_em][{tag_prefix_local}] Building test loader/token_provider for split='{split_idx}'")
 
-    # -----------------------------------------------------------------------------
-    # Run "train_em.py test routine" per split: thr0.5 / val_best(optional) / sweep
-    # -----------------------------------------------------------------------------
-    for sp in test_splits:
-        print(f"\n[eval_em] ===================== TEST split={sp} =====================")
+            _refresh_em_caches_for_split(split_idx, epoch_for_build=int(bootstrap_epoch0))
 
-        # IMPORTANT: loader/token_provider must be split-local
-        test_loader = build_eval_loader_for_split(sp)
-        tp_test = build_token_provider_for_split(sp, policy=policy_eval, require_ready=eval_use_inst_cache_default)
+            test_loader = build_eval_loader_for_split(split_idx)
+            tp_test = build_token_provider_for_split(split_idx, require_ready=True)
 
-        test_root = Path(eval_dir) / "test" / str(sp) / str(tag_prefix)
-        test_root.mkdir(parents=True, exist_ok=True)
+            test_root = Path(eval_dir) / "test" / str(split_idx) / tag_prefix_local
+            test_root.mkdir(parents=True, exist_ok=True)
 
-        # ---------- (A) fixed threshold = 0.5 ----------
-        task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-        task_fixed.threshold = 0.5
-        out_dir_fixed = test_root / "thr0_5"
-        out_dir_fixed.mkdir(parents=True, exist_ok=True)
+            # ---------- (A) fixed threshold = 0.5 ----------
+            task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+            task_fixed.threshold = 0.5
+            out_dir_fixed = test_root / "thr0_5"
+            out_dir_fixed.mkdir(parents=True, exist_ok=True)
 
-        print(f"[eval_em][Test {sp}][{tag_prefix}] Eval fixed threshold=0.5")
-        with _swap_token_provider(trainer, tp_test):
-            res_fixed = evaluate_with_trainer(
-                trainer=trainer,
-                loader=test_loader,
-                task_cfg=task_fixed,
-                logging_cfg=cfg.logging,
-                output_dir=str(out_dir_fixed),
-                set_labels=None,
-                aggregate_sets=False,
-                tag=f"{sp}_{tag_prefix}_thr0.5",
-                do_threshold_sweep=False,
-                sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
-                topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
-            )
-
-        # ---------- (B) val best_threshold (optional, from cfg.run.best_threshold) ----------
-        res_valbest = None
-        if best_threshold is not None:
-            task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-            task_valbest.threshold = float(best_threshold)
-            out_dir_valbest = test_root / "val_best"
-            out_dir_valbest.mkdir(parents=True, exist_ok=True)
-
-            print(f"[eval_em][Test {sp}][{tag_prefix}] Eval val best_threshold={float(best_threshold):.4f}")
-            with _swap_token_provider(trainer, tp_test):
-                res_valbest = evaluate_with_trainer(
+            print(f"[eval_em][Test {split_idx}][{tag_prefix_local}] Eval fixed threshold=0.5")
+            with _swap_token_provider_val(trainer, tp_test):
+                res_fixed = evaluate_with_trainer(
                     trainer=trainer,
                     loader=test_loader,
-                    task_cfg=task_valbest,
+                    task_cfg=task_fixed,
                     logging_cfg=cfg.logging,
-                    output_dir=str(out_dir_valbest),
+                    output_dir=str(out_dir_fixed),
                     set_labels=None,
                     aggregate_sets=False,
-                    tag=f"{sp}_{tag_prefix}_valbest",
+                    tag=f"{split_idx}_{tag_prefix_local}_thr0.5",
                     do_threshold_sweep=False,
                     sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
                     reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
                     softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
                     topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                 )
-        else:
-            print(f"[eval_em][Test {sp}][{tag_prefix}] Skip val-best eval (run.best_threshold not set).")
 
-        # ---------- (C) sweep on test ----------
-        task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
-        out_dir_sweep = test_root / "sweep"
-        out_dir_sweep.mkdir(parents=True, exist_ok=True)
+            # ---------- (B) val best_threshold (optional) ----------
+            res_valbest = None
+            if best_threshold is not None:
+                task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+                task_valbest.threshold = float(best_threshold)
+                out_dir_valbest = test_root / "val_best"
+                out_dir_valbest.mkdir(parents=True, exist_ok=True)
+                print(
+                    f"[eval_em][Test {split_idx}][{tag_prefix_local}] "
+                    f"Eval val best_threshold={float(best_threshold):.4f}"
+                )
+                with _swap_token_provider_val(trainer, tp_test):
+                    res_valbest = evaluate_with_trainer(
+                        trainer=trainer,
+                        loader=test_loader,
+                        task_cfg=task_valbest,
+                        logging_cfg=cfg.logging,
+                        output_dir=str(out_dir_valbest),
+                        set_labels=None,
+                        aggregate_sets=False,
+                        tag=f"{split_idx}_{tag_prefix_local}_valbest",
+                        do_threshold_sweep=False,
+                        sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
+                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
+                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                    )
+            else:
+                print(f"[eval_em][Test {split_idx}][{tag_prefix_local}] Skip val-best eval because run.best_threshold is None.")
 
-        print(f"[eval_em][Test {sp}][{tag_prefix}] Eval threshold sweep on test")
-        with _swap_token_provider(trainer, tp_test):
-            res_sweep = evaluate_with_trainer(
-                trainer=trainer,
-                loader=test_loader,
-                task_cfg=task_sweep,
-                logging_cfg=cfg.logging,
-                output_dir=str(out_dir_sweep),
-                set_labels=None,
-                aggregate_sets=False,
-                tag=f"{sp}_{tag_prefix}_sweep",
-                do_threshold_sweep=True,
-                sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
-                topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
-            )
+            # ---------- (C) sweep on test ----------
+            task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
+            out_dir_sweep = test_root / "sweep"
+            out_dir_sweep.mkdir(parents=True, exist_ok=True)
 
-        best_thr_test = res_sweep.get("best_threshold", None)
+            print(f"[eval_em][Test {split_idx}][{tag_prefix_local}] Eval threshold sweep on test")
+            with _swap_token_provider_val(trainer, tp_test):
+                res_sweep = evaluate_with_trainer(
+                    trainer=trainer,
+                    loader=test_loader,
+                    task_cfg=task_sweep,
+                    logging_cfg=cfg.logging,
+                    output_dir=str(out_dir_sweep),
+                    set_labels=None,
+                    aggregate_sets=False,
+                    tag=f"{split_idx}_{tag_prefix_local}_sweep",
+                    do_threshold_sweep=True,
+                    sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
+                    reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
+                    softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                    topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                )
 
-        # ---- print scalar metrics (train_em test style) ----
-        metrics_fixed = res_fixed.get("metrics", {})
-        print(f"\n[Test {sp}][{tag_prefix}] Fixed threshold=0.5 metrics:")
-        for k, v in iter_scalar_metrics(metrics_fixed):
-            print(f"  {k}: {v:.4f}")
+            best_thr_test = res_sweep.get("best_threshold", None)
 
-        metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
-        if metrics_valbest is not None:
-            print(f"\n[Test {sp}][{tag_prefix}] Using val best_threshold={float(best_threshold):.4f} metrics:")
-            for k, v in iter_scalar_metrics(metrics_valbest):
+            metrics_fixed = res_fixed.get("metrics", {})
+            print(f"\n[Test {split_idx}][{tag_prefix_local}] Fixed threshold=0.5 metrics:")
+            for k, v in iter_scalar_metrics(metrics_fixed):
                 print(f"  {k}: {v:.4f}")
 
-        metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
-        if best_thr_test is not None and "metrics_at_best" in res_sweep:
-            print(f"\n[Test {sp}][{tag_prefix}] Sweep metrics (best threshold={float(best_thr_test):.4f}):")
-        else:
-            try:
-                base_thr = float(task_sweep.threshold)
-            except Exception:
-                base_thr = float("nan")
-            print(f"\n[Test {sp}][{tag_prefix}] Sweep metrics (base threshold={base_thr:.4f}):")
-
-        for k, v in iter_scalar_metrics(metrics_sweep):
-            print(f"  {k}: {v:.4f}")
-
-        if best_thr_test is not None:
-            print(f"[Test {sp}][{tag_prefix}] Best threshold on test = {float(best_thr_test):.4f}")
-
-        # ---- wandb summary ----
-        if wandb_run is not None:
-            prefix = f"test/{sp}/{tag_prefix}"
-            for k, v in iter_scalar_metrics(metrics_fixed):
-                wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+            metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
             if metrics_valbest is not None:
+                print(
+                    f"\n[Test {split_idx}][{tag_prefix_local}] "
+                    f"Using val best_threshold={float(best_threshold):.4f} metrics:"
+                )
                 for k, v in iter_scalar_metrics(metrics_valbest):
-                    wandb_run.summary[f"{prefix}_valbest/{k}"] = v
-            for k, v in iter_scalar_metrics(metrics_sweep):
-                wandb_run.summary[f"{prefix}_sweep/{k}"] = v
-            if best_thr_test is not None:
-                try:
-                    wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
-                except Exception:
-                    pass
+                    print(f"  {k}: {v:.4f}")
 
-    # finish wandb
+            metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
+            if best_thr_test is not None and "metrics_at_best" in res_sweep:
+                print(f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (best threshold={float(best_thr_test):.4f}):")
+            else:
+                try:
+                    base_thr = float(task_sweep.threshold)
+                except Exception:
+                    base_thr = float("nan")
+                print(f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (base threshold={base_thr:.4f}):")
+
+            for k, v in iter_scalar_metrics(metrics_sweep):
+                print(f"  {k}: {v:.4f}")
+
+            if best_thr_test is not None:
+                print(f"[Test {split_idx}][{tag_prefix_local}] Best threshold on test = {float(best_thr_test):.4f}")
+
+            # wandb summary
+            if wandb_run is not None:
+                prefix = f"test/{split_idx}/{tag_prefix_local}"
+                for k, v in iter_scalar_metrics(metrics_fixed):
+                    wandb_run.summary[f"{prefix}_thr0.5/{k}"] = v
+                if metrics_valbest is not None:
+                    for k, v in iter_scalar_metrics(metrics_valbest):
+                        wandb_run.summary[f"{prefix}_valbest/{k}"] = v
+                for k, v in iter_scalar_metrics(metrics_sweep):
+                    wandb_run.summary[f"{prefix}_sweep/{k}"] = v
+                if best_thr_test is not None:
+                    try:
+                        wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
+                    except Exception:
+                        pass
+
+    print("\n[eval_em] Start evaluating on test set...")
+    run_test_eval_for_current_trainer(tag_prefix_local=tag_prefix)
+
+    # wandb finish
     if wandb_run is not None:
         try:
             import wandb  # type: ignore

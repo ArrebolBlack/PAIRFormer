@@ -326,6 +326,9 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
             # 在非 train/val split（例如 test）上，过滤低 ESA 得分的窗口
             if split_idx not in ["train", "val"] and esa_score < 6:
                 continue
+            # if esa_score < 6:
+            #     continue
+
             if mi_esa is None:
                 continue
 
