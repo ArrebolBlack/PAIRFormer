@@ -313,7 +313,8 @@ model:
 
   # Set Transformer encoder
   n_layers: 3
-  block_type: isab
+  # block_type: isab
+  block_type: sab
   num_inducing_points: 16
 
   # PMA decoder
