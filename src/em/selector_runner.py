@@ -37,9 +37,77 @@ class SelectionCacheBuildConfig:
     pair_batch_size: int = 256  # write_selection in batch; 1 => per-pair
     progress_bar: bool = True
 
+    candidate_pool_size: Optional[int] = None   # n_pool, None=disable
+    candidate_pool_mode: str = "topn"           # "topn" or "topn_plus_rand"
+    candidate_pool_topn_ratio: float = 1.0     # "topn" or "topn_plus_rand"
+    candidate_pool_seed: int = 2020
+
     def __post_init__(self):
         if self.splits is None:
             self.splits = ["train", "val"]
+
+
+def _restrict_topn_pool(
+    *,
+    uids: torch.Tensor,
+    pos: torch.Tensor,
+    cheap_logit: torch.Tensor,
+    cheap_emb: Optional[torch.Tensor],
+    n_pool: Optional[int],
+    kmax: int,
+    mode: str,
+    topn_ratio: float,
+    seed: int,
+    pair_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    if n_pool is None:
+        return uids, pos, cheap_logit, cheap_emb
+    n = int(cheap_logit.numel())
+    if n <= 0:
+        return uids, pos, cheap_logit, cheap_emb
+
+    # 关键：保证 n_pool >= kmax，否则 selector 没法选满 K
+    n_eff = int(max(kmax, min(n_pool, n)))
+    if n_eff >= n:
+        return uids, pos, cheap_logit, cheap_emb
+
+    if mode == "topn":
+        idx = torch.topk(cheap_logit, k=n_eff, dim=0, largest=True, sorted=True).indices
+    elif mode == "topn_plus_rand":
+        base = int(max(kmax, min(n_eff, round(topn_ratio * n_eff))))
+        base = max(kmax, min(base, n_eff))
+        base_idx = torch.topk(cheap_logit, k=base, dim=0, largest=True, sorted=True).indices
+
+        remain = n_eff - base
+        if remain <= 0:
+            idx = base_idx
+        else:
+            # 从 tail 随机补 distractors（可复现：seed + pair_id）
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(int(seed + pair_id))
+
+            mask = torch.ones(n, dtype=torch.bool)
+            mask[base_idx] = False
+            tail = torch.nonzero(mask, as_tuple=False).view(-1)
+            if tail.numel() == 0:
+                idx = base_idx
+            else:
+                perm = torch.randperm(tail.numel(), generator=gen)
+                pick = tail[perm[: min(remain, tail.numel())]]
+                if pick.numel() < remain:
+                    pad = pick[-1:].repeat(remain - pick.numel())
+                    pick = torch.cat([pick, pad], dim=0)
+                idx = torch.cat([base_idx, pick], dim=0)
+    else:
+        raise ValueError(f"Unknown candidate_pool_mode={mode}")
+
+    uids = uids[idx]
+    pos = pos[idx]
+    cheap_logit = cheap_logit[idx]
+    if cheap_emb is not None:
+        cheap_emb = cheap_emb[idx]
+    return uids, pos, cheap_logit, cheap_emb
+
 
 
 class SelectionCacheRunner:
@@ -270,6 +338,20 @@ class SelectionCacheRunner:
                 # meta: pos (CPU)
                 meta = ds.batch_gather_by_uid(uids, fields=("pos",))
                 pos = meta["pos"].view(-1).to(dtype=torch.float32, device="cpu")
+
+                uids, pos, cheap_logit, cheap_emb = _restrict_topn_pool(
+                    uids=uids,
+                    pos=pos,
+                    cheap_logit=cheap_logit,
+                    cheap_emb=cheap_emb,
+                    n_pool=cfg.candidate_pool_size,
+                    kmax=kmax,
+                    mode=str(cfg.candidate_pool_mode),
+                    topn_ratio=float(cfg.candidate_pool_topn_ratio),
+                    seed=int(cfg.candidate_pool_seed),
+                    pair_id=int(pair_id),
+                )
+
 
             pair_ids_buf.append(int(pair_id))
             uids_list.append(uids)

@@ -56,12 +56,38 @@ def build_pair_tokens_on_gpu(
 
     X_valid = X_flat.index_select(0, valid).to(dtype=torch.float32)
 
+    # ---- meta (esa_scores / pos) support for CheapCTSNet ----
+    esa_cpu = batch_cpu.get("esa_scores", None)
+    if esa_cpu is None:
+        esa_cpu = batch_cpu.get("esa_score", None)  # 兼容命名
+    if esa_cpu is None:
+        esa_cpu = batch_cpu.get("esa", None)
+
+    pos_cpu = batch_cpu.get("pos", None)
+
+    esa_valid = None
+    pos_valid = None
+
+    if esa_cpu is not None:
+        esa = esa_cpu.to(device, non_blocking=True).view(B * K)
+        esa_valid = esa.index_select(0, valid).to(dtype=torch.float32)
+
+    if pos_cpu is not None:
+        pos = pos_cpu.to(device, non_blocking=True).view(B * K)
+        pos_valid = pos.index_select(0, valid).to(dtype=torch.float32)
+
     grad_ctx = torch.enable_grad() if train_instance else torch.no_grad()
     amp_ctx = torch.cuda.amp.autocast() if (use_amp and device.type == "cuda") else nullcontext()
 
     with grad_ctx:
         with amp_ctx:
-            feat_valid, logit_valid = get_embedding_and_logit(instance_model, X_valid)
+            feat_valid, logit_valid = get_embedding_and_logit(
+                instance_model,
+                X_valid,
+                esa_scores=esa_valid,
+                pos=pos_valid,
+            )
+
 
     if feat_valid is None or logit_valid is None:
         raise RuntimeError("[build_pair_tokens_on_gpu] extractor returned None.")

@@ -109,6 +109,23 @@ run:
   # force_overwrite_bootstrap: true
   # refresh_instance_after_update: false
 
+
+  # benchmark inference
+  bench_split: "test"
+  bench_num_pairs_subset: 1024
+  bench_warmup_iters: 20
+  bench_measure_iters: 100
+  bench_repeats: 3
+  bench_amp: false
+  bench_sync_cuda: True
+  bench_cheap_chunk_size: 8192
+  bench_csv_path: None # 走默认
+  bench_pair_ids_path: None
+  bench_profile_sections: True
+  bench_profile_sync_cuda: false
+  
+  
+
 # ===================== EM 相关（Controller / E-step 离线刷新触发） =====================
 
 em:
@@ -176,6 +193,10 @@ em:
   selection_cache:
     pair_batch_size: 10240  # 只影响“写入 selection cache 的 flush 频率”   selector实际按pair串行计算
 
+    candidate_pool_size: None   # n_pool, None=disable
+    candidate_pool_mode: "topn"   # "topn" or "topn_plus_rand"
+    candidate_pool_topn_ratio: 1.0  # "topn" or "topn_plus_rand"
+    candidate_pool_seed: ${seed}
 
   # UpdatePolicy：step-level（train_instance/use_cache）+ epoch-level refresh（离线 rebuild）
   # Gate 6 最小可跑：全部固定 cached + refresh=0

@@ -6,9 +6,9 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, Mapping
 
 import numpy as np
 import torch
@@ -144,6 +144,72 @@ def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _flatten_int_list(obj: Any) -> List[int]:
+    """
+    Accept:
+      - [1,2,3]
+      - [[1,2,3]]  (common mistake)
+      - [[1,2],[3,4]] (jsonl-style aggregation)
+    Return: flat List[int]
+    """
+    if isinstance(obj, dict) and "pair_ids" in obj:
+        obj = obj["pair_ids"]
+
+    if not isinstance(obj, list):
+        raise RuntimeError(f"pair_ids must be list/dict, got {type(obj)}")
+
+    # list-of-lists -> flatten
+    if len(obj) > 0 and isinstance(obj[0], list):
+        flat: List[int] = []
+        for sub in obj:
+            if not isinstance(sub, list):
+                raise RuntimeError("mixed list structure in pair_ids file")
+            flat.extend(sub)
+        obj = flat
+
+    return [int(x) for x in obj]
+
+
+def _infer_num_pairs(pair_index: Any) -> Optional[int]:
+    """
+    Best-effort infer total number of pairs.
+    Priority:
+      1) dict/object with pair_offsets: len(pair_offsets)-1
+      2) attribute num_pairs
+      3) __len__ (only if looks like a real PairIndex object, not dict)
+    """
+    # dict with pair_offsets
+    if isinstance(pair_index, dict) and "pair_offsets" in pair_index:
+        off = pair_index["pair_offsets"]
+        if torch.is_tensor(off):
+            return int(off.numel()) - 1
+        return int(len(off)) - 1
+
+    # object with pair_offsets
+    if hasattr(pair_index, "pair_offsets") and getattr(pair_index, "pair_offsets") is not None:
+        off = getattr(pair_index, "pair_offsets")
+        if torch.is_tensor(off):
+            return int(off.numel()) - 1
+        return int(len(off)) - 1
+
+    # object with num_pairs
+    if hasattr(pair_index, "num_pairs"):
+        try:
+            return int(getattr(pair_index, "num_pairs"))
+        except Exception:
+            pass
+
+    # avoid len(dict) trap
+    if isinstance(pair_index, dict):
+        return None
+
+    # fallback
+    try:
+        return int(len(pair_index))
+    except Exception:
+        return None
+
+
 def select_pair_ids_subset(
     pair_index: Any,
     *,
@@ -153,49 +219,49 @@ def select_pair_ids_subset(
     allow_overwrite: bool = False,
 ) -> List[int]:
     """
-    Returns a list of pair_ids.
-
-    Requirements / assumptions:
-      - pair_index should expose one of:
-          (a) attribute: pair_index.pair_ids -> Sequence[int]
-          (b) method: pair_index.get_all_pair_ids() -> Sequence[int]
-          (c) len(pair_index) works and pair ids are 0..len-1
+    Returns a list of pair_ids in [0, num_pairs).
+    Robust to old/bad json formats.
     """
     out_path_p = Path(out_path) if out_path is not None else None
+
+    num_pairs_total = _infer_num_pairs(pair_index)
+
+    # 1) reuse existing file (if allowed)
     if out_path_p is not None and out_path_p.exists() and not allow_overwrite:
         obj = _read_jsonl_or_json(out_path_p)
-        if isinstance(obj, dict) and "pair_ids" in obj:
-            return list(map(int, obj["pair_ids"]))
-        if isinstance(obj, list):
-            return list(map(int, obj))
-        raise RuntimeError(f"Unrecognized pair_id_list format at {out_path_p}")
+        subset = _flatten_int_list(obj)
 
-    # fetch all ids
-    all_ids: Sequence[int]
-    if hasattr(pair_index, "pair_ids"):
-        all_ids = list(getattr(pair_index, "pair_ids"))
-    elif hasattr(pair_index, "get_all_pair_ids"):
-        all_ids = list(pair_index.get_all_pair_ids())
-    else:
-        # fallback: assume 0..N-1
-        try:
-            n = len(pair_index)
-            all_ids = list(range(int(n)))
-        except Exception as e:
-            raise RuntimeError("pair_index does not expose pair_ids / get_all_pair_ids / __len__") from e
+        # range check if we can infer num_pairs
+        if num_pairs_total is not None:
+            bad = [x for x in subset if x < 0 or x >= num_pairs_total]
+            if bad:
+                raise RuntimeError(
+                    f"pair_ids file contains out-of-range ids (likely CTS uids). "
+                    f"num_pairs={num_pairs_total}, example_bad={bad[:5]}, file={out_path_p}\n"
+                    f"Fix: delete this file or rerun with allow_overwrite=True, and pass an ABSOLUTE path."
+                )
 
-    if len(all_ids) < num_pairs_subset:
-        raise RuntimeError(f"num_pairs_subset={num_pairs_subset} > available pairs={len(all_ids)}")
+        return subset
 
-    rng = np.random.RandomState(seed)
-    perm = rng.permutation(len(all_ids))
+    # 2) generate new subset
+    if num_pairs_total is None:
+        raise RuntimeError(
+            "Cannot infer num_pairs from pair_index. Expected dict/object with pair_offsets "
+            "or object with __len__/num_pairs."
+        )
+
+    if num_pairs_subset > num_pairs_total:
+        raise RuntimeError(f"num_pairs_subset={num_pairs_subset} > available pairs={num_pairs_total}")
+
+    all_ids: Sequence[int] = list(range(num_pairs_total))
+    rng = np.random.RandomState(int(seed))
+    perm = rng.permutation(num_pairs_total)
     subset = [int(all_ids[i]) for i in perm[:num_pairs_subset]]
 
     if out_path_p is not None:
-        _write_json(out_path_p, {"seed": seed, "num_pairs_subset": num_pairs_subset, "pair_ids": subset})
+        _write_json(out_path_p, {"seed": int(seed), "num_pairs_subset": int(num_pairs_subset), "pair_ids": subset})
 
     return subset
-
 
 # -----------------------------
 # Batch size accounting
@@ -294,7 +360,17 @@ class BenchRecord:
 def append_records_to_csv(path: Union[str, Path], records: List[BenchRecord]) -> None:
     path = Path(path)
     ensure_dir(path.parent)
-    rows = [asdict(r) for r in records]
+
+    rows = []
+    for r in records:
+        if is_dataclass(r):
+            rows.append(asdict(r))
+        elif isinstance(r, Mapping):
+            rows.append(dict(r))
+        elif hasattr(r, "__dict__"):
+            rows.append(dict(vars(r)))
+        else:
+            rows.append({"record": str(r)})
     if not rows:
         return
     fieldnames = list(rows[0].keys())
