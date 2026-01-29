@@ -1,0 +1,11 @@
+- experiment=miRAW_EM_Pipeline
+- run.kmax=512
+- em.selector_module.cfg.k1_ratio=0.5
+- run.batch_size=64
+- em.policy.warmup_epochs=55
+- run.num_epochs=100
+- em.selector_module._target_=src.selectors.selector_module_prefix.SelectorModulePrefix
+- em.selector_module.cfg._target_=src.selectors.st_selector_prefix.STSelectorConfig
+- logging.wandb.group=SetTransformer_EX1_Budget_K_prefix_3
+- logging.wandb.tags=[EM,PairAgg,SetTransformer,Budget_K_prefix]
+- experiment_name="kmax=${run.kmax}"

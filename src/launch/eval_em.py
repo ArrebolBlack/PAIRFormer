@@ -455,6 +455,18 @@ def main(cfg: DictConfig) -> None:
         splits: Optional[Iterable[str]] = None,
     ) -> None:
         splits_use = list(splits) if splits is not None else list(test_splits)
+
+        # >>>>>> 关键：把 candidate pool 参数读出来 <<<<<<
+        cand_pool_size = sel_node.get("candidate_pool_size", None)
+        cand_pool_mode = str(sel_node.get("candidate_pool_mode", "topn"))
+        cand_pool_topn_ratio = float(sel_node.get("candidate_pool_topn_ratio", 1.0))
+        cand_pool_seed = int(sel_node.get("candidate_pool_seed", seed))
+
+        print(
+            f"[eval_em] selection_refresh_fn: candidate_pool_size={cand_pool_size} "
+            f"mode={cand_pool_mode} topn_ratio={cand_pool_topn_ratio} seed={cand_pool_seed}"
+        )
+
         run_selection_cache(
             data_cfg=data_cfg,
             dataset_cache_root=dataset_cache_root,
@@ -466,8 +478,16 @@ def main(cfg: DictConfig) -> None:
             overwrite=bool(overwrite),
             skip_if_ready=bool(skip_if_ready),
             sel_version=str(sel_version),
+
             pair_batch_size=int(sel_pair_batch_size),
+
+            # >>>>>> 关键：传进去 <<<<<<
+            candidate_pool_size=cand_pool_size,
+            candidate_pool_mode=cand_pool_mode,
+            candidate_pool_topn_ratio=cand_pool_topn_ratio,
+            candidate_pool_seed=cand_pool_seed,
         )
+
 
     # ---- instance cache runner knobs ----
     inst_node = em_node.get("instance_cache", {})

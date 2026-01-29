@@ -147,6 +147,10 @@ class SelectionCacheRunner:
         print(f"[SelectorRunner] splits={cfg.splits} overwrite={cfg.overwrite} skip_if_ready={cfg.skip_if_ready}")
         print(f"[SelectorRunner] sel_version={sel_version} kmax={kmax} epoch={cfg.epoch}")
         print(f"[SelectorRunner] selector_cfg={selector.cfg}")
+        print(
+        f"[SelectorRunner] candidate_pool_size={cfg.candidate_pool_size} "
+        f"mode={cfg.candidate_pool_mode} topn_ratio={cfg.candidate_pool_topn_ratio} seed={cfg.candidate_pool_seed}"
+        )
 
         for split in cfg.splits:
             self._build_one_split(
