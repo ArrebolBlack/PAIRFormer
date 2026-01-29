@@ -1,7 +1,0 @@
-- experiment=miRAW_EM_Pipeline
-- data.path.train=data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
-- data.path.val=data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt
-- data.path.test=data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test_0\,6-9.txt
-- logging.wandb.group=SetTransformer_Data_filter
-- logging.wandb.tags=[EM,PairAgg,SetTransformer,Data_filter]
-- experiment_name="filt_esa_lt_6"

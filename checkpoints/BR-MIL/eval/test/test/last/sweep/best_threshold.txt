@@ -1,2 +1,2 @@
-best_threshold=0.2800
-best_f1=0.6703
+best_threshold=0.5500
+best_f1=0.8625
