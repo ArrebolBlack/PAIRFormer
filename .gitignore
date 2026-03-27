@@ -54,3 +54,26 @@ data/**
 
 !data/deepTargetPro/
 !data/deepTargetPro/**
+
+# New data directories for rebuttal experiments
+!data/MTI/
+!data/MTI/**
+!data/MTI/processed/
+!data/MTI/processed/**
+
+!data/miRBench/
+!data/miRBench/**
+!data/miRBench/Hejret2023/
+!data/miRBench/Hejret2023/**
+!data/miRBench/Klimentova2022/
+!data/miRBench/Klimentova2022/**
+!data/miRBench/Manakov2022/
+!data/miRBench/Manakov2022/**
+
+!data/rebuttal/
+!data/rebuttal/**
+
+# Exclude large files (>50MB) in new data dirs — transfer manually
+data/MTI/MTI_mRNALevel.csv
+data/miRBench/Manakov2022/train.tsv
+data/miRBench/Manakov2022/train_cts.tsv

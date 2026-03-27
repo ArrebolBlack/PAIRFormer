@@ -1,0 +1,19 @@
+{
+  "cts_transcripts": 6081,
+  "cts_pairs": 24745,
+  "test_total": 5480,
+  "seen": {
+    "pairs": 3965,
+    "positives": 2025,
+    "negatives": 1940,
+    "transcripts": 1745,
+    "percentage": 72.4
+  },
+  "unseen": {
+    "pairs": 1515,
+    "positives": 715,
+    "negatives": 800,
+    "transcripts": 789,
+    "percentage": 27.6
+  }
+}

@@ -1,0 +1,46 @@
+# @package _global_
+# Exp A: Evaluation on clean test set (no positive overlap with train)
+
+defaults:
+  - miRAW_EM_Pipeline
+  - _self_
+
+experiment_name: "rebuttal_eval_no_pos_overlap"
+experiment:
+  name: "rebuttal_eval_no_pos_overlap"
+  task: "eval_no_pos_overlap"
+
+# Override test data path
+data:
+  path:
+    test: "data/rebuttal/miRAW_Test_0,6-9_no_pos_overlap.txt"
+
+# Evaluation mode
+run:
+  mode: eval
+  test_splits: ["test"]
+
+  # Use trained checkpoint
+  checkpoint: "checkpoints/BR-MIL/checkpoints/best.pt"
+
+  # Force rebuild caches for new test set
+  force_overwrite_bootstrap: true
+
+  # Eval settings
+  batch_size: 64
+  num_workers: 16
+  kmax: 64
+
+# Fix OmegaConf None→string issue
+em:
+  selection_cache:
+    candidate_pool_size: null
+
+# wandb
+logging:
+  wandb:
+    enabled: true
+    project: "PAIRFormer-Rebuttal"
+    group: "issue1-data-leakage"
+    name: "expA-no-pos-overlap"
+    tags: ["issue1", "data-leakage", "overlap-removal"]

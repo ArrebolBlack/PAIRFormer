@@ -45,6 +45,12 @@ class SelectionCacheBuildConfig:
     def __post_init__(self):
         if self.splits is None:
             self.splits = ["train", "val"]
+        # Sanitize: Hydra may pass string "None" instead of Python None
+        if self.candidate_pool_size is not None and not isinstance(self.candidate_pool_size, (int, float)):
+            try:
+                self.candidate_pool_size = int(self.candidate_pool_size)
+            except (ValueError, TypeError):
+                self.candidate_pool_size = None
 
 
 def _restrict_topn_pool(
