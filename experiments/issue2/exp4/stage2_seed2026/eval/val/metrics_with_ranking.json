@@ -1,0 +1,38 @@
+{
+  "accuracy": 0.852,
+  "precision": 0.8396039603960396,
+  "recall": 0.8635437881873728,
+  "f1": 0.8514056224899599,
+  "roc_auc": 0.9650226673442196,
+  "pr_auc": 0.9646422974272656,
+  "confusion_matrix": [
+    [
+      428,
+      81
+    ],
+    [
+      67,
+      424
+    ]
+  ],
+  "specificity": 0.8408644400785854,
+  "fpr": 0.15913555992141454,
+  "fnr": 0.1364562118126273,
+  "npv": 0.8646464646464647,
+  "fdr": 0.1603960396039604,
+  "threshold": 0.5,
+  "rank/ndcg@1": 1.0,
+  "rank/ndcg@10": 1.0,
+  "rank/ndcg@32": 1.0,
+  "rank/ndcg@64": 1.0,
+  "rank/ndcg@128": 1.0,
+  "rank/topk_overlap@1": 1.0,
+  "rank/topk_overlap@10": 1.0,
+  "rank/topk_overlap@32": 1.0,
+  "rank/topk_overlap@64": 1.0,
+  "rank/topk_overlap@128": 1.0,
+  "rank/num_pairs": 900.0,
+  "rank/num_windows": 900.0,
+  "rank/pair_size_mean": 1.0,
+  "rank/pair_size_median": 1.0
+}

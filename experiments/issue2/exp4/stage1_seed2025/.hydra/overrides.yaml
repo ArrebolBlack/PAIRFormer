@@ -1,0 +1,5 @@
+- experiment=deepTargetPro_TargetNet_Optimized
+- seed=2025
+- logging.wandb.mode=disabled
+- logging.wandb.enabled=false
+- paths.output_root=experiments/issue2/exp4

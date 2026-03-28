@@ -1,0 +1,37 @@
+============================================================
+Evaluation Report
+============================================================
+
+Threshold: 0.5000
+
+Basic Metrics:
+- Accuracy:  0.9773
+- Precision: 1.0000
+- Recall:    0.9527
+- F1 Score:  0.9758
+- Specificity: 1.0000
+- AUC-ROC:   0.9795
+- AUC-PR:    0.9876
+
+Additional Metrics:
+- False Positive Rate: 0.0000
+- False Negative Rate: 0.0473
+- Negative Predictive Value: 0.9581
+- False Discovery Rate: 0.0000
+
+Confusion Matrix:
+[[2080    0]
+ [  91 1832]]
+
+Classification Report:
+              precision    recall  f1-score   support
+
+         0.0       0.96      1.00      0.98      2080
+         1.0       1.00      0.95      0.98      1923
+
+    accuracy                           0.98      4003
+   macro avg       0.98      0.98      0.98      4003
+weighted avg       0.98      0.98      0.98      4003
+
+
+============================================================

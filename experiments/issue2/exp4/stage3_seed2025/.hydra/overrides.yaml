@@ -1,0 +1,7 @@
+- experiment=deepTargetPro_EM_Pipeline
+- seed=2025
+- instance_ckpt_path=experiments/issue2/exp4/stage1_seed2025/checkpoints/best.pt
+- cheap_ckpt_path=experiments/issue2/exp4/stage2_seed2025/checkpoints/best.pt
+- logging.wandb.mode=disabled
+- logging.wandb.enabled=false
+- paths.output_root=experiments/issue2/exp4

@@ -1,0 +1,6 @@
+- experiment=deepTargetPro_CheapCTSNet
+- seed=2026
+- logging.wandb.mode=disabled
+- logging.wandb.enabled=false
+- paths.output_root=experiments/issue2/exp4
+- run.distill_teacher_ckpt=experiments/issue2/exp4/stage1_seed2026/checkpoints/best.pt
