@@ -280,6 +280,9 @@ def main(cfg: DictConfig) -> None:
 
     force_overwrite_bootstrap = bool(run_cfg.get("force_overwrite_bootstrap", True))
 
+    # NEW: 支持测试时使用 online 模式（避免构建全量 instance cache）
+    test_instance_mode = str(run_cfg.get("test_instance_mode", "cached"))  # "cached" or "online"
+
     test_splits = run_cfg.get("test_splits", ["test"])
     if isinstance(test_splits, str):
         test_splits = [test_splits]
@@ -290,6 +293,7 @@ def main(cfg: DictConfig) -> None:
     print(
         f"[eval_em] test_splits={test_splits} | "
         f"force_overwrite_bootstrap={force_overwrite_bootstrap} | "
+        f"test_instance_mode={test_instance_mode} | "
         f"kmax={kmax} batch_size={batch_size} num_workers={num_workers}"
     )
 
@@ -347,10 +351,10 @@ def main(cfg: DictConfig) -> None:
         raise KeyError("[eval_em] missing cfg.em.policy")
     pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
 
-    # eval policy: ALWAYS cached for test (train_em test routine uses require_ready=True)
+    # eval policy: use test_instance_mode from config (default: cached for backward compatibility)
     policy_eval = UpdatePolicy(UpdatePolicyConfig(
         warmup_epochs=0,
-        instance_mode="cached",
+        instance_mode=test_instance_mode,  # "cached" or "online"
         cheap_mode="cached",
     ))
 
@@ -704,20 +708,28 @@ def main(cfg: DictConfig) -> None:
     print(f"[eval_em] Loaded checkpoint weights into models: {ckpt_path}")
 
     # ----------------------------
-    # 9) Build INSTANCE cache for test splits (must match sel_version from step7)
+    # 9) Build INSTANCE cache for test splits (only if using cached mode)
     # ----------------------------
-    print(
-        "[eval_em] BOOTSTRAP plan (post-ckpt): "
-        f"build_instance_cache=True overwrite=True splits={test_splits}"
-    )
-    instance_refresh_fn(epoch=bootstrap_epoch0, overwrite=True, skip_if_ready=False, splits=test_splits)
+    if test_instance_mode == "cached":
+        print(
+            "[eval_em] BOOTSTRAP plan (post-ckpt): "
+            f"build_instance_cache=True overwrite=True splits={test_splits}"
+        )
+        instance_refresh_fn(epoch=bootstrap_epoch0, overwrite=True, skip_if_ready=False, splits=test_splits)
+    else:
+        print(
+            f"[eval_em] SKIP instance cache build (test_instance_mode={test_instance_mode})"
+        )
 
     # ----------------------------
-    # 10) Build Trainer AFTER bootstrap+ckpt+instance_cache (as you要求)
+    # 10) Build Trainer AFTER bootstrap+ckpt (and optionally instance_cache)
     # ----------------------------
     bootstrap_split = test_splits[0]
     test_loader_boot = build_eval_loader_for_split(bootstrap_split)
-    tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=True)
+
+    # NEW: require_ready 取决于 test_instance_mode
+    require_inst_cache_ready = (test_instance_mode == "cached")
+    tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=require_inst_cache_ready)
 
     trainer = TrainerEM(
         cfg=tr_cfg,
@@ -757,7 +769,9 @@ def main(cfg: DictConfig) -> None:
         # 强制用"当前模型权重快照"重建 test caches，确保一致
         cheap_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
         selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
-        instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+        # NEW: 只在 cached 模式下才重建 instance cache
+        if test_instance_mode == "cached":
+            instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
 
     def run_test_eval_for_current_trainer(tag_prefix_local: str) -> None:
         for split_idx in test_splits:
@@ -766,7 +780,8 @@ def main(cfg: DictConfig) -> None:
             _refresh_em_caches_for_split(split_idx, epoch_for_build=int(bootstrap_epoch0))
 
             test_loader = build_eval_loader_for_split(split_idx)
-            tp_test = build_token_provider_for_split(split_idx, require_ready=True)
+            # NEW: require_ready 取决于 test_instance_mode
+            tp_test = build_token_provider_for_split(split_idx, require_ready=(test_instance_mode == "cached"))
 
             test_root = Path(eval_dir) / "test" / str(split_idx) / tag_prefix_local
             test_root.mkdir(parents=True, exist_ok=True)

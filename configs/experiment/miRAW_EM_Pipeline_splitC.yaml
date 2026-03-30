@@ -48,6 +48,7 @@ run:
   eval_test_with_last: true
   eval_test_with_best: true
   best_ckpt_path: null
+  test_instance_mode: "online"  # 新增：测试时使用 online 模式
   train_reduction: none
   eval_reduction: none
   test_reduction: none
