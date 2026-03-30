@@ -1,5 +1,18 @@
 # Cheap Encoder Ranking Quality Analysis v2 (KXKP-Q3)
 
+## CHANGELOG (v2.1 - Bug Fixes)
+
+### Fixed Issues:
+1. **NDCG computation error**: Oracle logits can be negative, causing DCG/IDCG to be negative and NDCG to be invalid. Fixed by normalizing oracle logits to non-negative range before computing NDCG.
+2. **Selection cache mismatch**: k1_ratio=1 selection cache (5419 pairs, 7.4M CTS) does not match current dataset (5480 pairs, 7.5M CTS). Added validation to detect and skip mismatched caches.
+3. **Graceful degradation**: Script now handles missing STSelector caches gracefully, reporting only TopK results if STSelector data is unavailable.
+
+### What Changed:
+- NDCG now uses `oracle_logits - oracle_logits.min()` to ensure non-negative relevance scores
+- Added cache validation: checks if selection cache num_pairs matches dataset num_pairs
+- All STSelector metrics (recall, hit) are now optional and only computed if cache is valid
+- Output tables/plots adapt to show only available data
+
 ## 1. Goal
 
 Answer reviewer KXKP-Q3: "How does the cheap encoder rank functional CTS vs non-functional ones? What fraction of ground-truth functional sites are in Top-K under STSelector vs TopK?"

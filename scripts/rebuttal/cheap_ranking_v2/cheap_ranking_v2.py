@@ -249,7 +249,7 @@ def load_selection_cache(sel_dir):
     """Load selection cache from directory."""
     meta_path = Path(sel_dir) / "meta.json"
     if not meta_path.exists():
-        return None, None
+        return None, None, None
     with open(meta_path) as f:
         meta = json.load(f)
     num_pairs = meta["num_pairs"]
@@ -258,7 +258,7 @@ def load_selection_cache(sel_dir):
                      dtype=np.int32, mode="r", shape=(num_pairs, kmax))
     lens = np.memmap(Path(sel_dir) / "sel_len.i16.mmap",
                      dtype=np.int16, mode="r", shape=(num_pairs,))
-    return uids, lens
+    return uids, lens, meta
 
 
 def get_selected_local(uids_mmap, len_mmap, pair_id, start, n_cts):
@@ -346,25 +346,39 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
             topk_set = cheap_order[:actual_k]
             hit_topk[k].append(1.0 if top_oracle_local in topk_set else 0.0)
 
-        # NDCG@K for TopK (using raw oracle logits as relevance)
+        # NDCG@K for TopK (normalize oracle logits to non-negative relevance)
         for k in K_VALUES:
             actual_k = min(k, n_cts)
             topk_indices = cheap_order[:actual_k]
-            relevance = oracle_pair[topk_indices]
+
+            # Normalize oracle logits to [0, max] to avoid negative relevance
+            # This ensures DCG and IDCG are always non-negative
+            oracle_min = oracle_pair.min()
+            relevance_normalized = oracle_pair - oracle_min  # shift to [0, range]
+
+            relevance = relevance_normalized[topk_indices]
             discounts = np.log2(np.arange(1, actual_k + 1) + 1)
             dcg = np.sum(relevance / discounts)
-            # IDCG: ideal ordering by oracle
-            ideal_relevance = np.sort(oracle_pair)[::-1][:actual_k]
+
+            # IDCG: ideal ordering by normalized oracle
+            ideal_relevance = np.sort(relevance_normalized)[::-1][:actual_k]
             idcg = np.sum(ideal_relevance / discounts)
+
+            # NDCG is now guaranteed to be in [0, 1]
             ndcg = dcg / idcg if idcg > 1e-12 else 1.0
             ndcg_topk[k].append(float(ndcg))
 
         # Hit@K for STSelector strategies (always K=64 selected items)
-        sel_k1_local = get_selected_local(sel_k1_uids, sel_k1_lens, pid, s, n_cts)
-        hit_sel_k1.append(1.0 if top_oracle_local in sel_k1_local else 0.0)
+        sel_k1_local = np.array([], dtype=np.int64)
+        sel_k05_local = np.array([], dtype=np.int64)
 
-        sel_k05_local = get_selected_local(sel_k05_uids, sel_k05_lens, pid, s, n_cts)
-        hit_sel_k05.append(1.0 if top_oracle_local in sel_k05_local else 0.0)
+        if sel_k1_uids is not None:
+            sel_k1_local = get_selected_local(sel_k1_uids, sel_k1_lens, pid, s, n_cts)
+            hit_sel_k1.append(1.0 if top_oracle_local in sel_k1_local else 0.0)
+
+        if sel_k05_uids is not None:
+            sel_k05_local = get_selected_local(sel_k05_uids, sel_k05_lens, pid, s, n_cts)
+            hit_sel_k05.append(1.0 if top_oracle_local in sel_k05_local else 0.0)
 
         # Per-pair oracle thresholds and AUC + Recall
         for P in ORACLE_PERCENTILES:
@@ -395,13 +409,13 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
                 max_recall_topk[P][k].append(min(actual_k, n_func) / n_func)
 
             # Recall for STSelector(k1_ratio=1)
-            if len(sel_k1_local) > 0:
+            if sel_k1_uids is not None and len(sel_k1_local) > 0:
                 func_idx = set(np.where(functional)[0].tolist())
                 recall_k1 = len(set(sel_k1_local.tolist()) & func_idx) / n_func
                 recall_sel_k1[P].append(recall_k1)
 
             # Recall for STSelector(k1_ratio=0.5)
-            if len(sel_k05_local) > 0:
+            if sel_k05_uids is not None and len(sel_k05_local) > 0:
                 func_idx = set(np.where(functional)[0].tolist())
                 recall_k05 = len(set(sel_k05_local.tolist()) & func_idx) / n_func
                 recall_sel_k05[P].append(recall_k05)
@@ -478,21 +492,27 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
     results["recall_sel_k1"] = {}
     for P in ORACLE_PERCENTILES:
         vals = recall_sel_k1[P]
-        results["recall_sel_k1"][f"top{P}"] = {
-            "mean": float(np.mean(vals)),
-            "std": float(np.std(vals)),
-            "n_pairs": len(vals),
-        }
+        if vals:
+            results["recall_sel_k1"][f"top{P}"] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "n_pairs": len(vals),
+            }
+        else:
+            results["recall_sel_k1"][f"top{P}"] = None
 
     # Recall for STSelector(k1_ratio=0.5)
     results["recall_sel_k05"] = {}
     for P in ORACLE_PERCENTILES:
         vals = recall_sel_k05[P]
-        results["recall_sel_k05"][f"top{P}"] = {
-            "mean": float(np.mean(vals)),
-            "std": float(np.std(vals)),
-            "n_pairs": len(vals),
-        }
+        if vals:
+            results["recall_sel_k05"][f"top{P}"] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "n_pairs": len(vals),
+            }
+        else:
+            results["recall_sel_k05"][f"top{P}"] = None
 
     # Hit@K for TopK
     results["hit_topk"] = {}
@@ -502,8 +522,8 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
         }
 
     # Hit for STSelector
-    results["hit_sel_k1"] = {"mean": float(np.mean(hit_sel_k1))}
-    results["hit_sel_k05"] = {"mean": float(np.mean(hit_sel_k05))}
+    results["hit_sel_k1"] = {"mean": float(np.mean(hit_sel_k1))} if hit_sel_k1 else None
+    results["hit_sel_k05"] = {"mean": float(np.mean(hit_sel_k05))} if hit_sel_k05 else None
 
     # NDCG@K
     results["ndcg_topk"] = {}
@@ -556,8 +576,8 @@ def generate_outputs(results):
             tk_s = f"{tk['mean']:.4f}+/-{tk['std']:.4f}" if tk else "N/A"
             # STSelector recall is always at K=64, only show at K=64 row
             if k == 64:
-                sk1 = results["recall_sel_k1"].get(key, {})
-                sk05 = results["recall_sel_k05"].get(key, {})
+                sk1 = results["recall_sel_k1"].get(key)
+                sk05 = results["recall_sel_k05"].get(key)
                 sk1_s = f"{sk1['mean']:.4f}+/-{sk1['std']:.4f}" if sk1 else "N/A"
                 sk05_s = f"{sk05['mean']:.4f}+/-{sk05['std']:.4f}" if sk05 else "N/A"
             else:
@@ -570,10 +590,12 @@ def generate_outputs(results):
     print("-" * 60)
     tk_row = " | ".join(f"{results['hit_topk'][str(k)]['mean']:.4f}" for k in K_VALUES)
     print(f"{'TopK':>16} | {tk_row}")
-    sk1_h = results["hit_sel_k1"]["mean"]
-    sk05_h = results["hit_sel_k05"]["mean"]
-    print(f"{'STS(k1=1)@64':>16} | {'--':>6} | {'--':>6} | {'--':>6} | {sk1_h:.4f}")
-    print(f"{'STS(k1=0.5)@64':>16} | {'--':>6} | {'--':>6} | {'--':>6} | {sk05_h:.4f}")
+    if results["hit_sel_k1"]:
+        sk1_h = results["hit_sel_k1"]["mean"]
+        print(f"{'STS(k1=1)@64':>16} | {'--':>6} | {'--':>6} | {'--':>6} | {sk1_h:.4f}")
+    if results["hit_sel_k05"]:
+        sk05_h = results["hit_sel_k05"]["mean"]
+        print(f"{'STS(k1=0.5)@64':>16} | {'--':>6} | {'--':>6} | {'--':>6} | {sk05_h:.4f}")
 
     print(f"\nNDCG@K:")
     for k in K_VALUES:
@@ -602,11 +624,18 @@ def generate_outputs(results):
             tk = results["recall_topk"][key].get(str(k), {})
             tk_v = tk["mean"] if tk else 0
             if k == 64:
-                sk1 = results["recall_sel_k1"].get(key, {})
-                sk05 = results["recall_sel_k05"].get(key, {})
+                sk1 = results["recall_sel_k1"].get(key)
+                sk05 = results["recall_sel_k05"].get(key)
                 sk1_v = sk1["mean"] if sk1 else 0
                 sk05_v = sk05["mean"] if sk05 else 0
-                f.write(f"{k} & {tk_v:.3f} & {sk1_v:.3f} & {sk05_v:.3f} \\\\\n")
+                if sk1 and sk05:
+                    f.write(f"{k} & {tk_v:.3f} & {sk1_v:.3f} & {sk05_v:.3f} \\\\\n")
+                elif sk05:
+                    f.write(f"{k} & {tk_v:.3f} & --- & {sk05_v:.3f} \\\\\n")
+                elif sk1:
+                    f.write(f"{k} & {tk_v:.3f} & {sk1_v:.3f} & --- \\\\\n")
+                else:
+                    f.write(f"{k} & {tk_v:.3f} & --- & --- \\\\\n")
             else:
                 f.write(f"{k} & {tk_v:.3f} & --- & --- \\\\\n")
         f.write("\\bottomrule\n\\end{tabular}\n\n")
@@ -617,10 +646,12 @@ def generate_outputs(results):
         f.write("\\midrule\n")
         tk_row = " & ".join(f"{results['hit_topk'][str(k)]['mean']:.3f}" for k in K_VALUES)
         f.write(f"Top-$K$ & {tk_row} \\\\\n")
-        sk1_h = results["hit_sel_k1"]["mean"]
-        sk05_h = results["hit_sel_k05"]["mean"]
-        f.write(f"STS ($k_1{{=}}1$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk1_h:.3f}}} \\\\\n")
-        f.write(f"STS ($k_1{{=}}0.5$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk05_h:.3f}}} \\\\\n")
+        if results["hit_sel_k1"]:
+            sk1_h = results["hit_sel_k1"]["mean"]
+            f.write(f"STS ($k_1{{=}}1$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk1_h:.3f}}} \\\\\n")
+        if results["hit_sel_k05"]:
+            sk05_h = results["hit_sel_k05"]["mean"]
+            f.write(f"STS ($k_1{{=}}0.5$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk05_h:.3f}}} \\\\\n")
         f.write("\\bottomrule\n\\end{tabular}\n")
     print(f"Saved: {tex_path}")
 
@@ -658,12 +689,16 @@ def generate_outputs(results):
                      color=c_topk, alpha=0.3, linewidth=1, markersize=4)
 
             # STSelector markers at K=64
-            sk1_mean = results["recall_sel_k1"][key]["mean"]
-            sk05_mean = results["recall_sel_k05"][key]["mean"]
-            ax1.scatter([64 + offset], [sk1_mean], marker="D", s=80,
-                        color=c_k1, zorder=5, alpha=0.8)
-            ax1.scatter([64 + offset], [sk05_mean], marker="^", s=80,
-                        color=c_k05, zorder=5, alpha=0.8)
+            sk1 = results["recall_sel_k1"].get(key)
+            sk05 = results["recall_sel_k05"].get(key)
+            if sk1:
+                sk1_mean = sk1["mean"]
+                ax1.scatter([64 + offset], [sk1_mean], marker="D", s=80,
+                            color=c_k1, zorder=5, alpha=0.8, label=f"STS(k1=1) @64" if oracle_p == 10 else "")
+            if sk05:
+                sk05_mean = sk05["mean"]
+                ax1.scatter([64 + offset], [sk05_mean], marker="^", s=80,
+                            color=c_k05, zorder=5, alpha=0.8, label=f"STS(k1=0.5) @64" if oracle_p == 10 else "")
 
         ax1.set_xlabel("K (budget)")
         ax1.set_ylabel("Recall@K")
@@ -676,10 +711,12 @@ def generate_outputs(results):
         ax2 = axes[1]
         hit_tk = [results["hit_topk"][str(k)]["mean"] for k in ks]
         ax2.plot(ks, hit_tk, "o-", color="#4C72B0", label="TopK", linewidth=2, markersize=8)
-        ax2.axhline(y=results["hit_sel_k1"]["mean"], color="#DD8452", linestyle="--",
-                     label=f"STS($k_1$=1) @64: {results['hit_sel_k1']['mean']:.3f}")
-        ax2.axhline(y=results["hit_sel_k05"]["mean"], color="#55A868", linestyle="-.",
-                     label=f"STS($k_1$=0.5) @64: {results['hit_sel_k05']['mean']:.3f}")
+        if results["hit_sel_k1"]:
+            ax2.axhline(y=results["hit_sel_k1"]["mean"], color="#DD8452", linestyle="--",
+                         label=f"STS($k_1$=1) @64: {results['hit_sel_k1']['mean']:.3f}")
+        if results["hit_sel_k05"]:
+            ax2.axhline(y=results["hit_sel_k05"]["mean"], color="#55A868", linestyle="-.",
+                         label=f"STS($k_1$=0.5) @64: {results['hit_sel_k05']['mean']:.3f}")
         ax2.set_xlabel("K (budget)")
         ax2.set_ylabel("Hit Rate")
         ax2.set_title("Top-Oracle CTS Captured")
@@ -750,12 +787,25 @@ def main():
 
     # Load selection caches
     print("Loading selection cache (k1_ratio=1)...")
-    sel_k1_uids, sel_k1_lens = load_selection_cache(SEL_K1_DIR)
-    print(f"  k1_ratio=1: {sel_k1_lens.shape[0]} pairs")
+    sel_k1_uids, sel_k1_lens, sel_k1_meta = load_selection_cache(SEL_K1_DIR)
+    if sel_k1_uids is not None:
+        print(f"  k1_ratio=1: {sel_k1_lens.shape[0]} pairs, sel_version={sel_k1_meta.get('sel_version', 'unknown')}")
+        # Check if cache matches current dataset
+        if sel_k1_lens.shape[0] != num_pairs:
+            print(f"  ⚠ WARNING: k1_ratio=1 cache has {sel_k1_lens.shape[0]} pairs, but dataset has {num_pairs} pairs")
+            print(f"  ⚠ This cache is from a different dataset split. Skipping k1_ratio=1 comparison.")
+            sel_k1_uids = None
+            sel_k1_lens = None
 
     print("Loading selection cache (k1_ratio=0.5)...")
-    sel_k05_uids, sel_k05_lens = load_selection_cache(SEL_K05_DIR)
-    print(f"  k1_ratio=0.5: {sel_k05_lens.shape[0]} pairs")
+    sel_k05_uids, sel_k05_lens, sel_k05_meta = load_selection_cache(SEL_K05_DIR)
+    if sel_k05_uids is not None:
+        print(f"  k1_ratio=0.5: {sel_k05_lens.shape[0]} pairs, sel_version={sel_k05_meta.get('sel_version', 'unknown')}")
+        if sel_k05_lens.shape[0] != num_pairs:
+            print(f"  ⚠ WARNING: k1_ratio=0.5 cache has {sel_k05_lens.shape[0]} pairs, but dataset has {num_pairs} pairs")
+            print(f"  ⚠ This cache is from a different dataset split. Skipping k1_ratio=0.5 comparison.")
+            sel_k05_uids = None
+            sel_k05_lens = None
 
     # Phase 2: Compute metrics
     results = compute_all_metrics(
