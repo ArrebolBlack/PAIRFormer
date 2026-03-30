@@ -26,7 +26,9 @@ results/
 logs/
 *.log
 *.out
-experiments/
+experiments/**
+!experiments/EXP8/
+!experiments/EXP8/**
 
 # 数据文件（按自己需求调整）
 # ignore everything under data
