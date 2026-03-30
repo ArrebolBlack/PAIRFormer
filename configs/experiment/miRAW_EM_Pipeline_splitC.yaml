@@ -59,8 +59,8 @@ run:
   test_softmax_temp: 1.0
   train_instance_mode: "online"
   val_instance_mode: "online"
-  force_overwrite_bootstrap: true
-  refresh_instance_after_update: true
+  force_overwrite_bootstrap: false  # 改为 false，智能复用已有 cache
+  refresh_instance_after_update: false  # online 模式不需要刷新 cache
 
 em:
   controller:
@@ -84,6 +84,7 @@ em:
     normalize_emb: false
   bootstrap:
     enabled: true
+    skip_instance_cache: true  # 新增：跳过 instance cache 构建（全程 online 模式）
   selector_module:
     _target_: src.selectors.selector_module.SelectorModule
     cfg:
@@ -108,8 +109,8 @@ em:
     candidate_pool_topn_ratio: 1.0
     candidate_pool_seed: ${seed}
   policy:
-    warmup_epochs: 55
-    instance_mode: "hybrid"
+    warmup_epochs: 55  # 保持原策略：前55个epoch warmup aggregator
+    instance_mode: "hybrid"  # 保持原策略：hybrid模式
     instance_update_every_epochs: 0
     instance_update_steps: 0
     cheap_mode: "cached"

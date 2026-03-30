@@ -130,13 +130,15 @@ def _load_em_checkpoint_into_models(
     agg_model: torch.nn.Module,
     instance_model: torch.nn.Module,
     device: torch.device,
-) -> None:
+) -> Dict[str, Any]:
     """
-    目的：避免依赖 TrainerEM/token_provider，严格做到“bootstrap 后最后构建 Trainer”。
-    但又不能猜测 ckpt 结构 -> 这里实现一个“兼容常见格式”的 deterministic loader：
+    目的：避免依赖 TrainerEM/token_provider，严格做到"bootstrap 后最后构建 Trainer"。
+    但又不能猜测 ckpt 结构 -> 这里实现一个"兼容常见格式"的 deterministic loader：
       - 若 ckpt 含明确字段：agg_state_dict / instance_state_dict / agg_model / instance_model
       - 否则尝试从 ckpt["state_dict"] 或 ckpt 本体 (dict) 里按 key overlap 自动分配
     若都失败：直接 raise（让你回去看 TrainerEM.save_checkpoint 的真实格式）。
+
+    Returns the raw checkpoint dict so callers can extract ema_shadow etc.
     """
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
     if not isinstance(ckpt, dict):
@@ -224,6 +226,8 @@ def _load_em_checkpoint_into_models(
 
     agg_model.to(device)
     instance_model.to(device)
+
+    return ckpt
 
 
 @contextmanager
@@ -691,7 +695,7 @@ def main(cfg: DictConfig) -> None:
     # ----------------------------
     # 8) Load ckpt into (agg, inst) weights (NO trainer yet)
     # ----------------------------
-    _load_em_checkpoint_into_models(
+    raw_ckpt = _load_em_checkpoint_into_models(
         ckpt_path,
         agg_model=agg_model,
         instance_model=instance_model,
@@ -730,6 +734,19 @@ def main(cfg: DictConfig) -> None:
     )
 
     # ----------------------------
+    # 10b) Restore EMA shadow from checkpoint
+    # ----------------------------
+    ema_shadow_ckpt = raw_ckpt.get("ema_shadow", None)
+    if trainer.ema is not None and isinstance(ema_shadow_ckpt, dict):
+        for k, v in ema_shadow_ckpt.items():
+            trainer.ema.shadow[k] = v.to(device)
+        print(f"[eval_em] Restored EMA shadow ({len(ema_shadow_ckpt)} params) from checkpoint")
+    elif ema_shadow_ckpt is None:
+        print("[eval_em] No ema_shadow in checkpoint (EMA was disabled during training)")
+    else:
+        print("[eval_em] EMA disabled in eval config; skipping ema_shadow restoration")
+
+    # ----------------------------
     # 11) TEST routine (COPY train_em.py test section)
     # ----------------------------
     # optional val-best threshold from run.best_threshold (if user provides)
@@ -737,7 +754,7 @@ def main(cfg: DictConfig) -> None:
     best_threshold = float(best_threshold_cfg) if best_threshold_cfg is not None else None
 
     def _refresh_em_caches_for_split(split: str, epoch_for_build: int) -> None:
-        # 强制用“当前模型权重快照”重建 test caches，确保一致
+        # 强制用"当前模型权重快照"重建 test caches，确保一致
         cheap_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
         selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
         instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])

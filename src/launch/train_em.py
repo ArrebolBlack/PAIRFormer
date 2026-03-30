@@ -516,6 +516,9 @@ def main(cfg: DictConfig) -> None:
 
     bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
 
+    # NEW: 允许跳过 instance cache 构建（当全程使用 online 模式时）
+    bootstrap_skip_instance = bool(bootstrap_node.get("skip_instance_cache", False))
+
     if bootstrap_enabled:
         need_cheap = bootstrap_overwrite_all or any(
             not _is_stage_compatible(sp, "cheap") for sp in refresh_splits
@@ -530,9 +533,17 @@ def main(cfg: DictConfig) -> None:
         # dependency closure
         if need_cheap:
             need_sel = True
-            need_inst = True
+            # NEW: 只有在不跳过 instance 时才强制依赖
+            if not bootstrap_skip_instance:
+                need_inst = True
         if need_sel:
-            need_inst = True
+            # NEW: 只有在不跳过 instance 时才强制依赖
+            if not bootstrap_skip_instance:
+                need_inst = True
+
+        # NEW: 如果配置了跳过 instance，强制设为 False
+        if bootstrap_skip_instance:
+            need_inst = False
 
         if need_cheap or need_sel or need_inst:
             print(

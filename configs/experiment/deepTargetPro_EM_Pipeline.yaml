@@ -1,12 +1,13 @@
 # @package _global_
-# configs/experiment/miRAW_EM_Pipeline.yaml
-# New EM pipeline (Stage-1/Stage-2 with caches): train_em.py + TokenProvider + UpdatePolicy + TrainerEM
+# configs/experiment/deepTargetPro_EM_Pipeline.yaml
+# EXP2: deepTargetPro Route 1 — miRAW CTS encoders + Set Transformer on deepTargetPro pair data
+# Based on miRAW_EM_Pipeline.yaml
 
 # ===================== 实验元信息 =====================
-experiment_name: "miRAW_EM_Pipeline"
+experiment_name: "deepTargetPro_EM_Pipeline"
 experiment:
-  name: "miRAW_EM_Pipeline"
-  task: "em_pair_level_train"   # 仅作标识；train_em.py 不依赖这个字段也能跑
+  name: "deepTargetPro_EM_Pipeline"
+  task: "em_pair_level_train"
 
 seed: 2020
 device: "cuda"
@@ -19,21 +20,16 @@ paths:
 
 # ===================== 数据配置 data（沿用旧 DataConfig 语义） =====================
 data:
-  name: mirna_miraw
+  name: mirna_deepTargetPro
   path:
-    # train: "data/miRAW_Train_Validation.txt"
-    # val:   "data/miRAW_Train_Validation.txt"
-    # test:  "data/miRAW_Test_total.txt"
-
-    # train: "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    # val:   "data/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    # test: "data/miRAW_Test_0,6-9.txt"
-
-    train: "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    val:   "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test1-5_split-ratio-0.9_Train_Validation.txt"
-    test: "data/miRAW_filter_policy/train_val_test_filt_esa_lt_6/miRAW_Test_0,6-9.txt"
-
+    train: "data/deepTargetPro/deepTargetPro_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    val:   "data/deepTargetPro/deepTargetPro_Test1-5_split-ratio-0.9_Train_Validation.txt"
+    test:  "data/deepTargetPro/deepTargetPro_Test_total.txt"
   with_esa: true
+  split_column: 5
+  split_map:
+    train: "train"
+    val: "val"
 
 # ===================== 运行配置 run（train_em.py 会用到的字段） =====================
 run:
@@ -44,10 +40,10 @@ run:
   val_split: "val"
 
   # --- dataloader ---
-  batch_size: 64
-  num_workers: 16
+  batch_size: 32
+  num_workers: 8
   pin_memory: true
-  num_epochs: 100
+  num_epochs: 80
 
   # --- token budget ---
   kmax: 64
@@ -69,7 +65,7 @@ run:
   checkpoint: null
 
   # 训练完是否跑 test：train_em.py 
-  eval_test_after_train: true
+  eval_test_after_train: false
   test_splits: ["test"]
   eval_test_with_last: true
   eval_test_with_best: true
@@ -203,7 +199,7 @@ em:
   # Gate 6 最小可跑：全部固定 cached + refresh=0
   # 这里的policy是policy_train, policy_eval 默认都cached
   policy:
-    warmup_epochs: 55  # 保持原策略：前55个epoch warmup aggregator
+    warmup_epochs: 40  # 保持原策略：前40个epoch warmup aggregator
 
     # ---------- step-level (instance) ----------
     instance_mode: “hybrid”  # 保持原策略：hybrid模式
@@ -444,11 +440,11 @@ eval:
 logging:
   wandb:
     enabled: true
-    project: "miRAW_EM_Pipeline"
+    project: "rebuttal_EXP2_deepTargetPro"
     entity: null
     mode: "online"
-    group: "em_pipeline"
-    tags: ["EM", "PairAgg", "SetTransformer"]
+    group: "deepTargetPro_Route1"
+    tags: ["EXP2", "Route1", "deepTargetPro", "EM"]
   eval:
     use_wandb: false
     wandb_prefix: "eval"
