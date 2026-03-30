@@ -45,14 +45,38 @@ ORACLE_PERCENTILES = [10, 25, 50]  # top-P% by expensive encoder within each pai
 INSTANCE_CKPT = "checkpoints/miRAW_TargetNet_Optimized_dp-0.1/checkpoints/last.pt"
 EM_PIPELINE_CFG = "configs/experiment/miRAW_EM_Pipeline.yaml"
 
-PAIR_INDEX_PATH = "cache/pair_index_test_8abf6f8e.pt"
-CTS_META_PATH = "cache/cache_test_8abf6f8e_meta.json"
+PAIR_INDEX_PATH: None  # auto-detderive from meta.json
+CTS_META_PATH = None
+CHEAP_LOGITS_PATH = None
+CHEAP_META_PATH = None
+SEL_K1_DIR = None
+SEL_K05_DIR = None
 
-CHEAP_LOGITS_PATH = "cache/em_cache/test/cheap/cheap_logits.f16.mmap"
-CHEAP_META_PATH = "cache/em_cache/test/cheap/meta.json"
 
-SEL_K1_DIR = "cache/em_cache/test/selection"
-SEL_K05_DIR = "cache/k1_ratio_ablation/em_cache/test/selection"
+def _resolve_cache_paths():
+    """Resolve all cache paths from cheap meta.json."""
+    global PAIR_INDEX_PATH, CTS_META_PATH, CHEAP_LOGITS_PATH, CHEAP_META_PATH, SEL_K1_DIR, SEL_K05_DIR
+    meta_path = EM_CACHE_ROOT / "em_cache" / "test" / "cheap" / "meta.json"
+    with open(meta_path) as f:
+        meta = json.load(f)
+    path_hash = meta["path_hash"]  # e.g., "8abf6f8e..." (full hash, truncated in some contexts)
+    # The path_hash may be vary depending on config; use the full hash for pair_index and shortened for meta
+    full_hash = path_hash
+    short_hash = full_hash[:8]
+
+    PAIR_INDEX_PATH = EM_CACHE_ROOT / f"pair_index_test_{short_hash}.pt"
+    CTS_META_PATH = EM_CACHE_ROOT / f"cache_test_{short_hash}_meta.json"
+    CHEAP_LOGITS_PATH = EM_CACHE_ROOT / "em_cache" / "test" / "cheap" / "cheap_logits.f16.mmap"
+    CHEAP_META_PATH = EM_CACHE_ROOT / "em_cache" / "test" / "cheap" / "meta.json"
+    SEL_K1_DIR = EM_CACHE_ROOT / "em_cache" / "test" / "selection"
+    SEL_K05_DIR = EM_CACHE_ROOT / "k1_ratio_ablation" / "em_cache" /"test" / "selection"
+    print(f"  Resolved path_hash: {full_hash} (short: {short_hash})")
+    print(f"  PAIR_INDEX: {PAIR_INDEX_PATH}")
+    print(f"  CTS_META: {CTS_META_PATH}")
+    print(f"  CHEAP_LOGITS: {CHEAP_LOGITS_PATH}")
+    print(f"  CHEAP_META: {CHEAP_META_PATH}")
+    print(f"  SEL_K1: {SEL_K1_DIR}")
+    print(f"  SEL_K05: {SEL_K05_DIR}")
 
 
 # ─── Phase 1: Oracle inference ────────────────────────────────────────────────
@@ -702,6 +726,7 @@ def generate_outputs(results):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    _resolve_cache_paths()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 

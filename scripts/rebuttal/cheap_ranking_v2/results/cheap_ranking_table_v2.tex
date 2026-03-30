@@ -1,0 +1,35 @@
+% Panel A: Ranking quality overview
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Spearman $\rho$ & $0.192 \pm 0.182$ \\
+MRR & $0.235 \pm 0.342$ \\
+AUC (oracle top-10\%) & $0.652 \pm 0.117$ \\
+AUC (oracle top-25\%) & $0.609 \pm 0.098$ \\
+AUC (oracle top-50\%) & $0.587 \pm 0.090$ \\
+\bottomrule
+\end{tabular}
+
+% Panel B: Recall@K (oracle top-25\%, per-pair)
+\begin{tabular}{lccc}
+\toprule
+$K$ & Top-$K$ & STS ($k_1{=}1$) & STS ($k_1{=}0.5$) \\
+\midrule
+8 & 0.050 & --- & --- \\
+16 & 0.084 & --- & --- \\
+32 & 0.139 & --- & --- \\
+64 & 0.219 & 0.331 & 0.330 \\
+\bottomrule
+\end{tabular}
+
+% Panel C: Hit@K (fraction of pairs where top-oracle CTS is captured)
+\begin{tabular}{lcccc}
+\toprule
+Strategy & $K$=8 & $K$=16 & $K$=32 & $K$=64 \\
+\midrule
+Top-$K$ & 0.388 & 0.483 & 0.578 & 0.673 \\
+STS ($k_1{=}1$, $K$=64) & \multicolumn{4}{c}{0.761} \\
+STS ($k_1{=}0.5$, $K$=64) & \multicolumn{4}{c}{0.756} \\
+\bottomrule
+\end{tabular}
