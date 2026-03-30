@@ -89,7 +89,7 @@ def load_instance_model(device):
     return model
 
 
-def run_oracle_on_test(device, batch_size=8192):
+def run_oracle_on_test(device, batch_size=131072):
     """Run expensive encoder on all test CTS, cache results to mmap.
 
     Returns:
@@ -262,6 +262,7 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
     recall_topk = {p: {k: [] for k in K_VALUES} for p in ORACLE_PERCENTILES}
     recall_sel_k1 = {p: [] for p in ORACLE_PERCENTILES}   # always K=64
     recall_sel_k05 = {p: [] for p in ORACLE_PERCENTILES}   # always K=64
+    max_recall_topk = {p: {k: [] for k in K_VALUES} for p in ORACLE_PERCENTILES}
 
     hit_topk = {k: [] for k in K_VALUES}
     hit_sel_k1 = []
@@ -359,13 +360,15 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
                 except ValueError:
                     pass
 
-            # Recall@K for TopK
+            # Recall@K for TopK + theoretical max
             for k in K_VALUES:
                 actual_k = min(k, n_cts)
                 topk_set = set(cheap_order[:actual_k].tolist())
                 func_set = set(np.where(functional)[0].tolist())
                 recall = len(topk_set & func_set) / n_func
                 recall_topk[P][k].append(recall)
+                # Theoretical max recall = min(K, n_func) / n_func
+                max_recall_topk[P][k].append(min(actual_k, n_func) / n_func)
 
             # Recall for STSelector(k1_ratio=1)
             if len(sel_k1_local) > 0:
@@ -428,16 +431,23 @@ def compute_all_metrics(oracle_logits, labels, cheap_logits_mmap,
             "n_pairs": len(vals),
         }
 
-    # Recall@K for TopK
+    # Recall@K for TopK + theoretical max
     results["recall_topk"] = {}
+    results["max_recall_topk"] = {}
     for P in ORACLE_PERCENTILES:
         results["recall_topk"][f"top{P}"] = {}
+        results["max_recall_topk"][f"top{P}"] = {}
         for k in K_VALUES:
             vals = recall_topk[P][k]
+            max_vals = max_recall_topk[P][k]
             results["recall_topk"][f"top{P}"][str(k)] = {
                 "mean": float(np.mean(vals)),
                 "std": float(np.std(vals)),
                 "n_pairs": len(vals),
+            }
+            results["max_recall_topk"][f"top{P}"][str(k)] = {
+                "mean": float(np.mean(max_vals)),
+                "std": float(np.std(max_vals)),
             }
 
     # Recall for STSelector(k1_ratio=1)
@@ -515,16 +525,21 @@ def generate_outputs(results):
     for P in [10, 25]:
         key = f"top{P}"
         print(f"\n--- Oracle: top-{P}% expensive encoder logit (per-pair) ---")
-        print(f"{'K':>6} | {'TopK':>16} | {'STS(k1=1)':>16} | {'STS(k1=0.5)':>16}")
-        print("-" * 70)
+        print(f"{'K':>6} | {'TopK':>20} | {'STS(k1=1)@64':>20} | {'STS(k1=0.5)@64':>20}")
+        print("-" * 80)
         for k in K_VALUES:
             tk = results["recall_topk"][key].get(str(k), {})
-            sk1 = results["recall_sel_k1"].get(key, {})
-            sk05 = results["recall_sel_k05"].get(key, {})
             tk_s = f"{tk['mean']:.4f}+/-{tk['std']:.4f}" if tk else "N/A"
-            sk1_s = f"{sk1['mean']:.4f}+/-{sk1['std']:.4f}" if sk1 else "N/A"
-            sk05_s = f"{sk05['mean']:.4f}+/-{sk05['std']:.4f}" if sk05 else "N/A"
-            print(f"{k:>6} | {tk_s:>16} | {sk1_s:>16} | {sk05_s:>16}")
+            # STSelector recall is always at K=64, only show at K=64 row
+            if k == 64:
+                sk1 = results["recall_sel_k1"].get(key, {})
+                sk05 = results["recall_sel_k05"].get(key, {})
+                sk1_s = f"{sk1['mean']:.4f}+/-{sk1['std']:.4f}" if sk1 else "N/A"
+                sk05_s = f"{sk05['mean']:.4f}+/-{sk05['std']:.4f}" if sk05 else "N/A"
+            else:
+                sk1_s = "--"
+                sk05_s = "--"
+            print(f"{k:>6} | {tk_s:>20} | {sk1_s:>20} | {sk05_s:>20}")
 
     print(f"\nHit@K (top-oracle CTS captured?):")
     print(f"{'Strategy':>16} | {'K=8':>6} | {'K=16':>6} | {'K=32':>6} | {'K=64':>6}")
@@ -561,12 +576,15 @@ def generate_outputs(results):
         key = "top25"
         for k in K_VALUES:
             tk = results["recall_topk"][key].get(str(k), {})
-            sk1 = results["recall_sel_k1"].get(key, {})
-            sk05 = results["recall_sel_k05"].get(key, {})
             tk_v = tk["mean"] if tk else 0
-            sk1_v = sk1["mean"] if sk1 else 0
-            sk05_v = sk05["mean"] if sk05 else 0
-            f.write(f"{k} & {tk_v:.3f} & {sk1_v:.3f} & {sk05_v:.3f} \\\\\n")
+            if k == 64:
+                sk1 = results["recall_sel_k1"].get(key, {})
+                sk05 = results["recall_sel_k05"].get(key, {})
+                sk1_v = sk1["mean"] if sk1 else 0
+                sk05_v = sk05["mean"] if sk05 else 0
+                f.write(f"{k} & {tk_v:.3f} & {sk1_v:.3f} & {sk05_v:.3f} \\\\\n")
+            else:
+                f.write(f"{k} & {tk_v:.3f} & --- & --- \\\\\n")
         f.write("\\bottomrule\n\\end{tabular}\n\n")
 
         f.write("% Panel C: Hit@K (fraction of pairs where top-oracle CTS is captured)\n")
@@ -577,8 +595,8 @@ def generate_outputs(results):
         f.write(f"Top-$K$ & {tk_row} \\\\\n")
         sk1_h = results["hit_sel_k1"]["mean"]
         sk05_h = results["hit_sel_k05"]["mean"]
-        f.write(f"STS ($k_1{=}1$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk1_h:.3f}}} \\\\\n")
-        f.write(f"STS ($k_1{=}0.5$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk05_h:.3f}}} \\\\\n")
+        f.write(f"STS ($k_1{{=}}1$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk1_h:.3f}}} \\\\\n")
+        f.write(f"STS ($k_1{{=}}0.5$, $K$=64) & \\multicolumn{{4}}{{c}}{{{sk05_h:.3f}}} \\\\\n")
         f.write("\\bottomrule\n\\end{tabular}\n")
     print(f"Saved: {tex_path}")
 
@@ -590,35 +608,42 @@ def generate_outputs(results):
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-        # Plot 1: Recall@K comparison (oracle top-25%)
-        ax1 = axes[0]
         ks = K_VALUES
-        colors = {"TopK": "#4C72B0", "STS($k_1$=1)": "#DD8452",
-                  "STS($k_1$=0.5)": "#55A868"}
+        c_topk = "#4C72B0"
+        c_k1 = "#DD8452"
+        c_k05 = "#55A868"
 
+        # Plot 1: Recall@K with theoretical max
+        ax1 = axes[0]
         for oracle_p in [10, 25]:
             key = f"top{oracle_p}"
-            tk_means = [results["recall_topk"][key][str(k)]["mean"] for k in ks]
-            tk_stds = [results["recall_topk"][key][str(k)]["std"] for k in ks]
-
-            sk1_mean = results["recall_sel_k1"][key]["mean"]
-            sk05_mean = results["recall_sel_k05"][key]["mean"]
-
             offset = -0.15 if oracle_p == 10 else 0.15
             marker = "o" if oracle_p == 10 else "s"
+
+            tk_means = [results["recall_topk"][key][str(k)]["mean"] for k in ks]
+            tk_stds = [results["recall_topk"][key][str(k)]["std"] for k in ks]
+            max_means = [results["max_recall_topk"][key][str(k)]["mean"] for k in ks]
+
+            # TopK recall curve
             ax1.errorbar([k + offset for k in ks], tk_means, yerr=tk_stds,
                          label=f"TopK (top-{oracle_p}%)", marker=marker, capsize=3,
-                         color=colors["TopK"], alpha=0.8, linewidth=1.5)
+                         color=c_topk, alpha=0.8, linewidth=1.5)
 
-            # STSelector lines at K=64
+            # Theoretical max recall (dashed)
+            ax1.plot([k + offset for k in ks], max_means, "--", marker=marker,
+                     color=c_topk, alpha=0.3, linewidth=1, markersize=4)
+
+            # STSelector markers at K=64
+            sk1_mean = results["recall_sel_k1"][key]["mean"]
+            sk05_mean = results["recall_sel_k05"][key]["mean"]
             ax1.scatter([64 + offset], [sk1_mean], marker="D", s=80,
-                        color=colors["STS($k_1$=1)"], zorder=5, alpha=0.8)
+                        color=c_k1, zorder=5, alpha=0.8)
             ax1.scatter([64 + offset], [sk05_mean], marker="^", s=80,
-                        color=colors["STS($k_1$=0.5)"], zorder=5, alpha=0.8)
+                        color=c_k05, zorder=5, alpha=0.8)
 
         ax1.set_xlabel("K (budget)")
         ax1.set_ylabel("Recall@K")
-        ax1.set_title("Recall of Oracle-Functional CTS")
+        ax1.set_title("Recall of Oracle-Functional CTS\n(dashed = theoretical max)")
         ax1.legend(fontsize=8)
         ax1.set_ylim(0, 1.05)
         ax1.grid(axis="y", alpha=0.3)
