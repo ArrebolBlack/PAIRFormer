@@ -1,0 +1,16 @@
+\begin{table}[t]
+  \centering
+  \caption{Selector ablation at small budgets (seed=2020).}
+  \label{tab:selector_ablation_small_k}
+  \small
+  \begin{tabular}{llccc}
+    \toprule
+    \textbf{Dataset} & \textbf{K} & \textbf{S0 (TopK)} & \textbf{S1 (+PosDiv)} & \textbf{S2 (+EmbDiv)} \\
+    \midrule
+    miRAW & 8 & 0.9940 & \textbf{0.9942} & 0.9932 \\
+    miRAW & 16 & \textbf{0.9960} & 0.9956 & 0.9943 \\
+    deepTargetPro & 8 & \textbf{0.9952} & 0.9938 & 0.9949 \\
+    deepTargetPro & 16 & \textbf{0.9939} & 0.9920 & 0.9926 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
