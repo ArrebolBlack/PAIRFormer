@@ -1,0 +1,10 @@
+name: mirna_MTI
+path:
+  train: data/MTI/MTI_pair_random_split.txt
+  val: data/MTI/MTI_pair_random_split.txt
+  test: data/MTI/MTI_pair_random_split.txt
+with_esa: true
+split_column: 5
+split_map:
+  train: train
+  val: val

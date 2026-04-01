@@ -1,0 +1,10 @@
+name: mirna_MTI_CTS
+path:
+  train: data/MTI/MTI_CTS_train_val.txt
+  val: data/MTI/MTI_CTS_train_val.txt
+  test: data/MTI/MTI_CTS_train_val.txt
+with_esa: true
+split_column: 6
+split_map:
+  train: train
+  val: val

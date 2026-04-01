@@ -78,5 +78,10 @@ data/**
 
 # Exclude large files (>50MB) in new data dirs — transfer manually
 data/MTI/MTI_mRNALevel.csv
+data/MTI/MTI_pair_with_negatives.txt
+data/MTI/MTI_pair_miRAW_format.txt
+data/MTI/MTI_CTS_train_val.txt
+data/MTI/MTI_pair_random_split.txt
+data/MTI/MTI_pair_sampled_10pct.txt
 data/miRBench/Manakov2022/train.tsv
 data/miRBench/Manakov2022/train_cts.tsv

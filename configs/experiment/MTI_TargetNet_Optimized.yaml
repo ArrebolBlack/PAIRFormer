@@ -1,0 +1,154 @@
+# @package _global_
+
+# MTI_TargetNet_Optimized.yaml
+# 完整独立配置，用于 MTI 数据集训练
+
+experiment_name: "MTI_TargetNet_Optimized"
+experiment:
+  name: MTI_TargetNet_Optimized
+  task: window_level_train
+
+seed: 2020
+device: "cuda"
+
+# ============================================================
+# 1. 数据配置 data
+# ============================================================
+data:
+  name: miRNA_MTI
+
+  # Pair-level 数据路径（代码会自动扫描生成 CTS）
+  path:
+    train: "data/MTI/MTI_pair_random_split.txt"
+    val:   "data/MTI/MTI_pair_random_split.txt"
+    test:  "data/MTI/MTI_pair_random_split.txt"
+
+  with_esa: true
+  split_column: 6  # 第7列是 split 列（0-indexed）
+
+# ============================================================
+# 2. 模型配置 model
+# ============================================================
+model:
+  name: targetnet_optimized
+  arch: TargetNet_Optimized
+
+  # 使用 opt4_tiny 变体（与之前成功的配置一致）
+  num_channels:      [16, 16, 32, 32]
+  num_blocks:        [1, 1, 1, 1]
+  pool_size:         3
+  stem_kernel_size:  5
+  block_kernel_size: 3
+  skip_connection:   true
+  dropout:           0.5
+
+  multi_scale:       false
+  se_type:           "basic"
+  use_bn:            false
+  se_reduction:      8
+  target_output_length: 12
+
+  arch_variant:      "opt4_tiny"
+
+# ============================================================
+# 3. 训练配置 train
+# ============================================================
+train:
+  # 优化器 & 学习率
+  optimizer: adamw
+  lr: 0.005
+  weight_decay: 0.0
+  momentum: 0.9
+
+  # 学习率调度器
+  scheduler: cosine
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+  scheduler_t_max: 10
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+
+  # 损失函数配置
+  pos_weight: 1.0
+  label_smoothing: true
+  smooth_pos: 0.95
+  smooth_neg: 0.05
+  loss_type: bce_focal
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1
+  bce_lambda: 0.01
+
+  # ESA 加权
+  esa_weighting: true
+  esa_scale: 10.0
+  esa_lambda_pos: 1.0
+  esa_lambda_neg: 0.5
+
+  # 数值稳定
+  amp: true
+  grad_clip: 1.0
+
+  # EMA
+  ema:
+    enabled: true
+    decay: 0.999
+
+  # 监控指标
+  monitor: loss
+  greater_is_better: false
+
+# ============================================================
+# 4. 运行配置 run
+# ============================================================
+run:
+  num_epochs: 100
+  batch_size: 512
+  num_workers: 4
+
+  # Reduction 配置
+  reduction: softmax
+  train_reduction: ${run.reduction}
+  eval_reduction: ${run.reduction}
+  test_reduction: ${run.reduction}
+
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+
+# ============================================================
+# 5. 任务配置 task
+# ============================================================
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold:
+    fixed: 0.5
+    sweep:
+      enabled: true
+      start: 0.0
+      end: 1.0
+      step: 0.01
+
+# ============================================================
+# 6. 日志配置 logging
+# ============================================================
+logging:
+  wandb:
+    enabled: true
+    project: "TargetNet"
+    entity: null
+    mode: "online"
+    group: "MTI_TargetNet_Optimized"
+    tags:
+      - TargetNet_Optimized
+      - MTI
+      - pair_level
+
+  eval:
+    use_wandb: false
+    wandb_prefix: "eval"

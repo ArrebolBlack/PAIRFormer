@@ -35,7 +35,7 @@ PAPER_PLOTS_DIR = PROJECT_ROOT = Path(__file__).resolve().parents[3] / "paper" /
 def load_results(results_dir):
     """Load all result JSON files."""
     results = {}
-    for ds in ["miRAW", "deepTargetPro", "MTI"]:
+    for ds in ["miRAW", "deepTargetPro"]:
         path = os.path.join(results_dir, f"{ds}_n_distribution.json")
         if os.path.exists(path):
             with open(path) as f:
@@ -43,127 +43,238 @@ def load_results(results_dir):
     return results
 
 
-def plot_main_figure(results, output_dir):
+def plot_main_figure(results, output_dir, budget_k=64):
     """
-    Main figure: 3-panel figure showing n distribution for each dataset.
-
-    Top row: Histogram of n (log-scale y-axis) to show heavy-tail
-    Bottom: Combined CDF comparison
+    Publication-style Figure 2:
+    - top row: per-dataset histograms (auxiliary)
+    - bottom row: ECDF comparison (main panel)
     """
     dataset_names = list(results.keys())
-    n_datasets = len(dataset_names)
 
-    # Color scheme
     colors = {
-        "miRAW": "#2563EB",        # Blue
-        "deepTargetPro": "#DC2626", # Red
-        "MTI": "#059669",           # Green
+        "miRAW": "#2563EB",         # blue
+        "deepTargetPro": "#DC2626" # red
     }
     nice_names = {
         "miRAW": "miRAW",
         "deepTargetPro": "deepTargetPro",
-        "MTI": "MTI-mRNALevel",
     }
+    k_color = "#EF4444"
 
-    fig = plt.figure(figsize=(14, 10), dpi=150)
+    def style_axis(ax, logx=False, logy=False):
+        if logx:
+            ax.set_xscale("log")
+        if logy:
+            ax.set_yscale("log")
 
-    # ---- Top row: individual histograms ----
+        # publication style: keep only major grid
+        ax.grid(True, which="major", alpha=0.18, linewidth=0.7)
+        ax.grid(False, which="minor")
+
+        # cleaner spines
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.tick_params(axis="both", labelsize=9)
+
+    fig = plt.figure(figsize=(11, 7.8), dpi=200)
+    gs = fig.add_gridspec(
+        2, 2,
+        height_ratios=[1.0, 1.45],
+        hspace=0.30,
+        wspace=0.18
+    )
+
+    # -----------------------------
+    # Top row: Histograms
+    # -----------------------------
     for i, ds in enumerate(dataset_names):
-        ax = fig.add_subplot(2, n_datasets, i + 1)
+        ax = fig.add_subplot(gs[0, i])
+
         data = results[ds]
         n_vals = np.array(data["n_values"], dtype=np.float64)
         s = data["statistics"]
         color = colors.get(ds, "#333333")
 
-        # Histogram with log scale
-        bins = np.logspace(0, np.log10(max(n_vals.max(), 2)), 60)
-        ax.hist(n_vals, bins=bins, color=color, alpha=0.85, edgecolor="white",
-                linewidth=0.3)
+        # slightly fewer bins -> cleaner histogram
+        xmax = max(n_vals.max(), 2)
+        bins = np.logspace(0, np.ceil(np.log10(xmax)), 45)
 
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("Number of CTS (n)", fontsize=10)
+        ax.hist(
+            n_vals,
+            bins=bins,
+            color=color,
+            alpha=0.88,
+            edgecolor="none"
+        )
+
+        style_axis(ax, logx=True, logy=True)
+
+        ax.set_xlim(left=0.8)
+        ax.set_xlabel("CTS count per pair, n", fontsize=10)
         if i == 0:
-            ax.set_ylabel("Number of pairs", fontsize=10)
-        ax.set_title(nice_names.get(ds, ds), fontsize=12, fontweight="bold")
+            ax.set_ylabel("Pair count", fontsize=10)
 
-        # Annotate key stats
+        panel_title = f"({chr(ord('a') + i)}) {nice_names.get(ds, ds)}"
+        ax.set_title(panel_title, fontsize=11, fontweight="bold", pad=6)
+
+        # budget line
+        if n_vals.max() > budget_k:
+            ax.axvline(
+                x=budget_k,
+                color=k_color,
+                linestyle=(0, (4, 2)),
+                linewidth=1.5,
+                alpha=0.95
+            )
+            ax.text(
+                budget_k * 1.03,
+                ax.get_ylim()[1] / 2.2,
+                f"K={budget_k}",
+                color=k_color,
+                fontsize=8,
+                fontweight="bold",
+                ha="left",
+                va="center"
+            )
+
+        frac_gt_k = 100.0 * (n_vals > budget_k).sum() / len(n_vals)
+
         stats_text = (
             f"N = {s['num_pairs']:,}\n"
-            f"Median = {s['n_median']:.0f}\n"
+            f"median = {s['n_median']:.0f}\n"
             f"P95 = {s['n_p95']:.0f}\n"
-            f"Max = {s['n_max']:,}"
+            f">{budget_k} = {frac_gt_k:.1f}%"
         )
-        ax.text(0.97, 0.97, stats_text, transform=ax.transAxes,
-                fontsize=8, verticalalignment="top", horizontalalignment="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 
-        # Mark budget K=64
-        if n_vals.max() > 64:
-            ax.axvline(x=64, color="red", linestyle="--", linewidth=1.5, alpha=0.7)
-            ax.text(64, ax.get_ylim()[1] * 0.5, "K=64", color="red",
-                    fontsize=8, fontweight="bold", ha="left", va="center")
+        ax.text(
+            0.97, 0.97, stats_text,
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            ha="right",
+            bbox=dict(
+                boxstyle="round,pad=0.28",
+                facecolor="white",
+                edgecolor="#BBBBBB",
+                linewidth=0.6,
+                alpha=0.92
+            )
+        )
 
-        ax.grid(True, alpha=0.3, which="both")
-        ax.set_xlim(left=0.8)
+    # -----------------------------
+    # Bottom row: ECDF (main panel)
+    # -----------------------------
+    ax_cdf = fig.add_subplot(gs[1, :])
 
-    # ---- Bottom: combined CDF ----
-    ax_cdf = fig.add_subplot(2, 1, 2)
+    summary_lines = []
     for ds in dataset_names:
         data = results[ds]
         s = data["statistics"]
         n_vals = np.array(data["n_values"], dtype=np.float64)
         sorted_n = np.sort(n_vals)
-        cumprob = np.arange(1, len(sorted_n) + 1) / len(sorted_n)
+        ecdf = np.arange(1, len(sorted_n) + 1) / len(sorted_n)
         color = colors.get(ds, "#333333")
 
-        ax_cdf.plot(sorted_n, cumprob, color=color, linewidth=2,
-                    label=f"{nice_names.get(ds, ds)} (N={s['num_pairs']:,}, "
-                          f"median={s['n_median']:.0f})")
+        ax_cdf.plot(
+            sorted_n,
+            ecdf,
+            color=color,
+            linewidth=2.2,
+            label=nice_names.get(ds, ds)
+        )
 
-    # Mark K=64 budget line
-    ax_cdf.axvline(x=64, color="red", linestyle="--", linewidth=1.5, alpha=0.7,
-                   label="Budget K=64")
-    ax_cdf.axhline(y=0.5, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
-    ax_cdf.axhline(y=0.9, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
-    ax_cdf.axhline(y=0.95, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
+        frac_gt_k = 100.0 * (n_vals > budget_k).sum() / len(n_vals)
+        summary_lines.append(
+            f"{nice_names.get(ds, ds)}: median={s['n_median']:.0f}, >{budget_k}={frac_gt_k:.1f}%"
+        )
 
-    ax_cdf.set_xlabel("Number of CTS per pair (n)", fontsize=12)
-    ax_cdf.set_ylabel("Cumulative fraction of pairs", fontsize=12)
-    ax_cdf.set_title("Empirical CDF: CTS Count per Pair Across Datasets",
-                     fontsize=13, fontweight="bold")
-    ax_cdf.legend(fontsize=10, loc="lower right")
-    ax_cdf.set_xscale("log")
+    # budget line
+    ax_cdf.axvline(
+        x=budget_k,
+        color=k_color,
+        linestyle=(0, (4, 2)),
+        linewidth=1.6,
+        alpha=0.95,
+        label=f"Budget K={budget_k}"
+    )
+
+    # percentile reference lines
+    for y, label in [(0.5, "P50"), (0.95, "P95")]:
+        ax_cdf.axhline(
+            y=y,
+            color="#888888",
+            linestyle=":",
+            linewidth=0.9,
+            alpha=0.8
+        )
+        ax_cdf.text(
+            0.01, y + 0.01, label,
+            transform=ax_cdf.transAxes,
+            fontsize=8,
+            color="#666666",
+            va="bottom"
+        )
+
+    style_axis(ax_cdf, logx=True, logy=False)
     ax_cdf.set_xlim(left=0.8)
-    ax_cdf.set_ylim(bottom=0, top=1.02)
-    ax_cdf.grid(True, alpha=0.3, which="both")
+    ax_cdf.set_ylim(0, 1.02)
 
-    # Add percentile annotations
-    ax_cdf.text(0.02, 0.52, "P50", transform=ax_cdf.transAxes, fontsize=8,
-                color="gray", va="bottom")
-    ax_cdf.text(0.02, 0.92, "P95", transform=ax_cdf.transAxes, fontsize=8,
-                color="gray", va="bottom")
+    ax_cdf.set_title("(c) ECDF across datasets", fontsize=11, fontweight="bold", pad=6)
+    ax_cdf.set_xlabel("CTS count per pair, n", fontsize=11)
+    ax_cdf.set_ylabel("Fraction of pairs with count ≤ n", fontsize=11)
 
-    plt.tight_layout(h_pad=3.0)
+    ax_cdf.legend(
+        fontsize=9,
+        loc="lower right",
+        frameon=True,
+        framealpha=0.92,
+        edgecolor="#CCCCCC"
+    )
 
-    # Save
+    # summary box: directly state the take-home message
+    ax_cdf.text(
+        0.015, 0.98,
+        "\n".join(summary_lines),
+        transform=ax_cdf.transAxes,
+        fontsize=9,
+        va="top",
+        ha="left",
+        bbox=dict(
+            boxstyle="round,pad=0.32",
+            facecolor="white",
+            edgecolor="#BBBBBB",
+            linewidth=0.7,
+            alpha=0.94
+        )
+    )
+
+    # optional emphasis text near budget line
+    ax_cdf.text(
+        budget_k * 1.06, 0.08,
+        f"K={budget_k}",
+        color=k_color,
+        fontsize=9,
+        fontweight="bold",
+        ha="left",
+        va="bottom"
+    )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for fmt in ["pdf", "png"]:
         out_path = output_dir / f"n_distribution.{fmt}"
-        fig.savefig(out_path, bbox_inches="tight", dpi=150)
+        fig.savefig(out_path, bbox_inches="tight")
         print(f"Saved: {out_path}")
 
-    # Also save to paper artifacts
     PAPER_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     for fmt in ["pdf", "png"]:
         out_path = PAPER_PLOTS_DIR / f"n_distribution.{fmt}"
-        fig.savefig(out_path, bbox_inches="tight", dpi=150)
+        fig.savefig(out_path, bbox_inches="tight")
         print(f"Saved: {out_path}")
 
     plt.close(fig)
-
 
 def plot_summary_table(results, output_dir):
     """Create a LaTeX-ready summary table."""
@@ -174,7 +285,6 @@ def plot_summary_table(results, output_dir):
     nice_names = {
         "miRAW": "miRAW",
         "deepTargetPro": "deepTargetPro",
-        "MTI": "MTI-mRNALevel",
     }
 
     with open(tex_path, "w") as f:

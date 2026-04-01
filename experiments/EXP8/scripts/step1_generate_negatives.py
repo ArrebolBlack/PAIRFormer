@@ -15,7 +15,8 @@ import argparse
 def load_mti_data(mti_path):
     """Load MTI_mRNALevel.csv"""
     print(f"Loading MTI data from {mti_path}...")
-    df = pd.read_csv(mti_path, sep='\t' if mti_path.endswith('.txt') else ',')
+    # MTI files are tab-separated
+    df = pd.read_csv(mti_path, sep='\t')
 
     # Check columns
     print(f"Columns: {df.columns.tolist()}")
