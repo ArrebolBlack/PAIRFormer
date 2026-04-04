@@ -1,0 +1,29 @@
+# @package _global_
+
+defaults:
+  - MTI_EM_Scalable_selected_raw
+  - _self_
+
+experiment_name: MTI_EM_Scalable_selected_raw_parallel
+experiment:
+  name: MTI_EM_Scalable_selected_raw_parallel
+  task: scalable_pair_cache_build_parallel
+
+run:
+  mode: build_selected_pair_cache_parallel
+  split: train
+  kmax: 64
+
+scalable:
+  cache_root: ${paths.cache_root}
+  num_pairs_hint: 480000
+  cheap_batch_size: 8192
+  esa_min_score: 6.0
+  num_workers: 8
+  task_pairs: 16
+  mp_start_method: spawn
+  selector:
+    name: stselector
+    k1_ratio: 0.5
+    mode: eval
+    epoch: 0

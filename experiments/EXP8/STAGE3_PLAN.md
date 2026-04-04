@@ -111,96 +111,254 @@
 
 ---
 
-## Stage 3 执行策略（最终修正版）
+## Stage 3 执行策略（并行版最终修正版）
 
 ### 前提条件
 1. Stage 1 & 2 的 checkpoint 已就绪
-2. Pair-level 数据文件已生成：`data/MTI/pair_random_split.txt`, `data/MTI/pair_mirna_split.txt`
-3. Dataset blocks 已缓存：pair_random (`99f1584d`, 6866 blocks), pair_mirna (`949dbd3f`, 7156 blocks)
-4. 新平台需有足够的 tmpfs 或本地 SSD（em_cache ~45GB per split × 3 splits × 2 pipelines ≈ 270GB）
+2. 使用新的 scalable pipeline，不再依赖 `cheap cache / selection cache / instance cache`
+3. Pair-level 数据文件：`data/MTI/MTI_pair_random_split.txt`
+4. MTI split pair 数量：
+   - `train = 333050`
+   - `val = 71368`
+   - `test = 71368`
+   - `total = 475786`
+5. 使用两套独立 cache root，避免 `STSelector` 和 `TopK` 互相覆盖：
+   - `cache_mti_full_st05`
+   - `cache_mti_full_topk`
+6. 并行版 `build_selected_pair_cache_parallel` 必须显式提供 `scalable.num_pairs_hint`，避免额外全文件串行扫描
 
-### Phase 1: Pipeline A Cheap Cache（串行，GPU 0）
+### 环境变量
 ```bash
-# 清理残留 lock
-find cache/em_cache -name "*.lock" -delete 2>/dev/null
-
-# 构建到 tmpfs 避免 GPFS mmap 锁问题（如果新平台无 GPFS 可忽略 em_cache_root）
-CUDA_VISIBLE_DEVICES=0 python3 -u -m src.launch.build_cheap_cache \
-    experiment=MTI_A_CheapCTSNet seed=2020 \
-    data.name=miRNA_MTI_pair_random \
-    data.path.train=data/MTI/pair_random_split.txt \
-    data.path.val=data/MTI/pair_random_split.txt \
-    data.path.test=data/MTI/pair_random_split.txt \
-    +data.split_map.test=test \
-    run.batch_size=10240 run.num_workers=28 \
-    +cheap_ckpt_path=checkpoints/MTI_A_CheapCTSNet/checkpoints/best.pt \
-    +cheap_cache_splits='[train,val,test]' \
-    +cheap_cache_overwrite=true \
-    +em_cache_root=/dev/shm/em_cache_A
-```
-**预估时间**: 340M CTS / batch 10240 ≈ 33K steps，每步 ~0.1s ≈ 1h per split, 3 splits ≈ 3h
-
-### Phase 2: Pipeline A Selection Cache + Training（GPU 0）
-同时构建 Pipeline B Cheap Cache（CPU 14 workers）：
-```bash
-# --- GPU 0: Pipeline A selection cache + training ---
-CUDA_VISIBLE_DEVICES=0 python3 -u -m src.launch.build_selection_cache \
-    experiment=MTI_A_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_random \
-    +em_cache_root=/dev/shm/em_cache_A
-
-CUDA_VISIBLE_DEVICES=0 python3 -u -m src.launch.train_em \
-    experiment=MTI_A_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_random \
-    +em_cache_root=/dev/shm/em_cache_A \
-    run.num_epochs=150 run.batch_size=4096 run.kmax=64
-
-# --- CPU: Pipeline B cheap cache (在另一个终端/后台) ---
-python3 -u -m src.launch.build_cheap_cache \
-    experiment=MTI_B_CheapCTSNet seed=2020 \
-    data.name=miRNA_MTI_pair_mirna \
-    data.path.train=data/MTI/pair_mirna_split.txt \
-    data.path.val=data/MTI/pair_mirna_split.txt \
-    data.path.test=data/MTI/pair_mirna_split.txt \
-    +data.split_map.test=test \
-    run.batch_size=10240 run.num_workers=14 \
-    +cheap_ckpt_path=checkpoints/MTI_B_CheapCTSNet/checkpoints/best.pt \
-    +cheap_cache_splits='[train,val,test]' \
-    +cheap_cache_overwrite=true \
-    +em_cache_root=/dev/shm/em_cache_B
+export REPO=/vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final
+export CACHE_ROOT_ST=/vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_st05
+export CACHE_ROOT_TOPK=/vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk
+cd $REPO
 ```
 
-### Phase 3: Pipeline B Selection Cache + Training（GPU 1）
+### Phase 1: STSelector selected_raw cache（并行版）
 ```bash
-CUDA_VISIBLE_DEVICES=1 python3 -u -m src.launch.build_selection_cache \
-    experiment=MTI_B_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_mirna \
-    +em_cache_root=/dev/shm/em_cache_B
+# GPU0: train
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_ST05_raw_train \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=train \
+    run.kmax=64 \
+    scalable.selector.name=stselector \
+    scalable.selector.k1_ratio=0.5 \
+    scalable.selector.mode=eval \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=333050 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
 
-CUDA_VISIBLE_DEVICES=1 python3 -u -m src.launch.train_em \
-    experiment=MTI_B_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_mirna \
-    +em_cache_root=/dev/shm/em_cache_B \
-    run.num_epochs=150 run.batch_size=4096 run.kmax=64
+# GPU1: val
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_ST05_raw_val \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=val \
+    run.kmax=64 \
+    scalable.selector.name=stselector \
+    scalable.selector.k1_ratio=0.5 \
+    scalable.selector.mode=eval \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=71368 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
+
+# GPU1: test
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_ST05_raw_test \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=test \
+    run.kmax=64 \
+    scalable.selector.name=stselector \
+    scalable.selector.k1_ratio=0.5 \
+    scalable.selector.mode=eval \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=71368 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
 ```
 
-### Phase 4: 评估
+### Phase 2: STSelector selected_inst cache + training
 ```bash
-# Pipeline A
-CUDA_VISIBLE_DEVICES=0 python3 -u -m src.launch.eval_em \
-    experiment=MTI_A_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_random \
-    +em_cache_root=/dev/shm/em_cache_A \
-    run.checkpoint=<path_to_best.pt> \
-    run.test_splits='["test"]'
+# GPU0: train selected_inst
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_ST05_inst_train \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=train \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
 
-# Pipeline B
-CUDA_VISIBLE_DEVICES=1 python3 -u -m src.launch.eval_em \
-    experiment=MTI_B_EM_Pipeline seed=2020 \
-    data=miRNA_MTI_pair_mirna \
-    +em_cache_root=/dev/shm/em_cache_B \
-    run.checkpoint=<path_to_best.pt> \
-    run.test_splits='["test"]'
+# GPU1: val selected_inst
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_ST05_inst_val \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=val \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
+
+# GPU1: test selected_inst
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_ST05_inst_test \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.split=test \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
+
+# GPU0: selected_inst 主训练
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.train_pair_selected_inst \
+    experiment=MTI_train_selected_inst \
+    experiment_name=MTI_ST05_train_selected_inst \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.num_epochs=40 \
+    run.eval_test_after_train=true \
+    run.eval_test_with_last=true \
+    run.eval_test_with_best=true \
+    run.eval_fixed_threshold=true \
+    run.eval_with_val_best_threshold=false \
+    run.eval_with_threshold_sweep=false \
+    run.test_splits=[test]
+
+# GPU1: selected_raw 对照训练
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.train_pair_selected_raw \
+    experiment=MTI_train_selected_raw \
+    experiment_name=MTI_ST05_train_selected_raw \
+    scalable.cache_root=$CACHE_ROOT_ST \
+    run.batch_size=1024 \
+    run.num_workers=14 \
+    run.num_epochs=20 \
+    run.eval_test_after_train=true \
+    run.eval_test_with_last=true \
+    run.eval_test_with_best=true \
+    run.eval_fixed_threshold=true \
+    run.eval_with_val_best_threshold=false \
+    run.eval_with_threshold_sweep=false \
+    run.test_splits=[test]
+```
+
+### Phase 3: TopK selected_raw cache（并行版）
+```bash
+# GPU0: train
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_TOPK_raw_train \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=train \
+    run.kmax=64 \
+    scalable.selector.name=topk \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=333050 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
+
+# GPU1: val
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_TOPK_raw_val \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=val \
+    run.kmax=64 \
+    scalable.selector.name=topk \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=71368 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
+
+# GPU1: test
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_pair_cache_parallel \
+    experiment=MTI_EM_Scalable_selected_raw_parallel \
+    experiment_name=MTI_TOPK_raw_test \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=test \
+    run.kmax=64 \
+    scalable.selector.name=topk \
+    scalable.cheap_batch_size=16384 \
+    scalable.esa_min_score=6.0 \
+    scalable.num_pairs_hint=71368 \
+    scalable.num_workers=14 \
+    scalable.task_pairs=16
+```
+
+### Phase 4: TopK selected_inst cache + training
+```bash
+# GPU0: train selected_inst
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_TOPK_inst_train \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=train \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
+
+# GPU1: val selected_inst
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_TOPK_inst_val \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=val \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
+
+# GPU1: test selected_inst
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.build_selected_inst_cache \
+    experiment=MTI_build_selected_inst \
+    experiment_name=MTI_TOPK_inst_test \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.split=test \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.has_inst_logit=true
+
+# GPU0: selected_inst 主训练
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.train_pair_selected_inst \
+    experiment=MTI_train_selected_inst \
+    experiment_name=MTI_TOPK_train_selected_inst \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.batch_size=4096 \
+    run.num_workers=14 \
+    run.num_epochs=40 \
+    run.eval_test_after_train=true \
+    run.eval_test_with_last=true \
+    run.eval_test_with_best=true \
+    run.eval_fixed_threshold=true \
+    run.eval_with_val_best_threshold=false \
+    run.eval_with_threshold_sweep=false \
+    run.test_splits=[test]
+
+# GPU1: selected_raw 对照训练
+CUDA_VISIBLE_DEVICES=1 python -m src.launch.train_pair_selected_raw \
+    experiment=MTI_train_selected_raw \
+    experiment_name=MTI_TOPK_train_selected_raw \
+    scalable.cache_root=$CACHE_ROOT_TOPK \
+    run.batch_size=1024 \
+    run.num_workers=14 \
+    run.num_epochs=20 \
+    run.eval_test_after_train=true \
+    run.eval_test_with_last=true \
+    run.eval_test_with_best=true \
+    run.eval_fixed_threshold=true \
+    run.eval_with_val_best_threshold=false \
+    run.eval_with_threshold_sweep=false \
+    run.test_splits=[test]
 ```
 
 ---

@@ -15,6 +15,16 @@ cd $REPO
 - TopK 相关任务只能写 `$CACHE_ROOT_TOPK`
 - experiment_name 必须唯一，不可覆盖已有 checkpoint
 
+## MTI Split Pair Counts
+
+- `train`: `333050`
+- `val`: `71368`
+- `test`: `71368`
+
+说明：
+- 并行版 `build_selected_pair_cache_parallel` 必须显式提供 `scalable.num_pairs_hint`
+- 该值必须与 split 的真实 pair 数一致，不能随便写总数
+
 ## 执行步骤
 
 ### A1. STSelector train selected_raw cache
@@ -24,12 +34,15 @@ cd $REPO
 - **命令**:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache \
-  experiment=MTI_EM_Scalable_selected_raw \
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache_parallel \
+  experiment=MTI_EM_Scalable_selected_raw_parallel \
   experiment_name=MTI_ST05_raw_train \
   scalable.cache_root=$CACHE_ROOT_ST \
   run.split=train \
   run.kmax=64 \
+  scalable.num_pairs_hint=333050 \
+  scalable.num_workers=14 \
+  scalable.task_pairs=16 \
   scalable.selector.name=stselector \
   scalable.selector.k1_ratio=0.5 \
   scalable.selector.mode=eval \
@@ -99,12 +112,15 @@ CUDA_VISIBLE_DEVICES=0 python -m src.launch.train_pair_selected_inst \
 - **命令**:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache \
-  experiment=MTI_EM_Scalable_selected_raw \
+CUDA_VISIBLE_DEVICES=0 python -m src.launch.build_selected_pair_cache_parallel \
+  experiment=MTI_EM_Scalable_selected_raw_parallel \
   experiment_name=MTI_TOPK_raw_train \
   scalable.cache_root=$CACHE_ROOT_TOPK \
   run.split=train \
   run.kmax=64 \
+  scalable.num_pairs_hint=333050 \
+  scalable.num_workers=14 \
+  scalable.task_pairs=16 \
   scalable.selector.name=topk \
   scalable.cheap_batch_size=16384 \
   scalable.esa_min_score=6.0
