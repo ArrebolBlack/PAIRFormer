@@ -1,0 +1,128 @@
+# @package _global_
+
+experiment_name: MTI_train_selected_raw
+experiment:
+  name: MTI_train_selected_raw
+  task: pair_train_selected_raw
+
+seed: 2020
+device: cuda
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+data:
+  name: mirna_MTI
+  path:
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
+  with_esa: true
+  split_column: 6
+  split_map:
+    train: train
+    val: val
+    test: test
+
+run:
+  mode: train_pair_selected_raw
+  split: train
+  val_split: val
+  batch_size: 16
+  num_workers: 4
+  num_epochs: 40
+  kmax: 64
+  ckpt_subdir: checkpoints
+  resume: false
+  eval_test_after_train: false
+  eval_test_with_last: true
+  eval_test_with_best: false
+  eval_fixed_threshold: true
+  eval_with_val_best_threshold: false
+  eval_with_threshold_sweep: false
+  sweep_num_thresholds: 101
+  test_splits: [test]
+
+scalable:
+  cache_root: ${paths.cache_root}
+
+token_provider:
+  assemble:
+    use_inst_emb: true
+    use_inst_logit: true
+    use_esa: true
+    use_pos: true
+
+instance_ckpt_path: checkpoints/MTI_A_TargetNet_Optimized/checkpoints/best.pt
+
+instance_model:
+  name: targetnet_optimized
+  arch: TargetNet_Optimized
+  num_channels: [16, 16, 32, 32]
+  num_blocks: [1, 1, 1, 1]
+  pool_size: 3
+  stem_kernel_size: 5
+  block_kernel_size: 3
+  skip_connection: true
+  dropout: 0.5
+  multi_scale: false
+  se_type: basic
+  use_bn: false
+  se_reduction: 8
+  target_output_length: 12
+  arch_variant: opt4_tiny
+
+model:
+  arch: PairSetTransformerAggregator
+  name: pair_set_transformer_v0
+  in_dim: 387
+  d_model: 256
+  n_heads: 8
+  dim_ff: 512
+  dropout: 0.1
+  ff_activation: gelu
+  n_layers: 3
+  block_type: sab
+  num_inducing_points: 16
+  num_seeds: 1
+  use_output_sab: false
+
+trainer_pair_selected:
+  num_epochs: ${run.num_epochs}
+  log_every: 50
+  grad_accum_steps: 1
+  clip_grad_norm: 0.0
+  use_amp: false
+  loss_type: focal
+  focal_alpha: 0.4
+  focal_gamma: 1.0
+  focal_lambda: 1.0
+  label_smoothing: true
+  smooth_neg: 0.05
+  smooth_pos: 0.95
+  bce_lambda: 0.01
+  pos_weight: 1.0
+  optimizer: adamw
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  amsgrad: false
+  lr_agg: 3e-4
+  wd_agg: 1e-2
+  lr_inst: 3e-4
+  wd_inst: 0.0
+  scheduler_agg: cosine
+  scheduler_inst: cosine
+  scheduler_t_max: ${run.num_epochs}
+  scheduler_step_size: 10
+  scheduler_gamma: 0.1
+  scheduler_factor: 0.2
+  scheduler_patience: 5
+  monitor: loss
+  greater_is_better: false
+
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5

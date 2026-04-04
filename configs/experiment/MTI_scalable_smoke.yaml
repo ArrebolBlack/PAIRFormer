@@ -1,0 +1,27 @@
+# @package _global_
+
+defaults:
+  - MTI_EM_Scalable_selected_raw
+  - _self_
+
+experiment_name: MTI_scalable_smoke
+experiment:
+  name: MTI_scalable_smoke
+  task: scalable_smoke_test
+
+run:
+  mode: build_selected_pair_cache
+  split: train
+  kmax: 64
+
+scalable:
+  cache_root: ${paths.cache_root}
+  num_pairs_hint: 64
+  max_pairs: 64
+  cheap_batch_size: 1024
+  esa_min_score: 6.0
+  selector:
+    name: stselector
+    k1_ratio: 0.5
+    mode: eval
+    epoch: 0

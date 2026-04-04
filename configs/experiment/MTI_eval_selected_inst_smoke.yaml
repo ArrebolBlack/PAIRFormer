@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - MTI_eval_selected_inst
+  - _self_
+
+experiment_name: MTI_eval_selected_inst_smoke
+experiment:
+  name: MTI_eval_selected_inst_smoke
+  task: pair_eval_selected_inst_smoke
+
+run:
+  mode: eval_pair_selected
+  eval_split: train
+  cache_type: selected_inst
+  batch_size: 4
+  num_workers: 0
+  checkpoint_experiment_name: MTI_train_selected_inst_smoke
+  eval_output: eval_pair_selected_train_selected_inst_smoke.json
+
+scalable:
+  cache_root: ${paths.cache_root}
+  max_eval_pairs: 16

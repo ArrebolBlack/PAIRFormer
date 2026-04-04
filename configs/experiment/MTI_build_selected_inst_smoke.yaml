@@ -1,0 +1,21 @@
+# @package _global_
+
+defaults:
+  - MTI_build_selected_inst
+  - _self_
+
+experiment_name: MTI_build_selected_inst_smoke
+experiment:
+  name: MTI_build_selected_inst_smoke
+  task: scalable_selected_inst_build_smoke
+
+run:
+  mode: build_selected_inst_cache
+  split: train
+  batch_size: 4
+  num_workers: 0
+  has_inst_logit: true
+
+scalable:
+  cache_root: ${paths.cache_root}
+  max_pairs: 32

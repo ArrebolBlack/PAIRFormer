@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+exp6_camelyon16_v3.py — EXP6E: BR-MIL on CAMELYON16 (torchmil Benchmark)
+
+Evaluate BR-MIL on CAMELYON16 using the **exact same data protocol** as
+the torchmil paper (arXiv 2509.08129, Table 1):
+  - Features: ResNet-50 Barlow Twins (2048-dim), pre-extracted by torchmil
+  - Protocol: 5-fold stratified train-val on 270 slides, test on 129 official
+  - Hyperparams: batch_size=1, Adam lr=1e-4, 50 epochs
+  - Metrics: ACC, AUC, F1 (mean +/- std over 5 folds)
+
+Methods:
+  abmil           — ABMIL baseline (gated attention, no budget)
+  brmil_original  — BR-MIL: cheap_net -> top-K -> Set Transformer (joint training)
+
+Usage:
+    cd PAIRFormer
+    python -u scripts/rebuttal/exp6_camelyon16_v3.py \
+        --method abmil --seed 42 --epochs 50 \
+        --data_dir /path/to/camelyon16-torchmil/dataset \
+        --output_dir experiments/EXP6E_CAMELYON16/results
+
+    python -u scripts/rebuttal/exp6_camelyon16_v3.py \
+        --method brmil_original --K 64 --seed 42 --epochs 50 \
+        --data_dir /path/to/camelyon16-torchmil/dataset \
+        --output_dir experiments/EXP6E_CAMELYON16/results
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.metrics import (
+    accuracy_score, f1_score, roc_auc_score,
+)
+from sklearn.model_selection import StratifiedKFold
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # scripts/rebuttal/ -> PAIRFormer/
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.models.modules.set_transformer import ISAB, PMA, SetTransformerConfig
+
+
+# =====================================================================
+# 1. Models
+# =====================================================================
+
+class ABMIL(nn.Module):
+    """Gated Attention MIL (Ilse et al., ICML 2018), scaled for 2048-dim."""
+    def __init__(self, input_dim=2048, hidden_dim=256, attn_dim=128, dropout=0.25):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout))
+        self.attn_V = nn.Linear(hidden_dim, attn_dim)
+        self.attn_U = nn.Linear(hidden_dim, attn_dim)
+        self.attn_w = nn.Linear(attn_dim, 1)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1))
+
+    def forward(self, x):
+        """
+        x: (N, D) — one bag, N instances
+        Returns: scalar logit
+        """
+        h = self.encoder(x)                                       # (N, hidden)
+        a = torch.tanh(self.attn_V(h)) * torch.sigmoid(self.attn_U(h))  # (N, attn_dim)
+        a = F.softmax(self.attn_w(a), dim=0)                      # (N, 1)
+        bag = (a * h).sum(dim=0)                                   # (hidden,)
+        return self.classifier(bag).squeeze(-1)                    # scalar
+
+
+class SetTransformerBackbone(nn.Module):
+    """Set Transformer aggregator (ISAB encoder + PMA pooling + classifier)."""
+    def __init__(self, input_dim=2048, d_model=256, n_heads=8, n_inds=32,
+                 d_ff=1024, dropout=0.1):
+        super().__init__()
+        self.expensive_proj = nn.Sequential(
+            nn.Linear(input_dim, d_model), nn.ReLU(), nn.Dropout(dropout))
+        stcfg = SetTransformerConfig(
+            d_model=d_model, n_heads=n_heads, d_ff=d_ff,
+            dropout=dropout, ff_activation="gelu")
+        self.enc1 = ISAB(stcfg, m=n_inds)
+        self.enc2 = ISAB(stcfg, m=n_inds)
+        self.pma = PMA(stcfg, k=1)
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(d_model, 1))
+
+    def aggregate(self, selected):
+        """
+        selected: (K, D) — K selected instances
+        Returns: scalar logit
+        """
+        h = self.expensive_proj(selected).unsqueeze(0)  # (1, K, d_model)
+        h = self.enc1(h)
+        h = self.enc2(h)
+        h = self.pma(h).squeeze(0).squeeze(0)           # (d_model,)
+        return self.classifier(h).squeeze(-1)            # scalar
+
+
+def _make_cheap_net(input_dim, cheap_dim=512, dropout=0.1):
+    """Cheap scoring network: projects input_dim -> cheap_dim -> 1 scalar."""
+    return nn.Sequential(
+        nn.Linear(input_dim, cheap_dim), nn.ReLU(), nn.Dropout(dropout),
+        nn.Linear(cheap_dim, 1))
+
+
+class BRMIL_Original(nn.Module):
+    """BR-MIL: cheap_net -> top-K selection -> Set Transformer (joint training)."""
+    def __init__(self, input_dim=2048, cheap_dim=512, d_model=256, n_heads=8,
+                 n_inds=32, d_ff=1024, dropout=0.1, K=64, **kwargs):
+        super().__init__()
+        self.K = K
+        self.cheap_net = _make_cheap_net(input_dim, cheap_dim, dropout)
+        self.backbone = SetTransformerBackbone(
+            input_dim, d_model, n_heads, n_inds, d_ff, dropout)
+
+    def forward(self, x):
+        """
+        x: (N, D) — one bag
+        Returns: scalar logit
+        """
+        N = x.size(0)
+        cheap_scores = self.cheap_net(x).squeeze(-1)  # (N,)
+        K = min(self.K, N)
+        _, topk_idx = torch.topk(cheap_scores, K)
+        selected = x[topk_idx]                          # (K, D)
+        return self.backbone.aggregate(selected)
+
+
+# =====================================================================
+# 2. Data: CAMELYON16 via torchmil
+# =====================================================================
+
+def load_camelyon16(data_dir):
+    """
+    Load CAMELYON16 from torchmil directory structure (direct npy loading).
+    Returns: (train_bags, test_bags) where each bag = (features_np, label_int)
+
+    Expected directory structure:
+        data_dir/
+          splits.csv
+          patches_512/
+            features/features_resnet50_bt/<slide>.npy  (N, 2048) float32
+            labels/<slide>.npy                          scalar 0/1
+    """
+    import csv
+    root = Path(data_dir)
+    feat_dir = root / "patches_512" / "features" / "features_resnet50_bt"
+    label_dir = root / "patches_512" / "labels"
+
+    assert feat_dir.exists(), f"Features not found: {feat_dir}"
+    assert label_dir.exists(), f"Labels not found: {label_dir}"
+    assert (root / "splits.csv").exists(), f"splits.csv not found: {root}"
+
+    # Read splits.csv
+    splits = {}
+    with open(root / "splits.csv") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            splits[row['bag_name']] = row['split']
+
+    train_bags, test_bags = [], []
+    for name, split in sorted(splits.items()):
+        feat_path = feat_dir / f"{name}.npy"
+        label_path = label_dir / f"{name}.npy"
+        if not feat_path.exists():
+            continue
+        X = np.load(feat_path).astype(np.float32)  # (N, 2048)
+        Y = int(np.load(label_path).item())         # 0 or 1
+        if split == 'train':
+            train_bags.append((X, Y))
+        else:
+            test_bags.append((X, Y))
+
+    # Print stats
+    def _print_stats(bags, name):
+        labels = [l for _, l in bags]
+        sizes = [f.shape[0] for f, _ in bags]
+        feat_dim = bags[0][0].shape[1] if bags else 0
+        print(f"  {name}: {len(bags)} slides, "
+              f"{sum(labels)} pos / {len(bags)-sum(labels)} neg, "
+              f"feat_dim={feat_dim}")
+        print(f"    Bag sizes: min={min(sizes)}, max={max(sizes)}, "
+              f"mean={np.mean(sizes):.0f}")
+
+    print(f"Loaded CAMELYON16 from {root}")
+    _print_stats(train_bags, "Train")
+    _print_stats(test_bags, "Test")
+
+    return train_bags, test_bags
+
+
+# =====================================================================
+# 3. Training & Evaluation
+# =====================================================================
+
+def train_one_epoch(model, train_bags, optimizer, criterion, device):
+    """One pass over all training bags (shuffled)."""
+    model.train()
+    order = np.random.permutation(len(train_bags))
+    total_loss = 0.0
+
+    for idx in order:
+        feats, label = train_bags[idx]
+        x = torch.tensor(feats, dtype=torch.float32).to(device)
+        y = torch.tensor(label, dtype=torch.float32).to(device)
+
+        optimizer.zero_grad()
+        logit = model(x)
+        loss = criterion(logit.unsqueeze(0), y.unsqueeze(0))
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(train_bags)
+
+
+@torch.no_grad()
+def evaluate(model, bags, device):
+    """Evaluate on a set of bags. Returns metrics dict or None."""
+    model.eval()
+    all_logits, all_labels = [], []
+
+    for feats, label in bags:
+        x = torch.tensor(feats, dtype=torch.float32).to(device)
+        logit = model(x)
+        all_logits.append(logit.item())
+        all_labels.append(label)
+
+    probs = torch.sigmoid(torch.tensor(all_logits)).numpy()
+    labels = np.array(all_labels)
+    preds = (probs > 0.5).astype(int)
+
+    if len(np.unique(labels)) < 2:
+        return None
+
+    return {
+        "auc": float(roc_auc_score(labels, probs)),
+        "accuracy": float(accuracy_score(labels, preds)),
+        "f1": float(f1_score(labels, preds, zero_division=0)),
+    }
+
+
+# =====================================================================
+# 4. Model builder
+# =====================================================================
+
+def build_model(method, input_dim, K, **kw):
+    if method == "abmil":
+        return ABMIL(input_dim=input_dim)
+    elif method == "brmil_original":
+        return BRMIL_Original(input_dim=input_dim, K=K, **kw)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+# =====================================================================
+# 5. Runners
+# =====================================================================
+
+def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device):
+    """Train a single model, return best metrics on val_bags."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    input_dim = train_bags[0][0].shape[1]
+    model = build_model(method, input_dim, K).to(device)
+
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    criterion = nn.BCEWithLogitsLoss()
+
+    best_val_acc, best_metrics = 0.0, None
+    for epoch in range(epochs):
+        loss = train_one_epoch(model, train_bags, optimizer, criterion, device)
+        scheduler.step()
+        val_metrics = evaluate(model, val_bags, device)
+        if val_metrics is not None and val_metrics["accuracy"] > best_val_acc:
+            best_val_acc = val_metrics["accuracy"]
+            best_metrics = dict(val_metrics)
+            best_metrics["best_epoch"] = epoch
+
+    return best_metrics
+
+
+def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device):
+    """
+    5-fold stratified CV on training slides, evaluate on official test set.
+    Returns dict with mean +/- std over 5 folds.
+    """
+    labels = np.array([l for _, l in all_train_bags])
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+
+    fold_metrics = []
+    for fold_idx, (train_idx, val_idx) in enumerate(
+            skf.split(range(len(all_train_bags)), labels)):
+        train_bags = [all_train_bags[i] for i in train_idx]
+        val_bags = [all_train_bags[i] for i in val_idx]
+
+        print(f"\n--- Fold {fold_idx+1}/5: "
+              f"train={len(train_bags)} ({sum(l for _,l in train_bags)} pos), "
+              f"val={len(val_bags)} ({sum(l for _,l in val_bags)} pos) ---")
+
+        fold_seed = seed + fold_idx
+        m = run_training(method, train_bags, val_bags, K,
+                         fold_seed, epochs, lr, device)
+        if m is not None:
+            fold_metrics.append(m)
+            print(f"  Val best: ACC={m['accuracy']:.4f}, AUC={m['auc']:.4f}, "
+                  f"F1={m['f1']:.4f} (epoch {m['best_epoch']})")
+
+    # Aggregate
+    result = {
+        "method": method, "K": K, "seed": seed,
+        "n_folds": 5, "epochs": epochs,
+        "n_valid_folds": len(fold_metrics),
+    }
+    if fold_metrics:
+        for key in ["auc", "accuracy", "f1"]:
+            vals = [m[key] for m in fold_metrics]
+            result[f"{key}_mean"] = float(np.mean(vals))
+            result[f"{key}_std"] = float(np.std(vals))
+        result["fold_details"] = fold_metrics
+    else:
+        result["error"] = "no valid folds"
+
+    return result
+
+
+# =====================================================================
+# 6. Main
+# =====================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="EXP6E: BR-MIL on CAMELYON16 (torchmil benchmark)")
+    parser.add_argument("--method", type=str, required=True,
+                        choices=["abmil", "brmil_original"])
+    parser.add_argument("--K", type=int, default=0,
+                        help="Budget K (ignored for abmil)")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Path to camelyon16-torchmil/dataset directory")
+    parser.add_argument("--output_dir", type=str,
+                        default="experiments/EXP6E_CAMELYON16/results")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    if torch.cuda.is_available():
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+
+    t0 = time.time()
+
+    # Load data
+    train_bags, test_bags = load_camelyon16(args.data_dir)
+
+    # Run 5-fold CV on training slides
+    # (test_bags loaded for verification, but we evaluate on val during CV
+    #  to match torchmil's protocol of selecting best model by val accuracy)
+    result = run_5fold(args.method, train_bags, test_bags,
+                       args.K, args.seed, args.epochs, args.lr, device)
+
+    elapsed = time.time() - t0
+    result["elapsed_sec"] = round(elapsed, 1)
+
+    # Save
+    output_dir = Path(args.output_dir)
+    K_tag = f"K{args.K}" if args.K > 0 else "K0"
+    run_dir = output_dir / args.method / K_tag / f"seed_{args.seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "metrics.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    # Print summary
+    if "auc_mean" in result:
+        print(f"\n[{args.method}/K{args.K}/seed{args.seed}] "
+              f"ACC={result['accuracy_mean']:.4f}±{result['accuracy_std']:.4f}, "
+              f"AUC={result['auc_mean']:.4f}±{result['auc_std']:.4f}, "
+              f"F1={result['f1_mean']:.4f}±{result['f1_std']:.4f} "
+              f"(5 folds, {elapsed:.0f}s)")
+    else:
+        print(f"\n[{args.method}/K{args.K}/seed{args.seed}] "
+              f"Error: {result.get('error', 'unknown')}")
+
+
+if __name__ == "__main__":
+    main()

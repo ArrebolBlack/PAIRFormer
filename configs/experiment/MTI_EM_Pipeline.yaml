@@ -1,3 +1,6 @@
+# @package _global_
+# configs/experiment/MTI_EM_Pipeline.yaml
+# EXP8 Pipeline A: MTI pair-level, random split, full BR-MIL pipeline
 experiment_name: MTI_EM_Pipeline
 experiment:
   name: MTI_EM_Pipeline
@@ -9,16 +12,17 @@ paths:
   cache_root: cache
   logs_root: logs
 data:
-  name: miRNA_MTI
+  name: mirna_MTI
   path:
-    train: data/deepTargetPro/deepTargetPro_Test1-5_split-ratio-0.9_Train_Validation.txt
-    val: data/deepTargetPro/deepTargetPro_Test1-5_split-ratio-0.9_Train_Validation.txt
-    test: data/deepTargetPro/deepTargetPro_Test_total.txt
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
   with_esa: true
-  split_column: 5
+  split_column: 6
   split_map:
     train: train
     val: val
+    test: test
 run:
   mode: train
   split: train
@@ -130,8 +134,8 @@ em:
     refresh_selection_follows_cheap: true
     refresh_instance_follows_selection: true
 em_cache_root: ${paths.cache_root}
-cheap_ckpt_path: checkpoints/MTI_CheapCTSNet/checkpoints/last.pt
-instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/last.pt
+cheap_ckpt_path: checkpoints/MTI_A_CheapCTSNet/checkpoints/best.pt
+instance_ckpt_path: checkpoints/MTI_A_TargetNet_Optimized/checkpoints/best.pt
 token_provider:
   cache_missing: error
   use_amp: false
@@ -266,14 +270,14 @@ eval:
 logging:
   wandb:
     enabled: true
-    project: rebuttal_EXP2_deepTargetPro
+    project: MTI_EXP8_PipelineA
     entity: null
     mode: online
-    group: deepTargetPro_Route1
+    group: MTI_RandomSplit
     tags:
-    - EXP2
-    - Route1
-    - deepTargetPro
+    - EXP8
+    - PipelineA
+    - MTI
     - EM
   eval:
     use_wandb: false

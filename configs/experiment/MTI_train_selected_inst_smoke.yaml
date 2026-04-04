@@ -1,0 +1,28 @@
+# @package _global_
+
+defaults:
+  - MTI_train_selected_inst
+  - _self_
+
+experiment_name: MTI_train_selected_inst_smoke
+experiment:
+  name: MTI_train_selected_inst_smoke
+  task: pair_train_selected_inst_smoke
+
+run:
+  mode: train_pair_selected_inst
+  split: train
+  val_split: train
+  batch_size: 4
+  num_workers: 0
+  num_epochs: 2
+
+scalable:
+  cache_root: ${paths.cache_root}
+  max_train_pairs: 32
+  max_val_pairs: 16
+
+trainer_pair_selected:
+  num_epochs: ${run.num_epochs}
+  log_every: 5
+  use_amp: false

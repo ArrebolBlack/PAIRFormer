@@ -1,0 +1,61 @@
+# @package _global_
+
+experiment_name: MTI_EM_Scalable_selected_raw
+experiment:
+  name: MTI_EM_Scalable_selected_raw
+  task: scalable_pair_cache_build
+
+seed: 2020
+device: cuda
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+data:
+  name: mirna_MTI
+  path:
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
+  with_esa: true
+  split_column: 6
+  split_map:
+    train: train
+    val: val
+    test: test
+
+run:
+  mode: build_selected_pair_cache
+  split: train
+  kmax: 64
+
+scalable:
+  cache_root: ${paths.cache_root}
+  num_pairs_hint: 480000
+  cheap_batch_size: 4096
+  esa_min_score: 6.0
+  selector:
+    name: stselector   # topk | stselector
+    k1_ratio: 0.5
+    mode: eval
+    epoch: 0
+
+cheap_ckpt_path: checkpoints/MTI_A_CheapCTSNet/checkpoints/best.pt
+
+cheap_model:
+  name: CheapCTSNet
+  arch: CheapCTSNet_TinyConv
+  meta_mode: logit_only
+  meta_dropout: 0.2
+  emb_dim: 64
+  use_diff: true
+  dropout: 0.0
+  logit_hidden_dim: 64
+  c1: 16
+  c2: 32
+  k1: 5
+  k2: 3
+  s1: 2
+  s2: 2
