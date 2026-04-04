@@ -135,6 +135,26 @@ class BRMIL_Original(nn.Module):
         return self.backbone.aggregate(selected)
 
 
+class BRMIL_TwoStage(nn.Module):
+    """Two-stage BR-MIL: pretrain cheap_net, freeze, then train backbone."""
+    def __init__(self, input_dim=2048, cheap_dim=512, d_model=256, n_heads=8,
+                 n_inds=32, d_ff=1024, dropout=0.1, K=64, **kwargs):
+        super().__init__()
+        self.K = K
+        self.cheap_net = _make_cheap_net(input_dim, cheap_dim, dropout)
+        self.backbone = SetTransformerBackbone(
+            input_dim, d_model, n_heads, n_inds, d_ff, dropout)
+
+    def forward(self, x):
+        N = x.size(0)
+        with torch.no_grad():
+            cheap_scores = self.cheap_net(x).squeeze(-1)
+        K = min(self.K, N)
+        _, topk_idx = torch.topk(cheap_scores, K)
+        selected = x[topk_idx]
+        return self.backbone.aggregate(selected)
+
+
 # =====================================================================
 # 2. Data: CAMELYON16 via torchmil
 # =====================================================================
@@ -258,6 +278,8 @@ def build_model(method, input_dim, K, **kw):
         return ABMIL(input_dim=input_dim)
     elif method == "brmil_original":
         return BRMIL_Original(input_dim=input_dim, K=K, **kw)
+    elif method == "brmil_twostage":
+        return BRMIL_TwoStage(input_dim=input_dim, K=K, **kw)
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -266,7 +288,8 @@ def build_model(method, input_dim, K, **kw):
 # 5. Runners
 # =====================================================================
 
-def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device):
+def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device,
+                 stage_a_epochs=12):
     """Train a single model, return best metrics on val_bags."""
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -274,6 +297,11 @@ def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device):
         torch.cuda.manual_seed_all(seed)
 
     input_dim = train_bags[0][0].shape[1]
+
+    if method == "brmil_twostage":
+        return _run_twostage(train_bags, val_bags, K, seed, epochs, lr,
+                             device, stage_a_epochs, input_dim)
+
     model = build_model(method, input_dim, K).to(device)
 
     optimizer = torch.optim.Adam(
@@ -294,7 +322,56 @@ def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device):
     return best_metrics
 
 
-def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device):
+def _run_twostage(train_bags, val_bags, K, seed, epochs, lr, device,
+                  stage_a_epochs, input_dim):
+    """Two-stage training: pretrain cheap_net, freeze, train backbone."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = BRMIL_TwoStage(input_dim=input_dim, K=K).to(device)
+    stage_a_epochs = min(stage_a_epochs, max(epochs // 4, 1))
+
+    # Stage A: train cheap_net to predict bag labels via mean score
+    cheap_opt = torch.optim.Adam(model.cheap_net.parameters(), lr=lr)
+    criterion = nn.BCEWithLogitsLoss()
+    print(f"    [TwoStage] Stage A: training cheap_net for {stage_a_epochs} epochs ...")
+    for ep in range(stage_a_epochs):
+        model.train()
+        order = np.random.permutation(len(train_bags))
+        for idx in order:
+            feats, label = train_bags[idx]
+            x = torch.tensor(feats, dtype=torch.float32).to(device)
+            y = torch.tensor(label, dtype=torch.float32).to(device)
+            cheap_opt.zero_grad()
+            scores = model.cheap_net(x).squeeze(-1)
+            loss = criterion(scores.mean().unsqueeze(0), y.unsqueeze(0))
+            loss.backward()
+            cheap_opt.step()
+
+    # Freeze cheap_net
+    for p in model.cheap_net.parameters():
+        p.requires_grad = False
+
+    # Stage B: train backbone with frozen cheap_net
+    remaining = epochs - stage_a_epochs
+    print(f"    [TwoStage] Stage B: training backbone for {remaining} epochs ...")
+    optimizer = torch.optim.Adam(model.backbone.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
+
+    best_val_acc, best_metrics = 0.0, None
+    for epoch in range(remaining):
+        train_one_epoch(model, train_bags, optimizer, criterion, device)
+        scheduler.step()
+        val_metrics = evaluate(model, val_bags, device)
+        if val_metrics is not None and val_metrics["accuracy"] > best_val_acc:
+            best_val_acc = val_metrics["accuracy"]
+            best_metrics = dict(val_metrics)
+            best_metrics["best_epoch"] = epoch + stage_a_epochs
+
+    return best_metrics
+
+
+def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device,
+              stage_a_epochs=12):
     """
     5-fold stratified CV on training slides, evaluate on official test set.
     Returns dict with mean +/- std over 5 folds.
@@ -314,7 +391,8 @@ def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device):
 
         fold_seed = seed + fold_idx
         m = run_training(method, train_bags, val_bags, K,
-                         fold_seed, epochs, lr, device)
+                         fold_seed, epochs, lr, device,
+                         stage_a_epochs=stage_a_epochs)
         if m is not None:
             fold_metrics.append(m)
             print(f"  Val best: ACC={m['accuracy']:.4f}, AUC={m['auc']:.4f}, "
@@ -346,12 +424,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="EXP6E: BR-MIL on CAMELYON16 (torchmil benchmark)")
     parser.add_argument("--method", type=str, required=True,
-                        choices=["abmil", "brmil_original"])
+                        choices=["abmil", "brmil_original", "brmil_twostage"])
     parser.add_argument("--K", type=int, default=0,
                         help="Budget K (ignored for abmil)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--stage_a_epochs", type=int, default=12,
+                        help="Stage A epochs for twostage method")
     parser.add_argument("--data_dir", type=str, required=True,
                         help="Path to camelyon16-torchmil/dataset directory")
     parser.add_argument("--output_dir", type=str,
@@ -372,7 +452,8 @@ def main():
     # (test_bags loaded for verification, but we evaluate on val during CV
     #  to match torchmil's protocol of selecting best model by val accuracy)
     result = run_5fold(args.method, train_bags, test_bags,
-                       args.K, args.seed, args.epochs, args.lr, device)
+                       args.K, args.seed, args.epochs, args.lr, device,
+                       stage_a_epochs=args.stage_a_epochs)
 
     elapsed = time.time() - t0
     result["elapsed_sec"] = round(elapsed, 1)
