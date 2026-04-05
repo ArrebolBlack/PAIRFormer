@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.config.data_config import DataConfig
+from src.data.sampler import ChunkAwareBatchSampler
 from src.data.stream_pair_dataset import StreamPairDataset
 from src.data.window_shard_collate import window_shard_collate
 from src.data.window_shard_dataset import WindowShardDataset
@@ -42,15 +43,19 @@ def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_s
         max_samples=max_samples,
         teacher_root=(root if bool(max_samples is None) and False else None),
     )
+    batch_sampler = ChunkAwareBatchSampler(
+        ds.cum_sizes,
+        batch_size=batch_size,
+        drop_last=False,
+        shuffle=shuffle,
+    )
     ld = DataLoader(
         ds,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        batch_sampler=batch_sampler,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         collate_fn=window_shard_collate,
-        drop_last=False,
     )
     return ds, ld
 
@@ -81,24 +86,20 @@ def main(cfg: DictConfig) -> None:
     train_ds = WindowShardDataset(cache_root, split="train", include_ignore=True, max_samples=max_train, teacher_root=teacher_root)
     train_loader = DataLoader(
         train_ds,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_sampler=ChunkAwareBatchSampler(train_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=True),
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         collate_fn=window_shard_collate,
-        drop_last=False,
     )
     val_ds = WindowShardDataset(cache_root, split="val", include_ignore=True, max_samples=max_val, teacher_root=teacher_root)
     val_loader = DataLoader(
         val_ds,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_sampler=ChunkAwareBatchSampler(val_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False),
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         collate_fn=window_shard_collate,
-        drop_last=False,
     )
     val_pair_labels = _pair_labels(data_cfg, "val")
     print(f"[train_cheapcts_shard] train_samples={len(train_ds)} val_samples={len(val_ds)} batch_size={batch_size}")
@@ -275,13 +276,11 @@ def main(cfg: DictConfig) -> None:
         test_ds = WindowShardDataset(cache_root, split="test", include_ignore=True, teacher_root=teacher_root)
         test_loader = DataLoader(
             test_ds,
-            batch_size=batch_size,
-            shuffle=False,
+            batch_sampler=ChunkAwareBatchSampler(test_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False),
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=(num_workers > 0),
             collate_fn=window_shard_collate,
-            drop_last=False,
         )
         test_pair_labels = _pair_labels(data_cfg, "test")
         student.eval()

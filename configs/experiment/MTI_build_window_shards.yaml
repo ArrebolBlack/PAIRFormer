@@ -40,4 +40,6 @@ scalable:
   label_policy: pseudo_topr
   pseudo_topr: 8
   positive_score: esa
+  drop_ignore_at_build: false
+  negative_keep_prob: 1.0
   max_pairs: null

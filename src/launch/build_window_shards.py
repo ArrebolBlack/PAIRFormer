@@ -25,9 +25,12 @@ def main(cfg: DictConfig) -> None:
         task_pairs=int(cfg.scalable.get("task_pairs", 16)),
         mp_start_method=str(cfg.scalable.get("mp_start_method", "spawn")),
         max_samples_per_shard=int(cfg.scalable.get("max_samples_per_shard", 2_000_000)),
+        seed=seed,
         label_policy=str(cfg.scalable.get("label_policy", "all_positive")),
         pseudo_topr=int(cfg.scalable.get("pseudo_topr", 8)),
         positive_score=str(cfg.scalable.get("positive_score", "esa")),
+        drop_ignore_at_build=bool(cfg.scalable.get("drop_ignore_at_build", False)),
+        negative_keep_prob=float(cfg.scalable.get("negative_keep_prob", 1.0)),
     )
     builder = WindowShardBuilderParallel(
         root=str(cfg.scalable.cache_root),
@@ -38,7 +41,9 @@ def main(cfg: DictConfig) -> None:
     print(
         f"[build_window_shards] split={split} cache_root={cfg.scalable.cache_root} "
         f"label_policy={shard_cfg.label_policy} workers={shard_cfg.num_workers} "
-        f"task_pairs={shard_cfg.task_pairs} max_samples_per_shard={shard_cfg.max_samples_per_shard}"
+        f"task_pairs={shard_cfg.task_pairs} max_samples_per_shard={shard_cfg.max_samples_per_shard} "
+        f"drop_ignore_at_build={shard_cfg.drop_ignore_at_build} "
+        f"negative_keep_prob={shard_cfg.negative_keep_prob}"
     )
     builder.build(pair_ds.iter_records(), data_cfg)
 

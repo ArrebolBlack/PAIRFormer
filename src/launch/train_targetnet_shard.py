@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.config.data_config import DataConfig
+from src.data.sampler import ChunkAwareBatchSampler
 from src.data.stream_pair_dataset import StreamPairDataset
 from src.data.window_shard_collate import window_shard_collate
 from src.data.window_shard_dataset import WindowShardDataset
@@ -40,16 +41,33 @@ def _forward_logits(model, x: torch.Tensor) -> torch.Tensor:
 
 def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False):
     ds = WindowShardDataset(root, split=split, include_ignore=True, max_samples=max_samples)
-    ld = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=(num_workers > 0),
-        collate_fn=window_shard_collate,
-        drop_last=False,
-    )
+    use_chunk_aware = True
+    if use_chunk_aware:
+        batch_sampler = ChunkAwareBatchSampler(
+            ds.cum_sizes,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=shuffle,
+        )
+        ld = DataLoader(
+            ds,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=(num_workers > 0),
+            collate_fn=window_shard_collate,
+        )
+    else:
+        ld = DataLoader(
+            ds,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=(num_workers > 0),
+            collate_fn=window_shard_collate,
+            drop_last=False,
+        )
     return ds, ld
 
 

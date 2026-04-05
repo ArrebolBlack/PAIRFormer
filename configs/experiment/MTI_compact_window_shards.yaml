@@ -1,0 +1,25 @@
+# @package _global_
+
+experiment_name: MTI_compact_window_shards
+experiment:
+  name: MTI_compact_window_shards
+  task: window_shard_compaction
+
+seed: 2020
+device: cpu
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+run:
+  mode: compact_window_shards
+  split: train
+  output_cache_root: ${paths.cache_root}
+  compact_mode: balanced_neg   # valid_only | balanced_neg
+  neg_pos_ratio: 4.0
+  max_samples_per_shard: 2000000
+
+scalable:
+  cache_root: ${paths.cache_root}

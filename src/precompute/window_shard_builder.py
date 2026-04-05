@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from multiprocessing import get_context
 from typing import Iterable, Iterator, List, Sequence, Tuple
 
+import numpy as np
 import torch
 
 from src.data.stream_pair_dataset import PairRecord
@@ -18,9 +19,12 @@ class WindowShardBuildConfig:
     task_pairs: int = 16
     mp_start_method: str = "spawn"
     max_samples_per_shard: int = 2_000_000
+    seed: int = 2020
     label_policy: str = "all_positive"  # all_positive | pseudo_topr
     pseudo_topr: int = 8
     positive_score: str = "esa"  # esa
+    drop_ignore_at_build: bool = False
+    negative_keep_prob: float = 1.0
 
 
 @dataclass
@@ -82,7 +86,13 @@ def _process_pair_chunk(task: Tuple[Sequence[PairRecord], object, WindowShardBui
             label_policy=str(cfg.label_policy),
             pseudo_topr=int(cfg.pseudo_topr),
         )
+        rng = np.random.default_rng(int(cfg.seed) ^ int(rec.pair_id))
         for x, esa, pos, lab in zip(xs_pair, esa_pair, pos_pair, labels_pair):
+            if bool(cfg.drop_ignore_at_build) and int(lab) < 0:
+                continue
+            if int(lab) == 0 and float(cfg.negative_keep_prob) < 1.0:
+                if float(rng.random()) >= float(cfg.negative_keep_prob):
+                    continue
             xs_all.append(x)
             esa_all.append(float(esa))
             pos_all.append(float(pos))
