@@ -42,7 +42,7 @@ scalable:
     mode: eval
     epoch: 0
 
-cheap_ckpt_path: checkpoints/MTI_A_CheapCTSNet/checkpoints/best.pt
+cheap_ckpt_path: checkpoints/MTI_CheapCTSNet/checkpoints/best.pt
 
 cheap_model:
   name: CheapCTSNet

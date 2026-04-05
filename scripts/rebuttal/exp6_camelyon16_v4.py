@@ -121,10 +121,10 @@ class SABBackbone(nn.Module):
             nn.Linear(d_model, 1))
 
     def aggregate(self, selected):
-        """selected: (K, D) → scalar logit"""
+        """selected: (K, D) -> scalar logit, with gradient checkpointing."""
         h = self.proj(selected).unsqueeze(0)  # (1, K, d_model)
-        h = self.enc1(h)
-        h = self.enc2(h)
+        h = torch.utils.checkpoint.checkpoint(self.enc1, h, use_reentrant=False)
+        h = torch.utils.checkpoint.checkpoint(self.enc2, h, use_reentrant=False)
         h = self.pma(h).squeeze(0).squeeze(0)  # (d_model,)
         return self.classifier(h).squeeze(-1)   # scalar
 
@@ -237,16 +237,23 @@ def train_one_epoch(model, train_bags, optimizer, criterion, device,
     total_loss = 0.0
     optimizer.zero_grad()
 
+    n_skipped = 0
     for step, idx in enumerate(order):
         feats, label = train_bags[idx]
         x = torch.tensor(feats, dtype=torch.float32).to(device)
         y = torch.tensor(label, dtype=torch.float32).to(device)
 
-        logit = model(x)
+        try:
+            logit = model(x)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                torch.cuda.empty_cache()
+                n_skipped += 1
+                continue
+            raise
         loss = criterion(logit.unsqueeze(0), y.unsqueeze(0)) / accum_steps
         loss.backward()
         total_loss += loss.item() * accum_steps
-
         if (step + 1) % accum_steps == 0 or (step + 1) == len(order):
             torch.nn.utils.clip_grad_norm_(
                 filter(lambda p: p.requires_grad, model.parameters()),
@@ -254,7 +261,9 @@ def train_one_epoch(model, train_bags, optimizer, criterion, device,
             optimizer.step()
             optimizer.zero_grad()
 
-    return total_loss / len(train_bags)
+    if n_skipped > 0:
+        print(f"    [OOM skipped {n_skipped}/{len(train_bags)} bags]")
+    return total_loss / (len(train_bags) - n_skipped)
 
 
 @torch.no_grad()
@@ -263,11 +272,22 @@ def evaluate(model, bags, device):
     model.eval()
     all_logits, all_labels = [], []
 
+    n_skipped = 0
     for feats, label in bags:
         x = torch.tensor(feats, dtype=torch.float32).to(device)
-        logit = model(x)
+        try:
+            logit = model(x)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                torch.cuda.empty_cache()
+                n_skipped += 1
+                continue
+            raise
         all_logits.append(logit.item())
         all_labels.append(label)
+    if n_skipped > 0:
+        print(f"    [Eval OOM skipped {n_skipped}/{len(bags)} bags]")
+
 
     probs = torch.sigmoid(torch.tensor(all_logits)).numpy()
     labels = np.array(all_labels)
@@ -303,7 +323,7 @@ def build_model(method, input_dim, K, **kw):
 # =====================================================================
 
 def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device,
-                 stage_a_epochs=12, accum_steps=8):
+                 stage_a_epochs=12, accum_steps=8, model_kw=None):
     """Train a single model, return best metrics on val_bags."""
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -311,12 +331,15 @@ def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device,
         torch.cuda.manual_seed_all(seed)
 
     input_dim = train_bags[0][0].shape[1]
+    if model_kw is None:
+        model_kw = {}
 
     if method == "brmil_twostage":
         return _run_twostage(train_bags, val_bags, K, seed, epochs, lr,
-                             device, stage_a_epochs, input_dim, accum_steps)
+                             device, stage_a_epochs, input_dim, accum_steps,
+                             model_kw)
 
-    model = build_model(method, input_dim, K).to(device)
+    model = build_model(method, input_dim, K, **model_kw).to(device)
 
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -339,11 +362,13 @@ def run_training(method, train_bags, val_bags, K, seed, epochs, lr, device,
 
 
 def _run_twostage(train_bags, val_bags, K, seed, epochs, lr, device,
-                  stage_a_epochs, input_dim, accum_steps):
+                  stage_a_epochs, input_dim, accum_steps, model_kw=None):
     """Two-stage training: pretrain cheap_net, freeze, train backbone."""
     torch.manual_seed(seed)
     np.random.seed(seed)
-    model = BRMIL_TwoStage(input_dim=input_dim, K=K).to(device)
+    if model_kw is None:
+        model_kw = {}
+    model = BRMIL_TwoStage(input_dim=input_dim, K=K, **model_kw).to(device)
     stage_a_epochs = min(stage_a_epochs, max(epochs // 4, 1))
 
     # Stage A: train cheap_net
@@ -388,7 +413,7 @@ def _run_twostage(train_bags, val_bags, K, seed, epochs, lr, device,
 
 
 def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device,
-              stage_a_epochs=12, accum_steps=8):
+              stage_a_epochs=12, accum_steps=8, model_kw=None):
     """5-fold stratified CV on training slides."""
     labels = np.array([l for _, l in all_train_bags])
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
@@ -407,7 +432,8 @@ def run_5fold(method, all_train_bags, test_bags, K, seed, epochs, lr, device,
         m = run_training(method, train_bags, val_bags, K,
                          fold_seed, epochs, lr, device,
                          stage_a_epochs=stage_a_epochs,
-                         accum_steps=accum_steps)
+                         accum_steps=accum_steps,
+                         model_kw=model_kw)
         if m is not None:
             fold_metrics.append(m)
             print(f"  Val best: ACC={m['accuracy']:.4f}, AUC={m['auc']:.4f}, "
@@ -448,6 +474,11 @@ def main():
                         help="Gradient accumulation steps (effective batch size)")
     parser.add_argument("--stage_a_epochs", type=int, default=12,
                         help="Stage A epochs for twostage method")
+    parser.add_argument("--d_model", type=int, default=256)
+    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--d_ff", type=int, default=1024)
+    parser.add_argument("--cheap_dim", type=int, default=512)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--data_dir", type=str, required=True,
                         help="Path to camelyon16-torchmil/dataset directory")
     parser.add_argument("--output_dir", type=str,
@@ -465,10 +496,17 @@ def main():
 
     train_bags, test_bags = load_camelyon16(args.data_dir)
 
+    model_kw = {}
+    if args.method != "abmil":
+        model_kw = {"d_model": args.d_model, "n_heads": args.n_heads,
+                    "d_ff": args.d_ff, "cheap_dim": args.cheap_dim,
+                    "dropout": args.dropout}
+
     result = run_5fold(args.method, train_bags, test_bags,
                        args.K, args.seed, args.epochs, args.lr, device,
                        stage_a_epochs=args.stage_a_epochs,
-                       accum_steps=args.accum_steps)
+                       accum_steps=args.accum_steps,
+                       model_kw=model_kw)
 
     elapsed = time.time() - t0
     result["elapsed_sec"] = round(elapsed, 1)

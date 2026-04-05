@@ -142,6 +142,8 @@ def extract_batch_to_device(
     x = x.to(device, non_blocking=non_blocking)
     esa = esa.to(device, non_blocking=non_blocking)
     pos = pos.to(device, non_blocking=non_blocking)
+    if x.dtype == torch.uint8:
+        x = x.float()
     return x, esa, pos
 
 # -------------------------

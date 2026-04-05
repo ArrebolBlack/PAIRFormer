@@ -1,0 +1,42 @@
+# @package _global_
+
+experiment_name: MTI_eval_window_shard
+experiment:
+  name: MTI_eval_window_shard
+  task: eval_window_shard
+
+seed: 2020
+device: cuda
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+data:
+  name: mirna_MTI
+  path:
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
+  with_esa: true
+  split_column: 6
+  split_map:
+    train: train
+    val: val
+    test: test
+
+run:
+  mode: eval_window_shard
+  eval_split: test
+  batch_size: 512
+  num_workers: 8
+  checkpoint: null
+
+scalable:
+  cache_root: ${paths.cache_root}
+
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5

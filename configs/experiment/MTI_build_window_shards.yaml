@@ -1,0 +1,43 @@
+# @package _global_
+
+experiment_name: MTI_build_window_shards
+experiment:
+  name: MTI_build_window_shards
+  task: build_window_shards
+
+seed: 2020
+device: cuda
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+data:
+  name: mirna_MTI
+  path:
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
+  with_esa: true
+  split_column: 6
+  split_map:
+    train: train
+    val: val
+    test: test
+
+run:
+  mode: build_window_shards
+  split: train
+
+scalable:
+  cache_root: ${paths.cache_root}
+  esa_min_score: 6.0
+  num_workers: 8
+  task_pairs: 16
+  mp_start_method: spawn
+  max_samples_per_shard: 2000000
+  label_policy: pseudo_topr
+  pseudo_topr: 8
+  positive_score: esa
+  max_pairs: null

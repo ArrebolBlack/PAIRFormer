@@ -56,8 +56,8 @@ train:
   ema:
     enabled: true
     decay: 0.999
-  monitor: loss
-  greater_is_better: false
+  monitor: f1
+  greater_is_better: true
 task:
   problem_type: binary_classification
   from_logits: true
@@ -107,7 +107,7 @@ run:
   distill_need_feat: true
   distill_teacher_amp: true
   distill_teacher_arch: TargetNet_Optimized
-  distill_teacher_ckpt: checkpoints/miRAW_TargetNet_Optimized_dp-0.1/checkpoints/last.pt
+  distill_teacher_ckpt: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
   distill_teacher_model:
     name: targetnet_optimized
     arch: TargetNet_Optimized
@@ -160,4 +160,4 @@ paths:
   output_root: outputs
   cache_root: cache
   logs_root: logs
-instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/last.pt
+instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt

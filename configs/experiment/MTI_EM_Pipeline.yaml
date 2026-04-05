@@ -134,8 +134,8 @@ em:
     refresh_selection_follows_cheap: true
     refresh_instance_follows_selection: true
 em_cache_root: ${paths.cache_root}
-cheap_ckpt_path: checkpoints/MTI_A_CheapCTSNet/checkpoints/best.pt
-instance_ckpt_path: checkpoints/MTI_A_TargetNet_Optimized/checkpoints/best.pt
+cheap_ckpt_path: checkpoints/MTI_CheapCTSNet/checkpoints/best.pt
+instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
 token_provider:
   cache_missing: error
   use_amp: false
@@ -235,8 +235,8 @@ trainer_em:
   scheduler_gamma: 0.1
   scheduler_factor: 0.2
   scheduler_patience: 5
-  monitor: loss
-  greater_is_better: false
+  monitor: f1
+  greater_is_better: true
   ema_enabled: true
   ema_decay: 0.999
 task:

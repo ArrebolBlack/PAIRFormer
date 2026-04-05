@@ -103,8 +103,8 @@ trainer_pair_selected:
   smooth_pos: 0.95
   bce_lambda: 0.01
   pos_weight: 1.0
-  monitor: loss
-  greater_is_better: false
+  monitor: f1
+  greater_is_better: true
 
 task:
   problem_type: binary_classification

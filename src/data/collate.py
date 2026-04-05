@@ -60,8 +60,8 @@ def cts_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
         xs, ys, idxs, esas, pos = zip(*batch)
     
 
-    # X: [B, C, L]，统一转为 float32，后续模型直接使用
-    x = torch.stack(xs, dim=0).float()  # 原来是 uint8 one-hot
+    # X: [B, C, L]，保持 uint8，减少 CPU 侧膨胀与拷贝；在 GPU 上再转 float
+    x = torch.stack(xs, dim=0)
 
     # y: [B, 1] -> [B]
     y = torch.stack(ys, dim=0).view(-1).float()

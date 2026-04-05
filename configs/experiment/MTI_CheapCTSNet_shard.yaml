@@ -1,0 +1,117 @@
+# @package _global_
+
+experiment_name: MTI_CheapCTSNet_shard
+experiment:
+  name: MTI_CheapCTSNet_shard
+  task: window_level_train_shard_distill
+
+seed: 2020
+device: cuda
+
+paths:
+  output_root: outputs
+  cache_root: cache
+  logs_root: logs
+
+data:
+  name: mirna_MTI
+  path:
+    train: data/MTI/MTI_pair_random_split.txt
+    val: data/MTI/MTI_pair_random_split.txt
+    test: data/MTI/MTI_pair_random_split.txt
+  with_esa: true
+  split_column: 6
+  split_map:
+    train: train
+    val: val
+    test: test
+
+run:
+  mode: train_cheapcts_shard
+  batch_size: 512
+  num_workers: 8
+  num_epochs: 40
+  ckpt_subdir: checkpoints
+  resume: false
+  checkpoint: null
+  eval_test_after_train: false
+  use_teacher_shard: false
+  teacher_cache_root: ${scalable.cache_root}
+  distill_teacher_arch: TargetNet_Optimized
+  distill_teacher_ckpt: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
+  distill_teacher_amp: true
+  distill_need_feat: true
+  distill_teacher_feat_dim: 384
+  distill_student_emb_dim: 64
+  distill_T: 2.0
+  distill_alpha_start: 0.8
+  distill_alpha_end: 0.5
+  distill_beta_kd: 1.0
+  distill_beta_feat: 0.1
+  distill_teacher_model:
+    name: targetnet_optimized
+    arch: TargetNet_Optimized
+    num_channels: [16, 16, 32, 32]
+    num_blocks: [1, 1, 1, 1]
+    pool_size: 3
+    stem_kernel_size: 5
+    block_kernel_size: 3
+    skip_connection: true
+    dropout: 0.5
+    multi_scale: false
+    se_type: basic
+    use_bn: false
+    se_reduction: 8
+    target_output_length: 12
+    arch_variant: opt4_tiny
+
+scalable:
+  cache_root: ${paths.cache_root}
+  max_train_samples: null
+  max_val_samples: null
+
+model:
+  name: CheapCTSNet
+  arch: CheapCTSNet_TinyConv
+  meta_mode: logit_only
+  meta_dropout: 0.2
+  emb_dim: 64
+  use_diff: true
+  dropout: 0.0
+  logit_hidden_dim: 64
+  c1: 16
+  c2: 32
+  k1: 5
+  k2: 3
+  s1: 2
+  s2: 2
+
+train:
+  optimizer: adamw
+  lr: 0.006
+  weight_decay: 0.0
+  amp: true
+  loss_type: bce_focal
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1.0
+  bce_lambda: 0.01
+  label_smoothing: true
+  smooth_pos: 0.95
+  smooth_neg: 0.05
+  monitor: f1
+  greater_is_better: true
+
+task:
+  problem_type: binary_classification
+  from_logits: true
+  threshold: 0.5
+
+logging:
+  wandb:
+    enabled: true
+    project: CheapCTSNet
+    entity: null
+    mode: online
+    group: MTI_CheapCTSNet_shard
+    tags: [CheapCTSNet, MTI, shard]

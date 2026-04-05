@@ -95,8 +95,8 @@ train:
     decay: 0.999
 
   # 监控指标
-  monitor: loss
-  greater_is_better: false
+  monitor: f1
+  greater_is_better: true
 
 # ============================================================
 # 4. 运行配置 run

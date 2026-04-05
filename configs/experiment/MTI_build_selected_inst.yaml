@@ -36,7 +36,7 @@ run:
 scalable:
   cache_root: ${paths.cache_root}
 
-instance_ckpt_path: checkpoints/MTI_A_TargetNet_Optimized/checkpoints/best.pt
+instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
 
 instance_model:
   name: targetnet_optimized

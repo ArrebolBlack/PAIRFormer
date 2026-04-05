@@ -55,7 +55,7 @@ token_provider:
     use_esa: true
     use_pos: true
 
-instance_ckpt_path: checkpoints/MTI_A_TargetNet_Optimized/checkpoints/best.pt
+instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
 
 instance_model:
   name: targetnet_optimized
@@ -119,8 +119,8 @@ trainer_pair_selected:
   scheduler_gamma: 0.1
   scheduler_factor: 0.2
   scheduler_patience: 5
-  monitor: loss
-  greater_is_better: false
+  monitor: f1
+  greater_is_better: true
 
 task:
   problem_type: binary_classification

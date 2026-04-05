@@ -1,0 +1,19 @@
+# @package _global_
+
+experiment_name: MTI_relabel_window_shards
+experiment:
+  name: MTI_relabel_window_shards
+  task: relabel_window_shards
+
+seed: 2020
+device: cuda
+
+run:
+  mode: relabel_window_shards
+  split: train
+  teacher_cache_root: ${scalable.cache_root}
+  output_cache_root: ${scalable.cache_root}_teacher_topr
+  pseudo_topr: 8
+
+scalable:
+  cache_root: cache
