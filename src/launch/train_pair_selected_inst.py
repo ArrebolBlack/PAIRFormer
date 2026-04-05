@@ -110,6 +110,7 @@ def main(cfg: DictConfig) -> None:
         scheduler_gamma=float(tr_node.get("scheduler_gamma", 0.1)),
         scheduler_factor=float(tr_node.get("scheduler_factor", 0.2)),
         scheduler_patience=int(tr_node.get("scheduler_patience", 5)),
+        warmup_steps=int(tr_node.get("warmup_steps", 0)),
         loss_type=str(tr_node.get("loss_type", "bce")),
         focal_alpha=float(tr_node.get("focal_alpha", 0.25)),
         focal_gamma=float(tr_node.get("focal_gamma", 2.0)),
@@ -121,6 +122,7 @@ def main(cfg: DictConfig) -> None:
         pos_weight=float(tr_node.get("pos_weight", 1.0)),
         monitor=str(tr_node.get("monitor", "loss")),
         greater_is_better=bool(tr_node.get("greater_is_better", False)),
+        token_dropout_rate=float(tr_node.get("token_dropout_rate", 0.0)),
     )
 
     assemble = cfg.token_provider.assemble

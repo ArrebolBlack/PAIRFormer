@@ -54,7 +54,12 @@ class PairSetTransformerAggregator(nn.Module):
         self.num_seeds: int = int(p.get("num_seeds", 1))
         self.use_output_sab: bool = bool(p.get("use_output_sab", self.num_seeds > 1))
 
-        # ---- 2) input proj ----
+        # ---- 2) optional token normalization ----
+        self.use_token_norm: bool = bool(p.get("use_token_norm", False))
+        if self.use_token_norm:
+            self.token_norm = nn.LayerNorm(self.in_dim)
+
+        # ---- 3) input proj ----
         self.input_proj = nn.Linear(self.in_dim, d_model)
 
         # ---- 3) set transformer cfg ----
@@ -130,6 +135,10 @@ class PairSetTransformerAggregator(nn.Module):
             mask[empty, 0] = True
 
         x = x.to(dtype=self.input_proj.weight.dtype)
+
+        # optional: normalize raw tokens before projection
+        if self.use_token_norm:
+            x = self.token_norm(x)
 
         # input proj + zero-out pad tokens (important to avoid pad leaking via residuals)
         h = self.input_proj(x)                      # [B,L,D]

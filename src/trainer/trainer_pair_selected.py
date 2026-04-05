@@ -38,6 +38,9 @@ class PairSelectedTrainerConfig:
     scheduler_gamma: float = 0.1
     scheduler_factor: float = 0.2
     scheduler_patience: int = 5
+    warmup_steps: int = 0
+
+    token_dropout_rate: float = 0.0
 
     loss_type: str = "bce"
     focal_alpha: float = 0.25
@@ -104,6 +107,13 @@ class PairSelectedTrainer:
         self.sched_inst = self._build_scheduler(self.opt_inst, cfg.scheduler_inst) if self.opt_inst is not None else None
         self.amp_enabled = bool(cfg.use_amp and device.type == "cuda")
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp_enabled)
+
+        # warmup state
+        self.warmup_steps: int = max(0, int(getattr(cfg, "warmup_steps", 0)))
+        self._warmup_done: bool = (self.warmup_steps == 0)
+        self._base_lrs_agg: list = [pg["lr"] for pg in self.opt_agg.param_groups]
+
+        self.token_dropout_rate: float = float(getattr(cfg, "token_dropout_rate", 0.0))
 
         self.best_metric = -1e9 if cfg.greater_is_better else 1e9
         self.epoch = 0
@@ -236,6 +246,21 @@ class PairSelectedTrainer:
                 continue
 
             with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
+                # token dropout augmentation: randomly mask a fraction of tokens
+                if self.token_dropout_rate > 0.0:
+                    _B, _K = mask.shape
+                    keep_prob = 1.0 - self.token_dropout_rate
+                    rand = torch.rand(_B, _K, device=tokens.device)
+                    token_keep_mask = (rand < keep_prob).float().unsqueeze(-1)
+                    # at least keep 1 token per sample
+                    for i in range(_B):
+                        if token_keep_mask[i].sum() == 0:
+                            idx = torch.randint(0, tokens.shape[1], (1,), device=tokens.device)
+                            token_keep_mask[i, idx] = 1.0
+                    tokens = tokens * token_keep_mask
+                    # update attn_mask accordingly
+                    mask = mask & (token_keep_mask.squeeze(-1) > 0)
+
                 logits = self.agg_model(tokens, attn_mask=mask).view(-1)
                 loss = self.crit.compute(logits, y.view(-1).float())
                 loss_to_backward = loss / float(grad_accum)
@@ -264,6 +289,15 @@ class PairSelectedTrainer:
                 if self.opt_inst is not None:
                     self.opt_inst.zero_grad(set_to_none=True)
                 optimizer_steps += 1
+
+                # linear warmup: override LR during warmup phase
+                if not self._warmup_done:
+                    if optimizer_steps < self.warmup_steps:
+                        progress = optimizer_steps / max(1, self.warmup_steps)
+                        for pg, base_lr in zip(self.opt_agg.param_groups, self._base_lrs_agg):
+                            pg["lr"] = base_lr * progress
+                    else:
+                        self._warmup_done = True
 
             if self.cfg.log_every > 0 and self.global_step % int(self.cfg.log_every) == 0:
                 pbar.set_postfix({"loss": f"{total_loss / max(1, total_seen):.4f}"})
