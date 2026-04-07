@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Dict, List
 
@@ -40,7 +41,7 @@ def _forward_logits(model, x: torch.Tensor) -> torch.Tensor:
 
 
 def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False):
-    ds = WindowShardDataset(root, split=split, include_ignore=True, max_samples=max_samples)
+    ds = WindowShardDataset(root, split=split, include_ignore=False, max_samples=max_samples)
     use_chunk_aware = True
     if use_chunk_aware:
         batch_sampler = ChunkAwareBatchSampler(
@@ -71,6 +72,58 @@ def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_s
     return ds, ld
 
 
+def _aggregate_pair_logits(pair_np: np.ndarray, logits_np: np.ndarray, num_pairs: int) -> np.ndarray:
+    """Vectorized pair-level logit aggregation via max-pooling."""
+    pair_logits = np.full((num_pairs,), -1e9, dtype=np.float32)
+    valid = (pair_np >= 0) & (pair_np < num_pairs)
+    np.maximum.at(pair_logits, pair_np[valid], logits_np[valid])
+    return pair_logits
+
+
+def _build_lr_scheduler(optimizer, train_cfg, num_epochs):
+    """Build LR scheduler with optional linear warmup + cosine annealing."""
+    sched_name = str(train_cfg.get("scheduler", "none")).lower()
+    warmup_epochs = int(train_cfg.get("warmup_epochs", 0))
+    base_lr = float(train_cfg.get("lr", 5e-3))
+
+    def warmup_fn(epoch):
+        if warmup_epochs <= 0:
+            return 1.0
+        return min(1.0, epoch / warmup_epochs)
+
+    main_scheduler = None
+
+    if sched_name == "cosine":
+        t_max = int(train_cfg.get("scheduler_t_max", num_epochs))
+        eta_min = float(train_cfg.get("scheduler_eta_min", 1e-6))
+        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
+    elif sched_name == "step":
+        step_size = int(train_cfg.get("scheduler_step_size", 10))
+        gamma = float(train_cfg.get("scheduler_gamma", 0.1))
+        main_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+    elif sched_name == "plateau":
+        factor = float(train_cfg.get("scheduler_factor", 0.2))
+        patience = int(train_cfg.get("scheduler_patience", 5))
+        greater_is_better = bool(train_cfg.get("greater_is_better", True))
+        mode = "max" if greater_is_better else "min"
+        main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode=mode, factor=factor, patience=patience
+        )
+
+    if warmup_epochs > 0 and main_scheduler is not None:
+        warmup_sched = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_fn)
+        return optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_sched, main_scheduler],
+            milestones=[warmup_epochs],
+        )
+    elif warmup_epochs > 0:
+        return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_fn)
+    elif main_scheduler is not None:
+        return main_scheduler
+    return None
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     set_seeds(int(cfg.get("seed", 2020)))
@@ -95,9 +148,10 @@ def main(cfg: DictConfig) -> None:
     model = build_model(str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg).to(device)
     train_cfg = cfg.train
     criterion = BinaryClassificationLoss(train_cfg=train_cfg)
+    lr = float(train_cfg.get("lr", 5e-3))
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=float(train_cfg.get("lr", 5e-3)),
+        lr=lr,
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
     amp_enabled = bool(train_cfg.get("amp", False) and device.type == "cuda")
@@ -115,7 +169,14 @@ def main(cfg: DictConfig) -> None:
         best_metric = float(ckpt.get("best_metric", best_metric))
         print(f"[train_targetnet_shard] Resumed from {ckpt_path}")
 
-    for epoch in range(int(cfg.run.get("num_epochs", 30))):
+    num_epochs = int(cfg.run.get("num_epochs", 30))
+    val_interval = int(cfg.run.get("val_interval", 1))
+    scheduler = _build_lr_scheduler(optimizer, train_cfg, num_epochs)
+    if scheduler is not None:
+        print(f"[train_targetnet_shard] lr={lr}, scheduler={train_cfg.get('scheduler')}, warmup={train_cfg.get('warmup_epochs', 0)}")
+    print(f"[train_targetnet_shard] val_interval={val_interval}")
+
+    for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
         train_seen = 0
@@ -137,6 +198,29 @@ def main(cfg: DictConfig) -> None:
             train_loss += float(loss.item()) * bs
             train_seen += bs
 
+        # Step scheduler (per-epoch)
+        if scheduler is not None:
+            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                pass  # stepped after val
+            else:
+                scheduler.step()
+
+        # Always save last.pt
+        torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric}, ckpt_dir / "last.pt")
+
+        do_val = (val_interval <= 1) or ((epoch + 1) % val_interval == 0) or (epoch == 0) or (epoch == num_epochs - 1)
+        if not do_val:
+            current_lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"[Epoch {epoch+1}/{num_epochs}] "
+                f"train_loss={train_loss / max(1, train_seen):.4f} lr={current_lr:.6f} (val skipped)"
+            )
+            if wandb_run is not None:
+                import wandb  # type: ignore
+                wandb.log({"epoch": epoch + 1, "train/loss": train_loss / max(1, train_seen)})
+            continue
+
+        # --- Validation ---
         model.eval()
         val_loss = 0.0
         val_seen = 0
@@ -165,10 +249,7 @@ def main(cfg: DictConfig) -> None:
             logits_np = torch.cat(all_logits).numpy()
             labels_np = torch.cat(all_labels).numpy()
             pair_np = torch.cat(all_pair).numpy().astype("int64")
-            pair_logits = np.full((len(val_pair_labels),), -1e9, dtype=np.float32)
-            for pid, lg in zip(pair_np.tolist(), logits_np.tolist()):
-                if 0 <= int(pid) < len(val_pair_labels):
-                    pair_logits[int(pid)] = max(float(pair_logits[int(pid)]), float(lg))
+            pair_logits = _aggregate_pair_logits(pair_np, logits_np, len(val_pair_labels))
             metrics.update(
                 compute_metrics(
                     y_true=np.asarray(val_pair_labels, dtype=np.float32),
@@ -182,12 +263,17 @@ def main(cfg: DictConfig) -> None:
         if improved:
             best_metric = current
             torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric}, ckpt_dir / "best.pt")
-        torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric}, ckpt_dir / "last.pt")
+
+        # Step plateau scheduler with val metric
+        if scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(current)
+
+        current_lr = optimizer.param_groups[0]["lr"]
         print(
-            f"[Epoch {epoch+1}/{cfg.run.num_epochs}] "
+            f"[Epoch {epoch+1}/{num_epochs}] "
             f"train_loss={train_loss / max(1, train_seen):.4f} "
             f"val_loss={metrics['loss']:.4f} val_f1={float(metrics.get('f1', float('nan'))):.4f} "
-            f"val_pr_auc={float(metrics.get('pr_auc', float('nan'))):.4f}"
+            f"val_pr_auc={float(metrics.get('pr_auc', float('nan'))):.4f} lr={current_lr:.6f}"
         )
         if wandb_run is not None:
             import wandb  # type: ignore
@@ -218,10 +304,7 @@ def main(cfg: DictConfig) -> None:
         if all_logits:
             logits_np = torch.cat(all_logits).numpy()
             pair_np = torch.cat(all_pair).numpy().astype("int64")
-            pair_logits = np.full((len(test_pair_labels),), -1e9, dtype=np.float32)
-            for pid, lg in zip(pair_np.tolist(), logits_np.tolist()):
-                if 0 <= int(pid) < len(test_pair_labels):
-                    pair_logits[int(pid)] = max(float(pair_logits[int(pid)]), float(lg))
+            pair_logits = _aggregate_pair_logits(pair_np, logits_np, len(test_pair_labels))
             test_metrics = compute_metrics(
                 y_true=np.asarray(test_pair_labels, dtype=np.float32),
                 y_pred_raw=pair_logits,
