@@ -1,2 +1,4 @@
 *.pt filter=lfs diff=lfs merge=lfs -text
+data/MTI/MTI_pair_random_split.txt filter=lfs diff=lfs merge=lfs -text
 data/MTI/MTI_pair_random_split_orig.txt filter=lfs diff=lfs merge=lfs -text
+data/MTI/processed/*.tsv filter=lfs diff=lfs merge=lfs -text
