@@ -293,3 +293,126 @@ class SelectedPairCacheReader:
         if self.inst_logit is not None:
             out["inst_logit"] = torch.from_numpy(np.array(self.inst_logit[pid], dtype=np.float32, copy=True))
         return out
+
+
+class SelectedInstPairCacheShardWriter:
+    """Shard writer for ``selected_inst`` cache.
+
+    Writes a contiguous range of pairs ``[start_idx, end_idx)`` to a
+    standalone directory (typically on ``/dev/shm``).  The public API
+    mirrors :class:`SelectedInstPairCacheWriter` — callers pass the
+    *global* ``pair_id`` and the writer internally maps it to a local
+    row index ``pair_id - start_idx``.
+    """
+
+    def __init__(
+        self,
+        output_dir: str | Path,
+        *,
+        split: str,
+        shard_id: int,
+        num_shards: int,
+        start_idx: int,
+        end_idx: int,
+        kmax: int,
+        inst_emb_dim: int = 384,
+        has_inst_logit: bool = True,
+    ):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.shard_id = int(shard_id)
+        self.num_shards = int(num_shards)
+        self.start_idx = int(start_idx)
+        self.end_idx = int(end_idx)
+        shard_size = self.end_idx - self.start_idx
+
+        self._meta_dict: Dict[str, object] = {
+            "state": "building",
+            "split": str(split),
+            "cache_type": "selected_inst_shard",
+            "shard_id": self.shard_id,
+            "num_shards": self.num_shards,
+            "start_idx": self.start_idx,
+            "end_idx": self.end_idx,
+            "shard_size": shard_size,
+            "kmax": int(kmax),
+            "inst_emb_dim": int(inst_emb_dim),
+            "has_inst_logit": bool(has_inst_logit),
+        }
+
+        S = shard_size
+        K = int(kmax)
+        D = int(inst_emb_dim)
+
+        self.label = np.memmap(self.output_dir / "label.f32.mmap", mode="w+", dtype=np.float32, shape=(S,))
+        self.sel_len = np.memmap(self.output_dir / "sel_len.i16.mmap", mode="w+", dtype=np.int16, shape=(S,))
+        self.esa = np.memmap(self.output_dir / "esa.f16.mmap", mode="w+", dtype=np.float16, shape=(S, K))
+        self.pos = np.memmap(self.output_dir / "pos.f16.mmap", mode="w+", dtype=np.float16, shape=(S, K))
+        self.inst_emb = np.memmap(self.output_dir / "inst_emb.f16.mmap", mode="w+", dtype=np.float16, shape=(S, K, D))
+        self.inst_logit: Optional[np.memmap] = None
+        if has_inst_logit:
+            self.inst_logit = np.memmap(self.output_dir / "inst_logit.f16.mmap", mode="w+", dtype=np.float16, shape=(S, K))
+
+        self.label[:] = 0
+        self.sel_len[:] = 0
+        self.esa[:] = 0
+        self.pos[:] = 0
+        self.inst_emb[:] = 0
+        if self.inst_logit is not None:
+            self.inst_logit[:] = 0
+
+        self._write_meta()
+
+    # -- helpers -------------------------------------------------------------
+
+    def _write_meta(self) -> None:
+        with open(self.output_dir / "meta.json", "w") as f:
+            json.dump(self._meta_dict, f, indent=2, sort_keys=True)
+
+    def _local(self, pair_id: int) -> int:
+        local = int(pair_id) - self.start_idx
+        if not (0 <= local < self.end_idx - self.start_idx):
+            raise IndexError(
+                f"pair_id={pair_id} out of shard range [{self.start_idx}, {self.end_idx})"
+            )
+        return local
+
+    # -- public API ----------------------------------------------------------
+
+    def write_pair(
+        self,
+        pair_id: int,
+        *,
+        inst_emb: torch.Tensor,
+        inst_logit: Optional[torch.Tensor],
+        esa: torch.Tensor,
+        pos: torch.Tensor,
+        label: float,
+        sel_len: int,
+    ) -> None:
+        lid = self._local(pair_id)
+        n = int(sel_len)
+        self.sel_len[lid] = n
+        self.label[lid] = float(label)
+        if n <= 0:
+            return
+
+        self.inst_emb[lid, :n] = inst_emb[:n].detach().cpu().numpy().astype(np.float16, copy=False)
+        self.esa[lid, :n] = esa[:n].detach().cpu().numpy().astype(np.float16, copy=False)
+        self.pos[lid, :n] = pos[:n].detach().cpu().numpy().astype(np.float16, copy=False)
+        if self.inst_logit is not None and inst_logit is not None:
+            self.inst_logit[lid, :n] = inst_logit[:n].detach().cpu().numpy().astype(np.float16, copy=False)
+
+    def flush(self) -> None:
+        self.label.flush()
+        self.sel_len.flush()
+        self.esa.flush()
+        self.pos.flush()
+        self.inst_emb.flush()
+        if self.inst_logit is not None:
+            self.inst_logit.flush()
+
+    def set_ready(self) -> None:
+        self.flush()
+        self._meta_dict["state"] = "ready"
+        self._write_meta()

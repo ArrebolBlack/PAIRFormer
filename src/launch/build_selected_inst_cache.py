@@ -7,10 +7,10 @@ import hydra
 import torch
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from src.config.data_config import DataConfig
-from src.data.selected_pair_cache import SelectedInstPairCacheWriter
+from src.data.selected_pair_cache import SelectedInstPairCacheWriter, SelectedInstPairCacheShardWriter
 from src.data.selected_pair_collate import selected_pair_collate
 from src.data.selected_pair_dataset import SelectedPairDataset
 from src.em.cheap_runner import load_ckpt_into_model
@@ -39,6 +39,17 @@ def _infer_inst_emb_dim(model: torch.nn.Module, fallback: int) -> int:
     return int(fallback)
 
 
+def _compute_shard_range(num_pairs: int, shard_id: int, num_shards: int):
+    """Return ``(start_idx, end_idx)`` for *shard_id* when splitting
+    *num_pairs* evenly into *num_shards* shards.
+    """
+    size = num_pairs // num_shards
+    remainder = num_pairs % num_shards
+    start = shard_id * size + min(shard_id, remainder)
+    end = start + size + (1 if shard_id < remainder else 0)
+    return start, end
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed = int(cfg.get("seed", 2020))
@@ -51,14 +62,33 @@ def main(cfg: DictConfig) -> None:
     batch_size = int(cfg.run.get("batch_size", 32))
     num_workers = int(cfg.run.get("num_workers", 4))
 
+    # --- sharding params (default: no sharding) ---
+    shard_id = int(cfg.run.get("shard_id", 0))
+    num_shards = int(cfg.run.get("num_shards", 1))
+    shard_output_dir = cfg.run.get("shard_output_dir", None)
+
     src_ds = SelectedPairDataset(
         cache_root,
         split=split,
         cache_type="selected_raw",
         max_pairs=(None if max_pairs is None else int(max_pairs)),
     )
-    src_loader = DataLoader(
-        src_ds,
+    num_pairs = len(src_ds)
+
+    # When sharding, create a Subset so the DataLoader only iterates
+    # over pairs belonging to this shard.
+    if num_shards > 1:
+        start_idx, end_idx = _compute_shard_range(num_pairs, shard_id, num_shards)
+        shard_indices = list(range(start_idx, end_idx))
+        ds_to_load = Subset(src_ds, shard_indices)
+        effective_num_pairs = end_idx - start_idx
+    else:
+        start_idx, end_idx = 0, num_pairs
+        ds_to_load = src_ds
+        effective_num_pairs = num_pairs
+
+    loader = DataLoader(
+        ds_to_load,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -68,7 +98,6 @@ def main(cfg: DictConfig) -> None:
         drop_last=False,
     )
 
-    num_pairs = len(src_ds)
     kmax = int(src_ds.reader.meta.kmax)
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     inst_cfg = cfg.instance_model
@@ -79,25 +108,43 @@ def main(cfg: DictConfig) -> None:
     load_ckpt_into_model(instance_model, inst_ckpt, device=device, use_ema_shadow=False)
     instance_model.eval()
     inst_emb_dim = _infer_inst_emb_dim(instance_model, int(cfg.run.get("inst_emb_dim", 384)))
-    writer = SelectedInstPairCacheWriter(
-        cache_root,
-        split=split,
-        num_pairs=num_pairs,
-        kmax=kmax,
-        inst_emb_dim=inst_emb_dim,
-        has_inst_logit=bool(cfg.run.get("has_inst_logit", True)),
-    )
+
+    # --- create writer ---
+    if num_shards > 1:
+        if shard_output_dir is None:
+            raise ValueError("shard_output_dir must be set when num_shards > 1")
+        writer = SelectedInstPairCacheShardWriter(
+            shard_output_dir,
+            split=split,
+            shard_id=shard_id,
+            num_shards=num_shards,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            kmax=kmax,
+            inst_emb_dim=inst_emb_dim,
+            has_inst_logit=bool(cfg.run.get("has_inst_logit", True)),
+        )
+    else:
+        writer = SelectedInstPairCacheWriter(  # type: ignore[assignment]
+            cache_root,
+            split=split,
+            num_pairs=num_pairs,
+            kmax=kmax,
+            inst_emb_dim=inst_emb_dim,
+            has_inst_logit=bool(cfg.run.get("has_inst_logit", True)),
+        )
 
     print(
-        f"[build_selected_inst_cache] split={split} pairs={num_pairs} "
+        f"[build_selected_inst_cache] split={split} pairs={effective_num_pairs} "
         f"batch_size={batch_size} cache_root={cache_root}"
+        + (f" shard={shard_id}/{num_shards} [{start_idx},{end_idx})" if num_shards > 1 else "")
     )
 
     pair_seen = 0
     total_valid = 0
     t0 = time.time()
     with torch.no_grad():
-        for batch_idx, batch in enumerate(src_loader):
+        for batch_idx, batch in enumerate(loader):
             pair_id = batch["pair_id"]
             X = batch["X"].to(device, non_blocking=True).float()
             esa = batch["esa"].to(device, non_blocking=True)
@@ -148,7 +195,7 @@ def main(cfg: DictConfig) -> None:
 
             if pair_seen <= 5 or pair_seen % 1000 == 0:
                 print(
-                    f"[build_selected_inst_cache] pairs_written={pair_seen}/{num_pairs} "
+                    f"[build_selected_inst_cache] pairs_written={pair_seen}/{effective_num_pairs} "
                     f"batch_idx={batch_idx} total_valid={total_valid}"
                 )
 

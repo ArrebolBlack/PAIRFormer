@@ -8,6 +8,8 @@ import torch
 from torch import optim
 from tqdm import tqdm
 
+from torch.optim.swa_utils import AveragedModel
+
 from src.evaluator.metrics import compute_metrics
 from src.models.extractors import get_embedding_and_logit
 from src.trainer.loss import BinaryClassificationLoss
@@ -54,6 +56,11 @@ class PairSelectedTrainerConfig:
 
     monitor: str = "loss"
     greater_is_better: bool = False
+
+    # SWA (Stochastic Weight Averaging)
+    swa_enabled: bool = False
+    swa_start_epoch: int = 70
+    swa_lr: float = 1e-5
 
 
 class PairSelectedTrainer:
@@ -114,6 +121,16 @@ class PairSelectedTrainer:
         self._base_lrs_agg: list = [pg["lr"] for pg in self.opt_agg.param_groups]
 
         self.token_dropout_rate: float = float(getattr(cfg, "token_dropout_rate", 0.0))
+
+        # SWA
+        self.swa_enabled: bool = bool(getattr(cfg, "swa_enabled", False))
+        self.swa_start_epoch: int = int(getattr(cfg, "swa_start_epoch", 70))
+        self.swa_lr: float = float(getattr(cfg, "swa_lr", 1e-5))
+        self.swa_model: Optional[AveragedModel] = None
+        self.swa_n_updates: int = 0
+        if self.swa_enabled:
+            self.swa_model = AveragedModel(self.agg_model)
+            self.swa_model.to(device)
 
         self.best_metric = -1e9 if cfg.greater_is_better else 1e9
         self.epoch = 0
@@ -299,6 +316,14 @@ class PairSelectedTrainer:
                     else:
                         self._warmup_done = True
 
+                # SWA: constant LR + update averaged model
+                if self.swa_enabled and self.epoch >= self.swa_start_epoch:
+                    for pg in self.opt_agg.param_groups:
+                        pg["lr"] = self.swa_lr
+                    if self.swa_model is not None:
+                        self.swa_model.update_parameters(self.agg_model)
+                        self.swa_n_updates += 1
+
             if self.cfg.log_every > 0 and self.global_step % int(self.cfg.log_every) == 0:
                 pbar.set_postfix({"loss": f"{total_loss / max(1, total_seen):.4f}"})
 
@@ -311,7 +336,15 @@ class PairSelectedTrainer:
 
     @torch.no_grad()
     def validate_one_epoch(self, loader: Any) -> Dict[str, float]:
-        self.agg_model.eval()
+        # Use SWA model for validation if SWA is active and has been updated
+        use_swa = (
+            self.swa_enabled
+            and self.swa_model is not None
+            and self.epoch >= self.swa_start_epoch
+            and self.swa_n_updates > 0
+        )
+        eval_model = self.swa_model if use_swa else self.agg_model
+        eval_model.eval()
         if self.instance_model is not None:
             self.instance_model.eval()
 
@@ -320,7 +353,8 @@ class PairSelectedTrainer:
         all_logits = []
         all_labels = []
 
-        for batch in tqdm(loader, desc=f"PairSelected val epoch {self.epoch}"):
+        tag = "SWA" if use_swa else "val"
+        for batch in tqdm(loader, desc=f"PairSelected {tag} epoch {self.epoch}"):
             out = self._build_tokens(batch)
             tokens = out["tokens"]
             y = out["y_pair"]
@@ -328,7 +362,7 @@ class PairSelectedTrainer:
             if tokens is None:
                 continue
 
-            logits = self.agg_model(tokens, attn_mask=mask).view(-1)
+            logits = eval_model(tokens, attn_mask=mask).view(-1)
             loss = self.crit.compute(logits, y.view(-1).float())
 
             bs = int(y.shape[0])
@@ -401,24 +435,25 @@ class PairSelectedTrainer:
         return self.best_metric != old
 
     def save_checkpoint(self, path: str) -> None:
-        torch.save(
-            {
-                "agg_state_dict": self.agg_model.state_dict(),
-                "inst_state_dict": self.instance_model.state_dict() if self.instance_model is not None else None,
-                "opt_agg": self.opt_agg.state_dict(),
-                "opt_inst": self.opt_inst.state_dict() if self.opt_inst is not None else None,
-                "sched_agg": None if self.sched_agg is None else self.sched_agg.state_dict(),
-                "sched_inst": None if self.sched_inst is None else self.sched_inst.state_dict(),
-                "scaler": None if not self.amp_enabled else self.scaler.state_dict(),
-                "state": {
-                    "epoch": self.epoch,
-                    "global_step": self.global_step,
-                    "best_metric": self.best_metric,
-                },
-                "cfg": self.cfg.__dict__,
+        ckpt = {
+            "agg_state_dict": self.agg_model.state_dict(),
+            "inst_state_dict": self.instance_model.state_dict() if self.instance_model is not None else None,
+            "opt_agg": self.opt_agg.state_dict(),
+            "opt_inst": self.opt_inst.state_dict() if self.opt_inst is not None else None,
+            "sched_agg": None if self.sched_agg is None else self.sched_agg.state_dict(),
+            "sched_inst": None if self.sched_inst is None else self.sched_inst.state_dict(),
+            "scaler": None if not self.amp_enabled else self.scaler.state_dict(),
+            "state": {
+                "epoch": self.epoch,
+                "global_step": self.global_step,
+                "best_metric": self.best_metric,
             },
-            path,
-        )
+            "cfg": self.cfg.__dict__,
+        }
+        if self.swa_model is not None:
+            ckpt["swa_state_dict"] = self.swa_model.state_dict()
+            ckpt["swa_n_updates"] = self.swa_n_updates
+        torch.save(ckpt, path)
 
     def load_checkpoint(self, path: str, *, map_location: Optional[torch.device] = None) -> None:
         ckpt = torch.load(path, map_location=("cpu" if map_location is None else map_location))
@@ -442,6 +477,11 @@ class PairSelectedTrainer:
 
         if self.amp_enabled and ckpt.get("scaler", None) is not None:
             self.scaler.load_state_dict(ckpt["scaler"])
+
+        # Restore SWA state
+        if self.swa_model is not None and ckpt.get("swa_state_dict", None) is not None:
+            self.swa_model.load_state_dict(ckpt["swa_state_dict"])
+        self.swa_n_updates = int(ckpt.get("swa_n_updates", 0))
 
         st = ckpt.get("state", None)
         if not isinstance(st, dict):

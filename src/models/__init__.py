@@ -11,3 +11,6 @@ from . import PairTransformerAggregator
 from . import pair_maxpool_cache  # noqa: F401
 from . import CheapCTSNet
 from . import PairSetTransformerAggregator
+from . import PairCNNAggregator          # noqa: F401
+from . import PairGNNAggregator          # noqa: F401
+from . import PairGNNMoEAggregator       # noqa: F401

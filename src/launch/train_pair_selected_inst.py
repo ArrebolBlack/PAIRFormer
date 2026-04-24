@@ -123,6 +123,9 @@ def main(cfg: DictConfig) -> None:
         monitor=str(tr_node.get("monitor", "loss")),
         greater_is_better=bool(tr_node.get("greater_is_better", False)),
         token_dropout_rate=float(tr_node.get("token_dropout_rate", 0.0)),
+        swa_enabled=bool(tr_node.get("swa_enabled", False)),
+        swa_start_epoch=int(tr_node.get("swa_start_epoch", 70)),
+        swa_lr=float(tr_node.get("swa_lr", 1e-5)),
     )
 
     assemble = cfg.token_provider.assemble
