@@ -19,6 +19,9 @@ data:
     test: data/MTI/MTI_pair_random_split.txt
   with_esa: true
   split_column: 6
+  col_mirna_seq: 4
+  col_mrna_seq: 2
+  col_label: 5
   split_map:
     train: train
     val: val
@@ -79,7 +82,7 @@ em:
     barrier_after_refresh: true
     rebuild_train_loader_after_selection_refresh: true
     verbose: true
-  inst_emb_dim: 384
+  inst_emb_dim: 1536
   inst_version: inst_v0
   cheap_emb_dim: 64
   cheap_version: cheap_v0
@@ -121,7 +124,7 @@ em:
     candidate_pool_seed: ${seed}
   policy:
     warmup_epochs: 40
-    instance_mode: "\u201Chybrid\u201D"
+    instance_mode: hybrid
     instance_update_every_epochs: 0
     instance_update_steps: 0
     cheap_mode: cached
@@ -164,23 +167,23 @@ instance_model:
   name: targetnet_optimized
   arch: TargetNet_Optimized
   num_channels:
-  - 16
-  - 16
-  - 32
-  - 32
+  - 64
+  - 64
+  - 128
+  - 128
   num_blocks:
-  - 1
-  - 1
-  - 1
-  - 1
+  - 3
+  - 3
+  - 3
+  - 3
   pool_size: 3
   stem_kernel_size: 5
   block_kernel_size: 3
   skip_connection: true
   dropout: 0.5
-  multi_scale: false
+  multi_scale: true
   se_type: basic
-  use_bn: false
+  use_bn: true
   se_reduction: 8
   target_output_length: 12
   arch_variant: opt4_tiny

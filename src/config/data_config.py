@@ -64,6 +64,13 @@ class DataConfig:
     split_column: Optional[int] = None
     split_map: Optional[Dict[str, str]] = None
 
+    # Column indices for TSV data (0-based).
+    # miRAW/deepTargetPro format: col1=miRNA_seq, col3=mRNA_seq, col4=label
+    # MTI format: col2=mRNA_seq, col4=miRNA_seq, col5=label
+    col_mirna_seq: int = 1
+    col_mrna_seq: int = 3
+    col_label: int = 4
+
     # ---------- 工厂方法：从 OmegaConf / dict 构造 ---------- #
     @classmethod
     def from_omegaconf(cls, conf: Any, idx: str = "data_config") -> "DataConfig":
@@ -98,6 +105,9 @@ class DataConfig:
             idx=idx,
             split_column=split_column,
             split_map=split_map,
+            col_mirna_seq=int(conf.get("col_mirna_seq", 1)),
+            col_mrna_seq=int(conf.get("col_mrna_seq", 3)),
+            col_label=int(conf.get("col_label", 4)),
         )
 
 

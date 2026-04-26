@@ -21,6 +21,9 @@ data:
     test: data/MTI/MTI_pair_random_split.txt
   with_esa: true
   split_column: 6
+  col_mirna_seq: 4
+  col_mrna_seq: 2
+  col_label: 5
   split_map:
     train: train
     val: val

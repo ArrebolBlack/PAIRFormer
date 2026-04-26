@@ -294,9 +294,11 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
         if len(tokens) < 5:
             continue
 
-        mirna_seq, mrna_seq = tokens[1], tokens[3]
+        # Column indices from DataConfig (default: miRAW format col1=mirna, col3=mrna, col4=label)
+        mirna_seq = tokens[data_cfg.col_mirna_seq]
+        mrna_seq = tokens[data_cfg.col_mrna_seq]
         try:
-            label = float(tokens[4])
+            label = float(tokens[data_cfg.col_label])
         except (ValueError, TypeError):
             label = 0.0
 
