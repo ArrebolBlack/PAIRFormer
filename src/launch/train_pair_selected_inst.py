@@ -55,12 +55,13 @@ def _resolve_ckpt(path_str: str | None, orig_cwd: Path | None) -> Path | None:
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     # ---- DDP setup ----
-    if is_ddp():
-        rank, local_rank, world_size = setup_ddp()
+    # Must call setup_ddp() unconditionally — is_ddp() checks dist.is_initialized()
+    # which is False before setup_ddp() is called (chicken-and-egg).
+    rank, local_rank, world_size = setup_ddp()
+    if world_size > 1:
         print_on_rank0(f"[train_pair_selected_inst] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}")
         device = torch.device(f"cuda:{local_rank}")
     else:
-        rank, local_rank, world_size = 0, 0, 1
         print("[train_pair_selected_inst] Single GPU mode")
         device_str = str(cfg.get("device", "cuda")) if torch.cuda.is_available() else "cpu"
         if device_str == "cuda":
