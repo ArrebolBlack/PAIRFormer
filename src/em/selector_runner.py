@@ -42,6 +42,10 @@ class SelectionCacheBuildConfig:
     candidate_pool_topn_ratio: float = 1.0     # "topn" or "topn_plus_rand"
     candidate_pool_seed: int = 2020
 
+    # DDP sharding
+    rank: int = 0
+    world_size: int = 1
+
     def __post_init__(self):
         if self.splits is None:
             self.splits = ["train", "val"]
@@ -179,8 +183,12 @@ class SelectionCacheRunner:
         sel_version: str,
         cfg: SelectionCacheBuildConfig,
     ) -> None:
+        from src.utils.ddp import barrier as ddp_barrier
+
+        rank = int(cfg.rank)
+        world_size = int(cfg.world_size)
+
         # 1) load dataset (only for PairIndex + meta gathering)
-        #    NOTE: loader returned is unused; keep args minimal & deterministic
         ds, _ = build_dataset_and_loader(
             data_cfg=self.data_cfg,
             split_idx=split,
@@ -201,11 +209,10 @@ class SelectionCacheRunner:
         num_pairs = int(ds.num_pairs)
         total_cts_ds = int(len(ds))
 
-        # 2) read cheap meta (source of truth for cheap_version_used + shapes)
+        # 2) read cheap meta
         cheap_meta = _load_cheap_meta(self.em_cache_root, split)
 
         if cheap_meta.get("state", None) != "ready":
-            # 你是“停机式串行”，建议严格要求 ready
             raise RuntimeError(
                 f"[SelectorRunner] cheap cache not ready for split={split}: state={cheap_meta.get('state')}. "
                 f"Run cheap step first."
@@ -223,7 +230,6 @@ class SelectionCacheRunner:
                 f"dataset={total_cts_ds} vs cheap_cache={total_cts_cache}"
             )
 
-        # Axis-SimHash requires emb_dim=64 (per your selector spec)
         if selector.cfg.use_hash_dedup and emb_dim_cache != 64:
             raise RuntimeError(
                 f"[SelectorRunner] Selector requires cheap_emb dim=64 for Axis-SimHash, got {emb_dim_cache}. "
@@ -249,29 +255,54 @@ class SelectionCacheRunner:
             require_ready=True,
         )
 
-        store.create_or_open_selection(
-            num_pairs=num_pairs,
-            kmax=int(kmax),
-            sel_version=str(sel_version),
-            cheap_version_used=str(cheap_version_used),
-            overwrite=bool(cfg.overwrite),
-        )
+        # DDP: rank 0 creates selection memmap, others wait then open
+        if world_size > 1:
+            if rank == 0:
+                store.create_or_open_selection(
+                    num_pairs=num_pairs,
+                    kmax=int(kmax),
+                    sel_version=str(sel_version),
+                    cheap_version_used=str(cheap_version_used),
+                    overwrite=bool(cfg.overwrite),
+                )
+            ddp_barrier()
+            if rank != 0:
+                store.create_or_open_selection(
+                    num_pairs=num_pairs,
+                    kmax=int(kmax),
+                    sel_version=str(sel_version),
+                    cheap_version_used=str(cheap_version_used),
+                    overwrite=False,
+                )
+        else:
+            store.create_or_open_selection(
+                num_pairs=num_pairs,
+                kmax=int(kmax),
+                sel_version=str(sel_version),
+                cheap_version_used=str(cheap_version_used),
+                overwrite=bool(cfg.overwrite),
+            )
 
         if (not cfg.overwrite) and (store.sel_meta is not None) and (store.sel_meta.state == "ready") and cfg.skip_if_ready:
             store.assert_version_consistent()
             print(f"[SelectorRunner] SKIP split={split} (already ready).")
             return
 
-        # mode: only train split can use exploration
-        mode = "train" if split == "train" else "eval"
+        # 4) Compute shard range for pair_ids
+        pair_start = (rank * num_pairs) // world_size
+        pair_end = ((rank + 1) * num_pairs) // world_size
+        shard_size = pair_end - pair_start
 
-        # 4) main loop: per pair selection
+        if world_size > 1:
+            print(f"[SelectorRunner:{split}] rank={rank}/{world_size} pair_shard=[{pair_start},{pair_end}) ({shard_size}/{num_pairs})")
+
+        mode = "train" if split == "train" else "eval"
         bs_pair = max(1, int(cfg.pair_batch_size))
         epoch = int(cfg.epoch)
 
-        it = range(num_pairs)
-        if cfg.progress_bar:
-            it = tqdm(it, desc=f"[SelectorRunner:{split}]", dynamic_ncols=True)
+        it = range(pair_start, pair_end)
+        if cfg.progress_bar and (world_size == 1 or rank == 0):
+            it = tqdm(it, desc=f"[SelectorRunner:{split}:r{rank}]", dynamic_ncols=True)
 
         pair_ids_buf: List[int] = []
         uids_list: List[torch.Tensor] = []
@@ -279,19 +310,9 @@ class SelectionCacheRunner:
         logit_list: List[torch.Tensor] = []
         emb_list: List[Optional[torch.Tensor]] = []
 
-
-        '''
-        selector 优化1
-        把 selection 写入从 fancy indexing 改为切片写入
-        几乎没变化
-        去掉 torch.tensor(pair_ids_buf) 的构造与再次转 numpy
-        避免 fancy indexing 写 memmap（通常比切片慢）
-        让 pair_batch_size 的影响更“真实”（大 batch 写入更有效率）
-        '''
         def _flush_batch() -> None:
             if not pair_ids_buf:
                 return
-            # selector outputs on CPU:
             sel_uids_b, sel_len_b = selector.forward_batch(
                 uids_list=uids_list,
                 pos_list=pos_list,
@@ -301,21 +322,12 @@ class SelectionCacheRunner:
                 epoch=epoch,
                 pair_ids=pair_ids_buf,
             )
-            # store.write_selection(
-            #     pair_ids=torch.tensor(pair_ids_buf, dtype=torch.long, device="cpu"),
-            #     sel_uids=sel_uids_b,   # [B,kmax]
-            #     sel_len=sel_len_b,     # [B]
-            # )
 
-            # pair_ids_buf 在这里是连续递增的
             start = pair_ids_buf[0]
-            # （可选）做一次断言，确保连续，debug 期用
-            # assert pair_ids_buf[-1] == start + len(pair_ids_buf) - 1
-
             store.write_selection_slice(
                 start_pair_id=start,
-                sel_uids=sel_uids_b,   # [B,kmax]
-                sel_len=sel_len_b,     # [B]
+                sel_uids=sel_uids_b,
+                sel_len=sel_len_b,
             )
 
             pair_ids_buf.clear()
@@ -324,28 +336,20 @@ class SelectionCacheRunner:
             logit_list.clear()
             emb_list.clear()
 
-
         for pair_id in it:
             s, e = ds.get_pair_slice(int(pair_id))
             n = int(e - s)
 
             if n <= 0:
-                # empty bag
                 uids = torch.empty((0,), dtype=torch.long, device="cpu")
                 pos = torch.empty((0,), dtype=torch.float32, device="cpu")
                 cheap_logit = torch.empty((0,), dtype=torch.float32, device="cpu")
                 cheap_emb = torch.empty((0, emb_dim_cache), dtype=torch.float16, device="cpu")
             else:
-                # uids are global CTS ids in [s,e)
                 uids = torch.arange(int(s), int(e), dtype=torch.long, device="cpu")
-
-                # cheap outputs (CPU)
                 cheap_logit, cheap_emb, _ = store.read_cheap_slice(int(s), int(e))
                 cheap_logit = cheap_logit.view(-1).to(dtype=torch.float32, device="cpu")
-                # keep emb as float16 (hash sign only), reduce memory
                 cheap_emb = cheap_emb.to(device="cpu") if cheap_emb is not None else None
-
-                # meta: pos (CPU)
                 meta = ds.batch_gather_by_uid(uids, fields=("pos",))
                 pos = meta["pos"].view(-1).to(dtype=torch.float32, device="cpu")
 
@@ -362,7 +366,6 @@ class SelectionCacheRunner:
                     pair_id=int(pair_id),
                 )
 
-
             pair_ids_buf.append(int(pair_id))
             uids_list.append(uids)
             pos_list.append(pos)
@@ -374,9 +377,14 @@ class SelectionCacheRunner:
 
         _flush_batch()
 
+        # DDP: every rank flushes, barrier, then rank 0 finalizes
         store.flush_selection()
-        store.set_selection_ready()
-        store.assert_version_consistent()
+        if world_size > 1:
+            ddp_barrier()
+
+        if rank == 0:
+            store.set_selection_ready()
+            store.assert_version_consistent()
 
         out_dir = Path(self.em_cache_root) / "em_cache" / split / "selection"
-        print(f"[SelectorRunner] DONE split={split} num_pairs={num_pairs} -> {out_dir}")
+        print(f"[SelectorRunner:{split}] rank={rank} DONE pairs=[{pair_start},{pair_end}) -> {out_dir}")

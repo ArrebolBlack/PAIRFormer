@@ -9,10 +9,17 @@ from torch import optim
 from tqdm import tqdm
 
 from torch.optim.swa_utils import AveragedModel
+import torch.nn as nn
 
 from src.evaluator.metrics import compute_metrics
 from src.models.extractors import get_embedding_and_logit
 from src.trainer.loss import BinaryClassificationLoss
+
+# DDP imports
+from src.utils.ddp import (
+    is_ddp, is_rank0, get_rank, get_world_size,
+    all_reduce_dict, save_on_rank0, print_on_rank0,
+)
 
 
 @dataclass
@@ -77,10 +84,26 @@ class PairSelectedTrainer:
         use_esa: bool = True,
         use_pos: bool = True,
         train_instance_model: bool = True,
+        local_rank: int = 0,
     ):
         self.cfg = cfg
         self.device = device
-        self.agg_model = agg_model.to(device)
+        self.local_rank = local_rank
+
+        # Wrap agg_model with DDP if applicable
+        if is_ddp():
+            self.agg_model = agg_model.to(device)
+            ddp_kwargs = {}
+            if device.type == "cuda":
+                ddp_kwargs["device_ids"] = [local_rank]
+                ddp_kwargs["output_device"] = local_rank
+            self.agg_model_ddp = nn.parallel.DistributedDataParallel(
+                self.agg_model, **ddp_kwargs,
+            )
+        else:
+            self.agg_model = agg_model.to(device)
+            self.agg_model_ddp = self.agg_model
+
         self.instance_model = instance_model.to(device) if instance_model is not None else None
         self.task_cfg = task_cfg
 
@@ -278,7 +301,7 @@ class PairSelectedTrainer:
                     # update attn_mask accordingly
                     mask = mask & (token_keep_mask.squeeze(-1) > 0)
 
-                logits = self.agg_model(tokens, attn_mask=mask).view(-1)
+                logits = self.agg_model_ddp(tokens, attn_mask=mask).view(-1)
                 loss = self.crit.compute(logits, y.view(-1).float())
                 loss_to_backward = loss / float(grad_accum)
 
@@ -343,7 +366,13 @@ class PairSelectedTrainer:
             and self.epoch >= self.swa_start_epoch
             and self.swa_n_updates > 0
         )
-        eval_model = self.swa_model if use_swa else self.agg_model
+        # In DDP, use the DDP wrapper's module for SWA
+        if use_swa:
+            # AveragedModel wraps the original model, so use it directly
+            eval_model = self.swa_model
+        else:
+            # Use DDP wrapper for evaluation (it's safe in eval mode)
+            eval_model = self.agg_model_ddp
         eval_model.eval()
         if self.instance_model is not None:
             self.instance_model.eval()
@@ -373,19 +402,37 @@ class PairSelectedTrainer:
 
         metrics: Dict[str, float] = {"loss": total_loss / max(1, total_seen)}
         if all_labels:
-            logits_np = torch.cat(all_logits).numpy()
-            labels_np = torch.cat(all_labels).numpy()
-            cm = compute_metrics(labels_np, logits_np, self.task_cfg)
-            for k, v in cm.items():
-                try:
-                    metrics[k] = float(v)
-                except Exception:
-                    pass
+            # Gather all logits/labels from all ranks
+            if is_ddp():
+                from src.utils.ddp import gather_tensors
+                all_logits = gather_tensors(torch.cat(all_logits))
+                all_labels = gather_tensors(torch.cat(all_labels))
+                # Only process on rank 0
+                if is_rank0():
+                    logits_np = all_logits.numpy()
+                    labels_np = all_labels.numpy()
+                    cm = compute_metrics(labels_np, logits_np, self.task_cfg)
+                    for k, v in cm.items():
+                        try:
+                            metrics[k] = float(v)
+                        except Exception:
+                            pass
+            else:
+                logits_np = torch.cat(all_logits).numpy()
+                labels_np = torch.cat(all_labels).numpy()
+                cm = compute_metrics(labels_np, logits_np, self.task_cfg)
+                for k, v in cm.items():
+                    try:
+                        metrics[k] = float(v)
+                    except Exception:
+                        pass
+
         return metrics
 
     @torch.no_grad()
     def predict(self, loader: Any) -> Dict[str, Any]:
-        self.agg_model.eval()
+        # Use DDP wrapper for inference
+        self.agg_model_ddp.eval()
         if self.instance_model is not None:
             self.instance_model.eval()
 
@@ -402,7 +449,7 @@ class PairSelectedTrainer:
             if tokens is None:
                 continue
 
-            logits = self.agg_model(tokens, attn_mask=mask).view(-1)
+            logits = self.agg_model_ddp(tokens, attn_mask=mask).view(-1)
             all_logits.append(logits.detach().cpu())
             all_labels.append(y.detach().cpu())
             all_pair_id.append(pair_id.detach().cpu())
@@ -435,14 +482,30 @@ class PairSelectedTrainer:
         return self.best_metric != old
 
     def save_checkpoint(self, path: str) -> None:
+        # Only save on rank 0
+        save_on_rank0(
+            self._save_checkpoint_impl,
+            path,
+        )
+
+    def _save_checkpoint_impl(self, path: str) -> None:
+        # Save raw model (not DDP wrapper)
+        agg_state_dict = self.agg_model.state_dict()
+        inst_state_dict = self.instance_model.state_dict() if self.instance_model is not None else None
+        opt_agg = self.opt_agg.state_dict()
+        opt_inst = self.opt_inst.state_dict() if self.opt_inst is not None else None
+        sched_agg = None if self.sched_agg is None else self.sched_agg.state_dict()
+        sched_inst = None if self.sched_inst is None else self.sched_inst.state_dict()
+        scaler = None if not self.amp_enabled else self.scaler.state_dict()
+
         ckpt = {
-            "agg_state_dict": self.agg_model.state_dict(),
-            "inst_state_dict": self.instance_model.state_dict() if self.instance_model is not None else None,
-            "opt_agg": self.opt_agg.state_dict(),
-            "opt_inst": self.opt_inst.state_dict() if self.opt_inst is not None else None,
-            "sched_agg": None if self.sched_agg is None else self.sched_agg.state_dict(),
-            "sched_inst": None if self.sched_inst is None else self.sched_inst.state_dict(),
-            "scaler": None if not self.amp_enabled else self.scaler.state_dict(),
+            "agg_state_dict": agg_state_dict,
+            "inst_state_dict": inst_state_dict,
+            "opt_agg": opt_agg,
+            "opt_inst": opt_inst,
+            "sched_agg": sched_agg,
+            "sched_inst": sched_inst,
+            "scaler": scaler,
             "state": {
                 "epoch": self.epoch,
                 "global_step": self.global_step,
@@ -457,24 +520,39 @@ class PairSelectedTrainer:
 
     def load_checkpoint(self, path: str, *, map_location: Optional[torch.device] = None) -> None:
         ckpt = torch.load(path, map_location=("cpu" if map_location is None else map_location))
+
+        # Helper to strip DDP wrapper prefix
+        def strip_ddp_prefix(k: str) -> str:
+            for prefix in ("module.",):
+                if k.startswith(prefix):
+                    return k[len(prefix):]
+            return k
+
+        # Process agg_state_dict
         agg_sd = ckpt.get("agg_state_dict", None)
         if isinstance(agg_sd, dict):
-            self.agg_model.load_state_dict(agg_sd, strict=False)
+            agg_sd_cleaned = {strip_ddp_prefix(k): v for k, v in agg_sd.items()}
+            self.agg_model.load_state_dict(agg_sd_cleaned, strict=False)
 
+        # Process inst_state_dict
         inst_sd = ckpt.get("inst_state_dict", None)
         if self.instance_model is not None and isinstance(inst_sd, dict):
-            self.instance_model.load_state_dict(inst_sd, strict=False)
+            inst_sd_cleaned = {strip_ddp_prefix(k): v for k, v in inst_sd.items()}
+            self.instance_model.load_state_dict(inst_sd_cleaned, strict=False)
 
+        # Process optimizer states
         if ckpt.get("opt_agg", None) is not None:
             self.opt_agg.load_state_dict(ckpt["opt_agg"])
         if self.opt_inst is not None and ckpt.get("opt_inst", None) is not None:
             self.opt_inst.load_state_dict(ckpt["opt_inst"])
 
+        # Process scheduler states
         if self.sched_agg is not None and ckpt.get("sched_agg", None) is not None:
             self.sched_agg.load_state_dict(ckpt["sched_agg"])
         if self.sched_inst is not None and ckpt.get("sched_inst", None) is not None:
             self.sched_inst.load_state_dict(ckpt["sched_inst"])
 
+        # Process scaler
         if self.amp_enabled and ckpt.get("scaler", None) is not None:
             self.scaler.load_state_dict(ckpt["scaler"])
 
@@ -483,6 +561,7 @@ class PairSelectedTrainer:
             self.swa_model.load_state_dict(ckpt["swa_state_dict"])
         self.swa_n_updates = int(ckpt.get("swa_n_updates", 0))
 
+        # Restore training state
         st = ckpt.get("state", None)
         if not isinstance(st, dict):
             st = {

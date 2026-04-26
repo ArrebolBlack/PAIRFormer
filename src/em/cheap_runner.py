@@ -149,6 +149,10 @@ class CheapCacheBuildConfig:
     dtype_logits: Any = np.float16
     dtype_emb: Any = np.float16
 
+    # DDP sharding
+    rank: int = 0
+    world_size: int = 1
+
     def __post_init__(self):
         if self.splits is None:
             self.splits = ["train", "val"]
@@ -218,10 +222,13 @@ class CheapCacheRunner:
         emb_dim: int,
         cfg: CheapCacheBuildConfig,
     ) -> None:
-        # 1) window-level dataset + loader (must be shuffle=False)
+        from src.utils.ddp import is_ddp, is_rank0, barrier as ddp_barrier
 
+        rank = int(cfg.rank)
+        world_size = int(cfg.world_size)
+
+        # 1) window-level dataset + loader (must be shuffle=False)
         # IMPORTANT: must be deterministic order (uid-aligned) when writing memmap by offset.
-        # DO NOT set shuffle=True here, otherwise uid->(logit,emb) mapping breaks.
         ds, loader = build_dataset_and_loader(
             data_cfg=self.data_cfg,
             split_idx=str(split),
@@ -235,9 +242,8 @@ class CheapCacheRunner:
         total_cts = int(len(ds))
 
         # Identity MUST strictly follow window-level dataset semantics.
-        # This binds em_cache to split-local uid space defined by ChunkedCTSDataset.
         _hash_key_data, dataset_hash_key, path_hash = dataset_identity(self.data_cfg, str(split))
-  
+
         store = MemmapCacheStore(
             cache_root=str(self.em_cache_root),
             split=str(split),
@@ -245,16 +251,39 @@ class CheapCacheRunner:
             dataset_hash_key=str(dataset_hash_key),
         )
 
-        # 2) open/create memmap
-        store.create_or_open_cheap(
-            total_cts=total_cts,
-            emb_dim=int(emb_dim),
-            cheap_version=str(cheap_version),
-            dtype_logits=cfg.dtype_logits,
-            dtype_emb=cfg.dtype_emb,
-            has_entropy=bool(cfg.has_entropy),
-            overwrite=bool(cfg.overwrite),
-        )
+        # 2) Rank 0 creates/open memmap; other ranks wait then open existing
+        if world_size > 1:
+            if rank == 0:
+                store.create_or_open_cheap(
+                    total_cts=total_cts,
+                    emb_dim=int(emb_dim),
+                    cheap_version=str(cheap_version),
+                    dtype_logits=cfg.dtype_logits,
+                    dtype_emb=cfg.dtype_emb,
+                    has_entropy=bool(cfg.has_entropy),
+                    overwrite=bool(cfg.overwrite),
+                )
+            ddp_barrier()
+            if rank != 0:
+                store.create_or_open_cheap(
+                    total_cts=total_cts,
+                    emb_dim=int(emb_dim),
+                    cheap_version=str(cheap_version),
+                    dtype_logits=cfg.dtype_logits,
+                    dtype_emb=cfg.dtype_emb,
+                    has_entropy=bool(cfg.has_entropy),
+                    overwrite=False,
+                )
+        else:
+            store.create_or_open_cheap(
+                total_cts=total_cts,
+                emb_dim=int(emb_dim),
+                cheap_version=str(cheap_version),
+                dtype_logits=cfg.dtype_logits,
+                dtype_emb=cfg.dtype_emb,
+                has_entropy=bool(cfg.has_entropy),
+                overwrite=bool(cfg.overwrite),
+            )
 
         # 3) skip logic
         if (not cfg.overwrite) and store.cheap_meta is not None and store.cheap_meta.state == "ready" and cfg.skip_if_ready:
@@ -268,7 +297,6 @@ class CheapCacheRunner:
             print(f"[CheapRunner] SKIP split={split} (already ready).")
             return
 
-        # if cache exists but different version and overwrite=False, refuse
         if (not cfg.overwrite) and store.cheap_meta is not None and store.cheap_meta.cheap_version != str(cheap_version):
             raise RuntimeError(
                 f"[CheapRunner] Existing cache cheap_version != requested for split={split}:\n"
@@ -277,15 +305,50 @@ class CheapCacheRunner:
                 f"Set overwrite=True or use matching cheap_version."
             )
 
-        # 4) sequential write
+        # 4) Compute shard range
+        shard_start = (rank * total_cts) // world_size
+        shard_end = ((rank + 1) * total_cts) // world_size
+        shard_size = shard_end - shard_start
+
+        if world_size > 1:
+            print(f"[CheapRunner:{split}] rank={rank}/{world_size} shard=[{shard_start},{shard_end}) ({shard_size}/{total_cts})")
+
+        # 5) Iterate and write only our shard
         offset = 0
+        written = 0
         t0 = time.time()
 
-        pbar = tqdm(loader, desc=f"[CheapRunner:{split}]", dynamic_ncols=True)
+        pbar = tqdm(loader, desc=f"[CheapRunner:{split}:r{rank}]", dynamic_ncols=True, disable=(world_size > 1 and rank != 0))
         for batch in pbar:
             x, esa, pos = extract_batch(batch)
+            B = int(x.shape[0])
+            batch_start = offset
+            batch_end = offset + B
+
+            # Skip batches entirely before our shard
+            if batch_end <= shard_start:
+                offset = batch_end
+                continue
+            # Done with our shard
+            if batch_start >= shard_end:
+                break
+
+            # Determine write range (clip to shard boundaries)
+            write_start = max(batch_start, shard_start)
+            write_end = min(batch_end, shard_end)
+            # Local indices within the batch
+            local_start = write_start - batch_start
+            local_end = local_start + (write_end - write_start)
+
+            x = x[local_start:local_end]
+            if esa is not None:
+                esa = esa[local_start:local_end]
+            if pos is not None:
+                pos = pos[local_start:local_end]
 
             x = x.to(self.device, non_blocking=cfg.non_blocking)
+            if x.dtype != torch.float32:
+                x = x.to(dtype=torch.float32)
             esa = esa.to(self.device, non_blocking=cfg.non_blocking) if esa is not None else None
             pos = pos.to(self.device, non_blocking=cfg.non_blocking) if pos is not None else None
 
@@ -298,30 +361,31 @@ class CheapCacheRunner:
             logits = logits.detach().float().view(-1)
             emb = emb.detach().float().view(-1, int(emb_dim))
 
-            B = int(logits.numel())
-            start, end = offset, offset + B
-
+            n = int(logits.numel())
             entropy = None
             if cfg.has_entropy:
                 entropy = binary_entropy_from_logits(logits).detach().float().view(-1)
 
             store.write_cheap_slice(
-                start=start,
-                end=end,
+                start=write_start,
+                end=write_end,
                 logits=logits.to(dtype=torch.float16),
                 emb=emb.to(dtype=torch.float16),
                 entropy=(entropy.to(dtype=torch.float16) if entropy is not None else None),
             )
 
-            offset = end
-            pbar.set_postfix(written=offset, total=total_cts)
+            written += n
+            offset = batch_end
+            pbar.set_postfix(written=written, shard=shard_size)
 
-        if offset != total_cts:
-            raise RuntimeError(f"[CheapRunner] written {offset} != total_cts {total_cts} for split={split}")
+        # 6) Flush + Barrier + finalize
+        store.flush_cheap()  # every rank flushes its own mmap writes
+        if world_size > 1:
+            ddp_barrier()
 
-        store.flush_cheap()
-        store.set_cheap_ready()
+        if rank == 0:
+            store.set_cheap_ready()
 
         dt = time.time() - t0
         out_dir = Path(self.em_cache_root) / "em_cache" / split / "cheap"
-        print(f"[CheapRunner] DONE split={split} total_cts={total_cts} time={dt:.1f}s -> {out_dir}")
+        print(f"[CheapRunner:{split}] rank={rank} written={written}/{shard_size} time={dt:.1f}s -> {out_dir}")

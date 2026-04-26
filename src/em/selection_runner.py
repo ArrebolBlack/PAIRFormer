@@ -22,12 +22,14 @@ def run_selection_cache(
     overwrite: bool = True,
     skip_if_ready: bool = False,
     sel_version: Optional[str] = None,
-    pair_batch_size: int = 64,    
+    pair_batch_size: int = 64,
 
     candidate_pool_size=None,
     candidate_pool_mode="topn",
-    candidate_pool_topn_ratio=1.0,
-    candidate_pool_seed=2020,
+    candidate_pool_topn_ratio: float = 1.0,
+    candidate_pool_seed: int = 2020,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> None:
     runner = SelectionCacheRunner(
         data_cfg=data_cfg,
@@ -45,5 +47,7 @@ def run_selection_cache(
         candidate_pool_mode=candidate_pool_mode,
         candidate_pool_topn_ratio=candidate_pool_topn_ratio,
         candidate_pool_seed=candidate_pool_seed,
+        rank=int(rank),
+        world_size=int(world_size),
     )
     runner.build(selector=selector, kmax=int(kmax), cfg=cfg, sel_version=sel_version)

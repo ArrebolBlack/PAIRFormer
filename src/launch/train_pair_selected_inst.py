@@ -1,11 +1,20 @@
+# src/launch/train_pair_selected_inst.py
 from __future__ import annotations
 
+import multiprocessing as mp
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 from pathlib import Path
+import os
 
 import hydra
 import torch
+import torch.nn as nn
 from hydra.utils import get_original_cwd
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from src.config.data_config import DataConfig
 from src.em.cheap_runner import load_ckpt_into_model
@@ -24,25 +33,49 @@ from src.models.registry import build_model
 from src.trainer.trainer_pair_selected import PairSelectedTrainer, PairSelectedTrainerConfig
 from src.utils import set_seeds
 
+# DDP imports
+from src.utils.ddp import setup_ddp, cleanup_ddp, is_ddp, is_rank0, get_rank, get_world_size, print_on_rank0, barrier
+from src.utils.ddp_sampler import get_ddp_sampler, set_epoch_for_sampler, disable_persistent_workers_if_ddp
 
-def _resolve_ckpt(path_str: str | None) -> Path | None:
+
+def _apply_sync_batchnorm(model: torch.nn.Module) -> torch.nn.Module:
+    """Convert BatchNorm1d layers to SyncBatchNorm for DDP training."""
+    return nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+
+def _resolve_ckpt(path_str: str | None, orig_cwd: Path | None) -> Path | None:
     if path_str is None:
         return None
-    p = Path(str(path_str))
+    p = Path(os.path.expandvars(os.path.expanduser(str(path_str))))
     if not p.is_absolute():
-        p = Path(get_original_cwd()) / p
+        p = (orig_cwd if orig_cwd is not None else Path(get_original_cwd())) / p
     return p
 
 
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
-    seed = int(cfg.get("seed", 2020))
-    set_seeds(seed)
+    # ---- DDP setup ----
+    if is_ddp():
+        rank, local_rank, world_size = setup_ddp()
+        print_on_rank0(f"[train_pair_selected_inst] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}")
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        rank, local_rank, world_size = 0, 0, 1
+        print("[train_pair_selected_inst] Single GPU mode")
+        device_str = str(cfg.get("device", "cuda")) if torch.cuda.is_available() else "cpu"
+        if device_str == "cuda":
+            device_str = "cuda:0"
+        device = torch.device(device_str)
 
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    seed = int(cfg.get("seed", 2020))
+    set_seeds(seed + rank)  # offset seed per rank for DDP
+
     run_dir = Path.cwd()
-    ckpt_dir = resolve_pair_selected_ckpt_dir(run_dir, cfg)
+    orig_cwd = Path(get_original_cwd())
+    ckpt_dir = resolve_pair_selected_ckpt_dir(orig_cwd, cfg)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- wandb (rank 0 only) ----
     wandb_run = setup_wandb(cfg)
 
     split_train = str(cfg.run.get("split", "train"))
@@ -53,7 +86,14 @@ def main(cfg: DictConfig) -> None:
 
     batch_size = int(cfg.run.get("batch_size", 16))
     num_workers = int(cfg.run.get("num_workers", 4))
-    train_ds, train_loader = build_selected_loader(
+
+    # In DDP mode, disable persistent_workers to avoid stale workers
+    persistent_workers = bool(cfg.run.get("persistent_workers", True))
+    if is_ddp():
+        persistent_workers = disable_persistent_workers_if_ddp(persistent_workers, num_workers)
+
+    # ---- Build datasets ----
+    train_ds, _ = build_selected_loader(
         cache_root=cache_root,
         split=split_train,
         cache_type="selected_inst",
@@ -62,7 +102,7 @@ def main(cfg: DictConfig) -> None:
         max_pairs=(None if max_train_pairs is None else int(max_train_pairs)),
         shuffle=True,
     )
-    val_ds, val_loader = build_selected_loader(
+    val_ds, _ = build_selected_loader(
         cache_root=cache_root,
         split=split_val,
         cache_type="selected_inst",
@@ -71,22 +111,63 @@ def main(cfg: DictConfig) -> None:
         max_pairs=(None if max_val_pairs is None else int(max_val_pairs)),
         shuffle=False,
     )
-    print(
+
+    # Build DataLoaders with proper DDP support
+    train_sampler = get_ddp_sampler(train_ds, shuffle=True)
+    val_sampler = get_ddp_sampler(val_ds, shuffle=False)
+
+    use_persistent = persistent_workers and (num_workers > 0)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),  # only shuffle if no sampler
+        num_workers=num_workers,
+        collate_fn=train_ds.collate_fn,
+        pin_memory=True,
+        persistent_workers=use_persistent,
+        drop_last=False,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=val_ds.collate_fn,
+        pin_memory=True,
+        persistent_workers=use_persistent,
+        drop_last=False,
+    )
+
+    print_on_rank0(
         f"[train_pair_selected_inst] train_split={split_train} val_split={split_val} "
         f"train_pairs={len(train_ds)} val_pairs={len(val_ds)} batch_size={batch_size}"
     )
 
+    # ---- Build models ----
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     agg_cfg = cfg.model
     agg_model = build_model(str(agg_cfg.get("arch", agg_cfg.get("name"))), agg_cfg, data_cfg=data_cfg).to(device)
+
+    # Apply SyncBatchNorm for DDP
+    if is_ddp():
+        agg_model = _apply_sync_batchnorm(agg_model)
+
     instance_model = None
     if bool(cfg.run.get("load_instance_into_ckpt", False)):
         inst_cfg = cfg.instance_model
         instance_model = build_model(str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg).to(device)
-        inst_ckpt = _resolve_ckpt(cfg.get("instance_ckpt_path", None))
+
+        if is_ddp():
+            instance_model = _apply_sync_batchnorm(instance_model)
+
+        inst_ckpt = _resolve_ckpt(cfg.get("instance_ckpt_path", None), orig_cwd=run_dir)
         if inst_ckpt is not None and inst_ckpt.exists():
             load_ckpt_into_model(instance_model, inst_ckpt, device=device, use_ema_shadow=False)
 
+    # ---- Build trainer ----
     tr_node = cfg.trainer_pair_selected
     betas = tr_node.get("betas", [0.9, 0.999])
     tr_cfg = PairSelectedTrainerConfig(
@@ -140,29 +221,38 @@ def main(cfg: DictConfig) -> None:
         use_esa=bool(assemble.get("use_esa", True)),
         use_pos=bool(assemble.get("use_pos", True)),
         train_instance_model=False,
+        local_rank=local_rank,
     )
 
+    # ---- Resume ----
     resumed = False
     if bool(cfg.run.get("resume", False)) or (cfg.run.get("checkpoint", None) is not None):
         ckpt_path_cfg = cfg.run.get("checkpoint", None)
-        ckpt_path = _resolve_ckpt(ckpt_path_cfg) if ckpt_path_cfg is not None else (ckpt_dir / "best.pt")
+        ckpt_path = _resolve_ckpt(ckpt_path_cfg, orig_cwd=run_dir) if ckpt_path_cfg is not None else (ckpt_dir / "best.pt")
         if ckpt_path is not None and ckpt_path.exists():
             trainer.load_checkpoint(str(ckpt_path), map_location=device)
-            print(f"[train_pair_selected_inst] Resumed from checkpoint: {ckpt_path}")
+            print_on_rank0(f"[train_pair_selected_inst] Resumed from checkpoint: {ckpt_path}")
             resumed = True
         else:
-            print(f"[train_pair_selected_inst] No checkpoint found at {ckpt_path}, start from scratch.")
+            print_on_rank0(f"[train_pair_selected_inst] No checkpoint found at {ckpt_path}, start from scratch.")
 
     start_epoch = int(trainer.epoch) + 1 if resumed else int(trainer.epoch)
+
+    # ---- Training loop ----
     for epoch in range(start_epoch, int(tr_cfg.num_epochs)):
         trainer.epoch = epoch
+
+        # Set sampler epoch for proper shuffling in DDP
+        set_epoch_for_sampler(train_loader, epoch)
+        set_epoch_for_sampler(val_loader, epoch)
+
         train_metrics = trainer.train_one_epoch(train_loader)
         val_metrics = trainer.validate_one_epoch(val_loader)
         if float(train_metrics.get("optimizer_steps", 0.0)) > 0:
             trainer.step_schedulers(val_metrics)
         improved = trainer.update_best(val_metrics)
 
-        print(
+        print_on_rank0(
             f"[Epoch {epoch+1}/{tr_cfg.num_epochs}] "
             f"train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} "
             f"val_f1={float(val_metrics.get('f1', float('nan'))):.4f} "
@@ -181,6 +271,7 @@ def main(cfg: DictConfig) -> None:
         if improved:
             trainer.save_checkpoint(str(ckpt_dir / "best.pt"))
 
+    # ---- Post-training evaluation ----
     if bool(cfg.run.get("eval_test_after_train", False)):
         eval_with_last = bool(cfg.run.get("eval_test_with_last", True))
         eval_with_best = bool(cfg.run.get("eval_test_with_best", False))
@@ -191,7 +282,7 @@ def main(cfg: DictConfig) -> None:
         test_splits = cfg.run.get("test_splits", ["test"])
         if isinstance(test_splits, str):
             test_splits = [test_splits]
-        best_ckpt_path = _resolve_ckpt(cfg.run.get("best_ckpt_path", str(default_best_checkpoint(ckpt_dir))))
+        best_ckpt_path = _resolve_ckpt(cfg.run.get("best_ckpt_path", str(default_best_checkpoint(ckpt_dir))), orig_cwd=run_dir)
 
         def run_test_eval_for_current_trainer(tag_prefix: str) -> None:
             val_best_threshold = None
@@ -217,10 +308,10 @@ def main(cfg: DictConfig) -> None:
                     sweep_num_thresholds=sweep_num_thresholds,
                 )
                 val_best_threshold = float(val_sweep["sweep_best_threshold"])
-                print(f"[train_pair_selected_inst][{tag_prefix}] val_best_threshold={val_best_threshold:.6f}")
+                print_on_rank0(f"[train_pair_selected_inst][{tag_prefix}] val_best_threshold={val_best_threshold:.6f}")
 
             for sp in [str(x) for x in list(test_splits)]:
-                print(f"[train_pair_selected_inst][{tag_prefix}] Evaluating split='{sp}'")
+                print_on_rank0(f"[train_pair_selected_inst][{tag_prefix}] Evaluating split='{sp}'")
                 pred_test = run_selected_predict(
                     trainer=trainer,
                     cache_root=cache_root,
@@ -257,15 +348,19 @@ def main(cfg: DictConfig) -> None:
             run_test_eval_for_current_trainer("last")
         if eval_with_best and best_ckpt_path is not None and best_ckpt_path.exists():
             trainer.load_checkpoint(str(best_ckpt_path), map_location=device)
-            print(f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}")
+            print_on_rank0(f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}")
             run_test_eval_for_current_trainer("best")
 
+    # ---- Cleanup ----
     if wandb_run is not None:
         try:
-            import wandb  # type: ignore
+            import wandb
             wandb.finish()
         except Exception:
             pass
+
+    if is_ddp():
+        cleanup_ddp()
 
 
 if __name__ == "__main__":

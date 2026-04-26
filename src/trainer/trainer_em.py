@@ -19,23 +19,27 @@ from omegaconf import DictConfig
 from src.evaluator.metrics import compute_metrics
 
 import time
-from src.utils.efficiency import EffMeter  # 若你希望输出 peak CPU RSS
+from src.utils.efficiency import EffMeter
 
 from src.trainer.loss import BinaryClassificationLoss
 
+# DDP imports
+from src.utils.ddp import is_ddp, is_rank0, get_rank, get_world_size, all_reduce_dict, save_on_rank0, print_on_rank0
+import torch.distributed as dist
+
 # ----------------------- #
-# 训练状态对象（复用旧 Trainer 语义）
+# Training state
 # ----------------------- #
 
 @dataclass
 class TrainState:
     epoch: int = 0
     global_step: int = 0
-    best_metric: float = 1e9  # 默认监控 loss：越小越好
+    best_metric: float = 1e9  # default: monitor loss (lower is better)
 
 
 # ----------------------- #
-# EMA（复用旧 Trainer 语义；默认只对 agg 做 EMA 更合理）
+# EMA
 # ----------------------- #
 
 class EMAHelper:
@@ -92,7 +96,7 @@ class _nullcontext:
 
 
 # ----------------------- #
-# TrainerEMConfig：保持你现有字段，并扩展几个“旧 Trainer”常用开关
+# TrainerEMConfig
 # ----------------------- #
 
 @dataclass
@@ -116,16 +120,16 @@ class TrainerEMConfig:
     wd_inst: float = 0.0
 
     # scheduler
-    scheduler_agg: str = "cosine"     # none/plateau/cosine/step
+    scheduler_agg: str = "cosine"
     scheduler_inst: str = "cosine"
-    scheduler_t_max: int = num_epochs
+    scheduler_t_max: int = 10
     scheduler_step_size: int = 10
     scheduler_gamma: float = 0.1
     scheduler_factor: float = 0.2
     scheduler_patience: int = 5
 
     # loss
-    loss_type: str = "bce"          # bce/focal
+    loss_type: str = "bce"
     esa_weighting: bool = False
 
     focal_alpha: float = 0.25
@@ -152,16 +156,18 @@ class TrainerEMConfig:
     ema_enabled: bool = False
     ema_decay: float = 0.999
 
+
 # ----------------------- #
 # TrainerEM
 # ----------------------- #
 
 class TrainerEM:
     """
-    EM Trainer（单卡）：
-      - token_provider 负责每 step 是否训练 instance / 是否用 cache
-      - controller 负责 E-step + 重建 train_loader（单卡下 barrier 无意义但不影响）
-      - 复用旧 Trainer 的稳定结构：TrainState / EMA / AMP / scheduler / logger 风格
+    EM Trainer:
+      - token_provider handles per-step cache/online decisions
+      - controller handles E-step cache refresh
+      - DDP: agg_model wrapped with DistributedDataParallel
+      - DDP: instance_model NOT wrapped, gradients manually synchronized
     """
 
     def __init__(
@@ -176,13 +182,28 @@ class TrainerEM:
         train_loader: Any,
         val_loader: Optional[Any] = None,
         logger: Optional[Any] = None,
-        task_cfg: Optional[DictConfig] = None,  # 可选：输出 F1/AUC 等
+        task_cfg: Optional[DictConfig] = None,
         token_provider_val: Optional[TokenProvider] = None,
+        local_rank: int = 0,
     ):
         self.cfg = cfg
         self.device = device
+        self.local_rank = local_rank
 
         self.agg_model = agg_model.to(device)
+
+        # Wrap agg_model with DDP if applicable
+        if is_ddp():
+            ddp_kwargs = {}
+            if device.type == "cuda":
+                ddp_kwargs["device_ids"] = [local_rank]
+                ddp_kwargs["output_device"] = local_rank
+            self.agg_model_ddp = nn.parallel.DistributedDataParallel(
+                self.agg_model, **ddp_kwargs,
+            )
+        else:
+            self.agg_model_ddp = self.agg_model
+
         self.instance_model = instance_model.to(device)
 
         self.token_provider = token_provider
@@ -195,59 +216,63 @@ class TrainerEM:
 
         self.token_provider_val = token_provider_val
 
-        # epoch-level override for train token plan (force cached/online deterministically)
-        # If set, _build_tokens_train will use it instead of policy.step_plan(...)
+        # epoch-level override for train token plan
         self._train_plan_override: Optional[Dict[str, bool]] = None
 
-        # loss（pair-level 二分类）
-        self.crit = BinaryClassificationLoss(train_cfg=self.cfg)
+        # loss
+        self.crit = BinaryClassificationLoss(train_cfg=cfg)
 
-        # 两套 optimizer
-        self.opt_agg = optim.AdamW(self.agg_model.parameters(), lr=cfg.lr_agg, weight_decay=cfg.wd_agg, betas=self.cfg.betas, eps=self.cfg.eps, amsgrad=self.cfg.amsgrad)
-        self.opt_inst = optim.AdamW(self.instance_model.parameters(), lr=cfg.lr_inst, weight_decay=cfg.wd_inst, betas=self.cfg.betas, eps=self.cfg.eps, amsgrad=self.cfg.amsgrad)
+        # Two optimizers
+        self.opt_agg = optim.AdamW(
+            self.agg_model.parameters(), lr=cfg.lr_agg,
+            weight_decay=cfg.wd_agg, betas=self.cfg.betas,
+            eps=self.cfg.eps, amsgrad=self.cfg.amsgrad,
+        )
+        self.opt_inst = optim.AdamW(
+            self.instance_model.parameters(), lr=cfg.lr_inst,
+            weight_decay=cfg.wd_inst, betas=self.cfg.betas,
+            eps=self.cfg.eps, amsgrad=self.cfg.amsgrad,
+        )
 
-        # 两套 scheduler（可选）
+        # Two schedulers
         self.sched_agg = self._build_scheduler(self.opt_agg, cfg.scheduler_agg)
         self.sched_inst = self._build_scheduler(self.opt_inst, cfg.scheduler_inst)
 
-        # AMP scaler（复用旧 Trainer 风格）
+        # AMP
         amp_enabled = bool(cfg.use_amp and device.type == "cuda")
         self.amp_enabled = amp_enabled
         self.scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
 
         # state
-        self.state = TrainState(epoch=0, global_step=0, best_metric=( -1e9 if cfg.greater_is_better else 1e9 ))
+        self.state = TrainState(
+            epoch=0,
+            global_step=0,
+            best_metric=(-1e9 if cfg.greater_is_better else 1e9),
+        )
 
-        # EMA（默认只对 agg）
+        # EMA (only for agg)
         self.ema: Optional[EMAHelper] = None
         if bool(cfg.ema_enabled):
             self.ema = EMAHelper(self.agg_model, decay=float(cfg.ema_decay))
 
-
-        # ---- compatibility for old evaluator ----
-        self.model = self.agg_model                 # old evaluator may use trainer.model
-        self.monitor = str(self.cfg.monitor)        # old train.py prints trainer.monitor
+        # compatibility aliases
+        self.model = self.agg_model
+        self.monitor = str(self.cfg.monitor)
         self.greater_is_better = bool(self.cfg.greater_is_better)
 
-
     def set_train_plan_override(self, plan: Optional[Dict[str, bool]]) -> None:
-        """
-        If not None, force train-time token plan for the whole epoch.
-        Typical use: Agg-only epoch -> cached; Instance-update epoch -> online.
-        """
+        """Force train-time token plan for the whole epoch."""
         self._train_plan_override = (None if plan is None else dict(plan))
 
     def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # TrainerEM 里默认 pair-level binary；y 可能是 int -> float
-        self.crit.set_sample_weight(None)  # EM 默认不使用 sample_weight（保持可扩展）
+        self.crit.set_sample_weight(None)
         return self.crit.compute(logits.view(-1), y.view(-1).float())
-
 
     def set_train_loader(self, loader: Any) -> None:
         self.train_loader = loader
 
     # ----------------------- #
-    # logging（复用旧 Trainer 的“尽量兼容 WandB/TB”的策略）
+    # logging
     # ----------------------- #
 
     def _log_metrics(self, metrics: Dict[str, float], stage: str, step: Optional[int] = None) -> None:
@@ -256,7 +281,6 @@ class TrainerEM:
         if step is None:
             step = self.state.global_step
 
-        # 过滤成 float
         out = {}
         for k, v in metrics.items():
             try:
@@ -281,7 +305,7 @@ class TrainerEM:
                 self.logger.log(out)
 
     # ----------------------- #
-    # scheduler builder（对齐旧 Trainer 的字符串风格）
+    # scheduler builder
     # ----------------------- #
 
     def _build_scheduler(self, optimizer: optim.Optimizer, name: str):
@@ -291,8 +315,7 @@ class TrainerEM:
         if name == "plateau":
             mode = "max" if bool(self.cfg.greater_is_better) else "min"
             return optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode=mode,
+                optimizer, mode=mode,
                 factor=float(self.cfg.scheduler_factor),
                 patience=int(self.cfg.scheduler_patience),
             )
@@ -304,31 +327,23 @@ class TrainerEM:
                 step_size=int(self.cfg.scheduler_step_size),
                 gamma=float(self.cfg.scheduler_gamma),
             )
-        # 未知：默认不用
         return None
 
     # ----------------------- #
     # token build
     # ----------------------- #
-        
+
     def _build_tokens_train(self, batch_cpu: Dict[str, Any], *, epoch: int, global_step: int) -> Dict[str, Any]:
-      
-        # Use epoch-level override if provided; otherwise fall back to policy.
         plan = self._train_plan_override
         if plan is None:
-            plan = self.token_provider.policy.step_plan(epoch, global_step)   # dict
+            plan = self.token_provider.policy.step_plan(epoch, global_step)
         plan = dict(plan)
 
-        # 关键：只有在“online 且 train_instance=True”时才把 instance_model 置为 train
         train_inst = bool(plan.get("train_instance", False)) and (not bool(plan.get("use_instance_cache", True)))
         self.instance_model.train(train_inst)
 
-        # 统一入口：由 TokenProvider 决定 cached/online/hybrid，并返回 used_cache/train_instance 等标记
         return self.token_provider.build_tokens(
-            batch_cpu,
-            epoch=epoch,
-            global_step=global_step,
-            plan=plan,
+            batch_cpu, epoch=epoch, global_step=global_step, plan=plan,
         )
 
     @torch.inference_mode()
@@ -342,21 +357,12 @@ class TrainerEM:
         tp = self.token_provider_val or self.token_provider
         self.instance_model.eval()
 
-        # eval 永远不训练 instance；是否用 cache 由上层显式指定（便于 online val）
-        plan = {
-            "train_instance": False,
-            "train_cheap": False,
-        }
+        plan = {"train_instance": False, "train_cheap": False}
         if use_instance_cache is not None:
             plan["use_instance_cache"] = bool(use_instance_cache)
         return tp.build_tokens(batch_cpu, epoch=epoch, global_step=self.state.global_step, plan=plan)
 
-
     def set_instance_trainable(self, trainable: bool) -> None:
-        """
-        方案A：Agg-only epoch 冻结 instance；Instance-update epoch 解冻。
-        这里只控制 requires_grad，train/eval 仍由 step_plan 决定（你的 _build_tokens_train 已做）。
-        """
         self.instance_model.requires_grad_(bool(trainable))
 
     # ----------------------- #
@@ -368,7 +374,6 @@ class TrainerEM:
             self.state.epoch = epoch
             self.token_provider.on_epoch_begin(epoch)
 
-            # E-step（单卡：controller 内部 barrier 无影响）
             if self.controller is not None:
                 new_loader = self.controller.maybe_refresh_and_rebuild(epoch=epoch)
                 if new_loader is not None:
@@ -380,16 +385,14 @@ class TrainerEM:
                 self._step_schedulers(val_metrics)
                 self._update_best(val_metrics)
             else:
-                # 无 val：对非-plateau scheduler，每 epoch 走一步
                 self._step_schedulers({"loss": train_metrics.get("loss", 0.0)})
 
     # ----------------------- #
-    # train / val 核心循环（旧 Trainer 风格 + 双 optimizer + grad accumulation）
+    # train / val core loops
     # ----------------------- #
 
     def train_one_epoch(self, loader: Any) -> Dict[str, float]:
         self.agg_model.train()
-        # instance_model 的 train/eval 由每 step 的 policy 决定
 
         grad_accum = max(1, int(self.cfg.grad_accum_steps))
         clip = float(self.cfg.clip_grad_norm)
@@ -397,23 +400,20 @@ class TrainerEM:
         total_loss = 0.0
         total_seen = 0
 
-        # 统计：cache/inst 比例，便于你 debug policy
         n_steps = 0
         n_used_cache = 0
         n_train_inst = 0
         n_skipped = 0
 
-        # accumulation window flags（避免“空 step 的 AdamW weight decay”）
         agg_accum_has_grad = False
         inst_accum_has_grad = False
 
         self.opt_agg.zero_grad(set_to_none=True)
         self.opt_inst.zero_grad(set_to_none=True)
 
-        pbar = tqdm(loader, desc=f"TrainEM epoch {self.state.epoch}")
+        pbar = tqdm(loader, desc=f"TrainEM epoch {self.state.epoch}", disable=not is_rank0())
 
         for it, batch_cpu in enumerate(pbar):
-            # 进入新的 accumulation window 时清梯度
             if it % grad_accum == 0:
                 self.opt_agg.zero_grad(set_to_none=True)
                 self.opt_inst.zero_grad(set_to_none=True)
@@ -433,67 +433,57 @@ class TrainerEM:
             n_train_inst += int(train_inst)
 
             if tokens is None:
-                # 全 padding：不做 backward，不做 step（但 global_step 仍前进，保持 policy 时间轴一致）
                 n_skipped += 1
                 self.state.global_step += 1
-
-                # 若这是 window 的最后一步，可能会触发 step：这里直接让 window 结束时因 has_grad=False 而跳过
                 if self.cfg.log_every > 0 and (self.state.global_step % self.cfg.log_every == 0):
                     pbar.set_postfix({"loss": "skip", "cache": used_cache, "inst": int(train_inst)})
                 continue
 
             with torch.amp.autocast(device_type="cuda", enabled=self.amp_enabled):
-                logits = self.agg_model(tokens, attn_mask=mask)
+                # Use DDP-wrapped model for forward pass (handles gradient sync)
+                logits = self.agg_model_ddp(tokens, attn_mask=mask)
                 if isinstance(logits, (tuple, list)):
                     logits = logits[0]
                 logits = logits.view(-1)
                 loss = self._compute_loss(logits, y.view(-1))
-
-                # grad accumulation 标准缩放
                 loss_to_backward = loss / float(grad_accum)
 
             self.scaler.scale(loss_to_backward).backward()
             agg_accum_has_grad = True
-            '''
-            风险修复：Instance optimizer 可能在“无梯度”窗口被 step（导致纯 weight decay 漂移）
-            风险来源：
-            如果 TokenProvider 因为 cache missing / fallback / 逻辑 bug，返回了 train_instance=True，但实际 tokens 仍来自 cache（或在内部 detach() / inference_mode()），
-            那么 instance 参数不会有 grad，但你仍会 step(opt_inst)；AdamW 会做 weight decay，造成参数漂移（silent）。
-            TODO：          
-            最小修复（把“是否 step”从逻辑标志改成“是否真的产生梯度”），可以and这个梯度存在标志。
-            在这之前可以检查TokenProvider是否会出现bug。
-            '''
+
             if train_inst:
                 inst_accum_has_grad = True
 
-            # 统计 loss（用未缩放的 loss，更符合直觉）
             bs = int(y.shape[0])
             total_loss += float(loss.detach().item()) * bs
             total_seen += bs
 
             self.state.global_step += 1
 
-            # 到 accumulation window 末尾 or 最后一个 batch：尝试 step
             is_last = (it == (len(loader) - 1)) if hasattr(loader, "__len__") else False
             do_step = ((it + 1) % grad_accum == 0) or is_last
 
             if do_step and agg_accum_has_grad:
                 if clip > 0:
-                    # agg
                     self.scaler.unscale_(self.opt_agg)
                     torch.nn.utils.clip_grad_norm_(self.agg_model.parameters(), clip)
-                    # inst（只在本窗口真的训练过 inst 时才裁剪）
                     if inst_accum_has_grad:
                         self.scaler.unscale_(self.opt_inst)
                         torch.nn.utils.clip_grad_norm_(self.instance_model.parameters(), clip)
 
-                # step（关键：inst 只有在窗口内训练过才 step，避免 AdamW 纯 weight decay 漂移）
+                # DDP: manually sync instance model gradients before optimizer step
+                if is_ddp() and inst_accum_has_grad:
+                    for p in self.instance_model.parameters():
+                        if p.grad is not None:
+                            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                            p.grad.div_(get_world_size())
+
                 self.scaler.step(self.opt_agg)
                 if inst_accum_has_grad:
                     self.scaler.step(self.opt_inst)
                 self.scaler.update()
 
-                # EMA（只对 agg）
+                # EMA (only for agg)
                 if self.ema is not None:
                     self.ema.update(self.agg_model)
 
@@ -521,7 +511,6 @@ class TrainerEM:
         self._log_metrics(metrics, stage="train", step=self.state.global_step)
         return metrics
 
-
     @torch.no_grad()
     def validate_one_epoch(
         self,
@@ -541,7 +530,7 @@ class TrainerEM:
             total_loss, total_seen = 0.0, 0
             all_logits, all_labels = [], []
 
-            for batch_cpu in tqdm(loader, desc=f"Valid epoch {self.state.epoch}"):
+            for batch_cpu in tqdm(loader, desc=f"Valid epoch {self.state.epoch}", disable=not is_rank0()):
                 out = self._build_tokens_eval(
                     batch_cpu,
                     epoch=self.state.epoch,
@@ -555,12 +544,11 @@ class TrainerEM:
                 y = out.get("y_pair", None)
                 mask = out.get("mask", None)
 
-                # tokens=None 表示全 padding / 无有效 uid，直接跳过
                 if tokens is None or y is None:
                     continue
 
-                # TokenProvider 已保证 tokens/mask/y 在 self.device，无需 .to()
-                logits = self.agg_model(tokens, attn_mask=mask)
+                # Use agg_model_ddp for forward (handles SyncBatchNorm correctly)
+                logits = self.agg_model_ddp(tokens, attn_mask=mask)
                 if isinstance(logits, (tuple, list)):
                     logits = logits[0]
                 logits = logits.view(-1)
@@ -578,17 +566,50 @@ class TrainerEM:
             avg_loss = total_loss / max(1, total_seen)
             metrics: Dict[str, float] = {"loss": float(avg_loss)}
 
+            # DDP: gather logits/labels from all ranks and compute metrics on rank 0
             if len(all_labels) > 0:
-                logits_np = torch.cat(all_logits).numpy()
-                labels_np = torch.cat(all_labels).numpy()
-                cm = compute_metrics(y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg)
-                for k, v in cm.items():
-                    try:
-                        metrics[k] = float(v)
-                    except Exception:
-                        pass
+                local_logits = torch.cat(all_logits)
+                local_labels = torch.cat(all_labels)
 
-            # 这里给出两个 lr，避免你 train_em.py 外层打印/记录时找不到
+                if is_ddp():
+                    from src.utils.ddp import gather_tensors
+                    gathered_logits = gather_tensors(local_logits)
+                    gathered_labels = gather_tensors(local_labels)
+                    # Concatenate all ranks
+                    all_rank_logits = torch.cat(gathered_logits)
+                    all_rank_labels = torch.cat(gathered_labels)
+
+                    if is_rank0():
+                        cm = compute_metrics(
+                            y_true=all_rank_labels.numpy(),
+                            y_pred_raw=all_rank_logits.numpy(),
+                            task_cfg=self.task_cfg,
+                        )
+                        for k, v in cm.items():
+                            try:
+                                metrics[k] = float(v)
+                            except Exception:
+                                pass
+
+                    # Broadcast metrics from rank 0 to all ranks
+                    metric_keys = list(metrics.keys())
+                    metric_vals = torch.tensor(
+                        [metrics.get(k, 0.0) for k in metric_keys],
+                        device=self.device,
+                    )
+                    dist.broadcast(metric_vals, src=0)
+                    for i, k in enumerate(metric_keys):
+                        metrics[k] = float(metric_vals[i].item())
+                else:
+                    logits_np = local_logits.numpy()
+                    labels_np = local_labels.numpy()
+                    cm = compute_metrics(y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg)
+                    for k, v in cm.items():
+                        try:
+                            metrics[k] = float(v)
+                        except Exception:
+                            pass
+
             metrics["lr_agg"] = float(self.opt_agg.param_groups[0].get("lr", 0.0))
             metrics["lr_inst"] = float(self.opt_inst.param_groups[0].get("lr", 0.0))
             metrics["used_cache_pct"] = 100.0 * (n_used_cache / max(1, n_steps))
@@ -596,15 +617,12 @@ class TrainerEM:
             self._log_metrics(metrics, stage="val", step=self.state.global_step)
             return metrics
 
-
     # ----------------------- #
-    # scheduler step / best metric（对齐旧 Trainer）
+    # scheduler step / best metric
     # ----------------------- #
 
     def _step_schedulers(self, metrics: Dict[str, float]) -> None:
-        # plateau：用 monitor；其他：每 epoch step
         monitor_val = float(metrics.get(self.cfg.monitor, metrics.get("loss", 0.0)))
-
         for sched in [self.sched_agg, self.sched_inst]:
             if sched is None:
                 continue
@@ -625,7 +643,6 @@ class TrainerEM:
             if v < self.state.best_metric:
                 self.state.best_metric = v
 
-
     def step_schedulers(self, metrics: Dict[str, float]) -> None:
         self._step_schedulers(metrics)
 
@@ -634,12 +651,15 @@ class TrainerEM:
         self._update_best(metrics)
         return self.state.best_metric != prev
 
+    # ----------------------- #
+    # save/load checkpoint
+    # ----------------------- #
 
-    # ----------------------- #
-    # save/load ckpt（对齐旧 Trainer）
-    # ----------------------- #
-                
     def save_checkpoint(self, path: str) -> None:
+        """Save checkpoint only on rank 0."""
+        save_on_rank0(self._save_checkpoint_impl, path)
+
+    def _save_checkpoint_impl(self, path: str) -> None:
         ckpt = {
             "agg_state_dict": self.agg_model.state_dict(),
             "inst_state_dict": self.instance_model.state_dict(),
@@ -648,7 +668,11 @@ class TrainerEM:
             "sched_agg": None if self.sched_agg is None else self.sched_agg.state_dict(),
             "sched_inst": None if self.sched_inst is None else self.sched_inst.state_dict(),
             "scaler": None if not self.amp_enabled else self.scaler.state_dict(),
-            "state": {"epoch": self.state.epoch, "global_step": self.state.global_step, "best_metric": self.state.best_metric},
+            "state": {
+                "epoch": self.state.epoch,
+                "global_step": self.state.global_step,
+                "best_metric": self.state.best_metric,
+            },
             "ema_shadow": None if self.ema is None else {k: v.cpu() for k, v in self.ema.shadow.items()},
             "cfg": self.cfg.__dict__,
         }
@@ -656,8 +680,23 @@ class TrainerEM:
 
     def load_checkpoint(self, path: str, *, map_location: Optional[torch.device] = None) -> None:
         ckpt = torch.load(path, map_location=("cpu" if map_location is None else map_location))
-        self.agg_model.load_state_dict(ckpt["agg_state_dict"], strict=False)
-        self.instance_model.load_state_dict(ckpt["inst_state_dict"], strict=False)
+
+        # Strip DDP prefix if present
+        def strip_ddp_prefix(k: str) -> str:
+            for prefix in ("module.",):
+                if k.startswith(prefix):
+                    return k[len(prefix):]
+            return k
+
+        agg_sd = ckpt.get("agg_state_dict", ckpt)
+        if isinstance(agg_sd, dict):
+            agg_sd_cleaned = {strip_ddp_prefix(k): v for k, v in agg_sd.items()}
+            self.agg_model.load_state_dict(agg_sd_cleaned, strict=False)
+
+        inst_sd = ckpt.get("inst_state_dict", None)
+        if isinstance(inst_sd, dict):
+            inst_sd_cleaned = {strip_ddp_prefix(k): v for k, v in inst_sd.items()}
+            self.instance_model.load_state_dict(inst_sd_cleaned, strict=False)
 
         if "opt_agg" in ckpt and ckpt["opt_agg"] is not None:
             self.opt_agg.load_state_dict(ckpt["opt_agg"])
@@ -692,7 +731,7 @@ class TrainerEM:
             all_logits, all_labels = [], []
             all_pair_id = []
 
-            for batch_cpu in tqdm(loader, desc="Predict"):
+            for batch_cpu in tqdm(loader, desc="Predict", disable=not is_rank0()):
                 out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
 
                 tokens = out.get("tokens", None)
@@ -703,7 +742,7 @@ class TrainerEM:
                 if tokens is None or y is None:
                     continue
 
-                logits = self.agg_model(tokens, attn_mask=mask)
+                logits = self.agg_model_ddp(tokens, attn_mask=mask)
                 if isinstance(logits, (tuple, list)):
                     logits = logits[0]
                 logits = logits.view(-1)
@@ -724,9 +763,6 @@ class TrainerEM:
                 out_dict["pair_id"] = torch.cat(all_pair_id).numpy()
             return out_dict
 
-
-
-
     @torch.inference_mode()
     def benchmark_inference(
         self,
@@ -737,20 +773,11 @@ class TrainerEM:
         max_batches: Optional[int] = None,
         plan_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
-        """
-        End-to-end inference throughput for the EM pipeline:
-        DataLoader -> TokenProvider (cache/online/hybrid) -> agg forward
-
-        Returns keys aligned with old train.py:
-        infer_pairs_per_s, infer_peak_vram_gb, infer_peak_cpu_rss_gb,
-        infer_elapsed_s, infer_total_pairs
-        """
-
+        """End-to-end inference throughput benchmark."""
         device_is_cuda = (self.device.type == "cuda")
         if device_is_cuda:
             torch.cuda.reset_peak_memory_stats(self.device)
 
-        # 若你想记录 peak CPU RSS（与旧 Trainer 对齐）
         meter = EffMeter(device=self.device, enabled=True)
         meter.reset_epoch()
 
@@ -759,8 +786,6 @@ class TrainerEM:
             self.agg_model.eval()
             self.instance_model.eval()
 
-            # ---- build eval plan ----
-            # 默认：cache-only（与你当前 _build_tokens_eval 的语义一致）
             base_plan = {
                 "train_instance": False,
                 "use_instance_cache": True,
@@ -770,10 +795,8 @@ class TrainerEM:
             if plan_override is not None:
                 base_plan.update(plan_override)
 
-            # 用同一个 iterator，warmup 的 batch 不进入计时窗口
             it = iter(loader)
 
-            # ---- warmup ----
             n_warm = 0
             while n_warm < int(warmup_batches):
                 try:
@@ -782,10 +805,8 @@ class TrainerEM:
                     break
 
                 out = (self.token_provider_val or self.token_provider).build_tokens(
-                    batch_cpu,
-                    epoch=int(self.state.epoch),
-                    global_step=int(self.state.global_step),
-                    plan=base_plan,
+                    batch_cpu, epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step), plan=base_plan,
                 )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
@@ -803,7 +824,6 @@ class TrainerEM:
             if device_is_cuda:
                 torch.cuda.synchronize(self.device)
 
-            # ---- timed ----
             total_pairs = 0
             nb = 0
             t0 = time.perf_counter()
@@ -817,10 +837,8 @@ class TrainerEM:
                     break
 
                 out = (self.token_provider_val or self.token_provider).build_tokens(
-                    batch_cpu,
-                    epoch=int(self.state.epoch),
-                    global_step=int(self.state.global_step),
-                    plan=base_plan,
+                    batch_cpu, epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step), plan=base_plan,
                 )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
