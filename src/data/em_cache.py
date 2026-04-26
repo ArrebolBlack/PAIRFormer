@@ -140,11 +140,16 @@ class InstanceMeta:
     dataset_hash_key: str
     path_hash: str
     split: str
-    total_cts: int
-    emb_dim: int
-    dtype_logits: str
-    dtype_emb: str
-    created_at: float
+    # UID-indexed (legacy): total_cts > 0, index_format="uid" or absent
+    # Pair-indexed (new): num_pairs > 0, kmax > 0, index_format="pair"
+    index_format: str = "uid"   # "uid" or "pair"
+    total_cts: int = 0
+    num_pairs: int = 0
+    kmax: int = 0
+    emb_dim: int = 0
+    dtype_logits: str = "float16"
+    dtype_emb: str = "float16"
+    created_at: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
@@ -617,7 +622,7 @@ class MemmapCacheStore:
         Returns:
           emb:   [N,D] float16
           logit: [N]   float16
-          ok:    [N]   bool, True 表示 cache 命中（logit 非 NaN）
+          ok:    [N]   bool, True means cache hit (logit not NaN)
         """
         if self._inst_logit is None or self._inst_emb is None:
             raise RuntimeError("InstanceCache not opened.")
@@ -625,12 +630,167 @@ class MemmapCacheStore:
         log_np = np.asarray(self._inst_logit[u])
         emb_np = np.asarray(self._inst_emb[u, :])
 
-        # 命中判定：logit 不是 NaN
+        # hit detection: logit is not NaN
         ok_np = ~np.isnan(log_np.astype(np.float32))
         emb = torch.from_numpy(emb_np)
         logit = torch.from_numpy(log_np)
         ok = torch.from_numpy(ok_np)
 
         return emb, logit, ok
+
+    # ------------------- Pair-Indexed InstanceCache -------------------
+
+    def detect_instance_format(self) -> Optional[str]:
+        """Returns "uid", "pair", or None if no instance cache exists."""
+        if not os.path.exists(self._inst_meta_path):
+            return None
+        try:
+            with open(self._inst_meta_path, "r") as f:
+                d = json.load(f)
+            return str(d.get("index_format", "uid"))
+        except Exception:
+            return None
+
+    def create_or_open_instance_pair_indexed(
+        self,
+        num_pairs: int,
+        kmax: int,
+        emb_dim: int,
+        inst_version: str,
+        sel_version_used: str,
+        cheap_version_used: str,
+        *,
+        dtype_logits=np.float16,
+        dtype_emb=np.float16,
+        overwrite: bool = False,
+        require_ready: bool = False,
+    ) -> None:
+        """Create or open pair-indexed instance cache: [num_pairs, kmax, emb_dim]."""
+        logit_path = Path(self.inst_dir) / "inst_logit.f16.mmap"
+        emb_path = Path(self.inst_dir) / "inst_emb.f16.mmap"
+        lock_path = Path(self.inst_dir) / ".build.lock"
+
+        if os.path.exists(self._inst_meta_path) and not overwrite:
+            with open(self._inst_meta_path, "r") as f:
+                d = json.load(f)
+
+            _check_meta_identity("InstanceCache", d, split=self.split, path_hash=self.path_hash, dataset_hash_key=self.dataset_hash_key)
+            _check_state("InstanceCache", d.get("state", ""), require_ready=require_ready)
+
+            _check_version("InstanceCache", d.get("inst_version", ""), inst_version, "inst_version")
+            _check_version("InstanceCache", d.get("sel_version_used", ""), sel_version_used, "sel_version_used")
+            _check_version("InstanceCache", d.get("cheap_version_used", ""), cheap_version_used, "cheap_version_used")
+
+            fmt = str(d.get("index_format", "uid"))
+            if fmt != "pair":
+                raise RuntimeError(
+                    f"InstanceCache exists but index_format={fmt}, expected 'pair'. "
+                    "Delete old cache or use UID-indexed path."
+                )
+
+            meta_num_pairs = int(d.get("num_pairs", 0))
+            meta_kmax = int(d.get("kmax", 0))
+            meta_emb_dim = int(d.get("emb_dim", 0))
+            if meta_num_pairs != int(num_pairs) or meta_kmax != int(kmax) or meta_emb_dim != int(emb_dim):
+                raise RuntimeError(
+                    f"InstanceCache shape mismatch: meta(num_pairs={meta_num_pairs}, kmax={meta_kmax}, emb_dim={meta_emb_dim}) "
+                    f"vs requested(num_pairs={num_pairs}, kmax={kmax}, emb_dim={emb_dim})."
+                )
+
+            meta_dtype_logits = _dtype_from_str(d.get("dtype_logits"))
+            meta_dtype_emb = _dtype_from_str(d.get("dtype_emb"))
+
+            _check_file_size(logit_path, _nbytes(meta_dtype_logits, (int(num_pairs), int(kmax))), "InstanceCache")
+            _check_file_size(emb_path, _nbytes(meta_dtype_emb, (int(num_pairs), int(kmax), int(emb_dim))), "InstanceCache")
+
+            self.inst_meta = InstanceMeta(**d)
+            self._inst_logit = np.memmap(logit_path, mode="r+", dtype=meta_dtype_logits, shape=(num_pairs, kmax))
+            self._inst_emb = np.memmap(emb_path, mode="r+", dtype=meta_dtype_emb, shape=(num_pairs, kmax, emb_dim))
+            return
+
+        # create new
+        with FileLock(lock_path):
+            meta = InstanceMeta(
+                state="building",
+                index_format="pair",
+                inst_version=str(inst_version),
+                sel_version_used=str(sel_version_used),
+                cheap_version_used=str(cheap_version_used),
+                dataset_hash_key=self.dataset_hash_key,
+                path_hash=self.path_hash,
+                split=self.split,
+                total_cts=0,
+                num_pairs=int(num_pairs),
+                kmax=int(kmax),
+                emb_dim=int(emb_dim),
+                dtype_logits=str(np.dtype(dtype_logits)),
+                dtype_emb=str(np.dtype(dtype_emb)),
+                created_at=time.time(),
+            )
+            _atomic_write_json(meta.to_dict(), self._inst_meta_path)
+            self.inst_meta = meta
+
+            # Logit mmap: small enough for normal creation + NaN init
+            self._inst_logit = np.memmap(logit_path, mode="w+", dtype=dtype_logits, shape=(num_pairs, kmax))
+            self._inst_logit[:] = np.nan
+
+            # Emb mmap: use sparse file creation for large files to avoid zero-fill
+            emb_nbytes = _nbytes(np.dtype(dtype_emb), (num_pairs, kmax, emb_dim))
+            if emb_nbytes > 50 * (1024**3):  # > 50GB
+                with open(emb_path, 'wb') as f:
+                    f.truncate(emb_nbytes)
+                self._inst_emb = np.memmap(emb_path, mode='r+', dtype=dtype_emb, shape=(num_pairs, kmax, emb_dim))
+                # Sparse file provides zeros — no explicit init needed
+            else:
+                self._inst_emb = np.memmap(emb_path, mode="w+", dtype=dtype_emb, shape=(num_pairs, kmax, emb_dim))
+                self._inst_emb[:] = 0
+            self.flush_instance()
+
+    def write_instance_by_pairs(
+        self,
+        pair_ids: torch.Tensor,   # [C] long on CPU
+        logit: torch.Tensor,      # [C, K] float16 on CPU
+        emb: torch.Tensor,        # [C, K, D] float16 on CPU
+        sel_len: torch.Tensor,    # [C] int on CPU
+    ) -> None:
+        """Write instance cache for a chunk of pairs. Only writes valid positions ([:sel_len])."""
+        if self._inst_logit is None or self._inst_emb is None:
+            raise RuntimeError("InstanceCache not opened.")
+        pids = pair_ids.detach().cpu().numpy().astype(np.int64)
+        logit_np = logit.detach().cpu().numpy()
+        emb_np = emb.detach().cpu().numpy()
+        len_np = sel_len.detach().cpu().numpy().astype(np.int32)
+        for i, pid in enumerate(pids):
+            n = int(len_np[i])
+            if n <= 0:
+                continue
+            self._inst_logit[pid, :n] = logit_np[i, :n]
+            self._inst_emb[pid, :n] = emb_np[i, :n]
+
+    def read_instance_by_pairs(
+        self,
+        pair_ids: torch.Tensor,   # [B] long on CPU
+        K: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Read pair-indexed instance cache.
+
+        Returns:
+          emb:   [B, K, D] float16
+          logit: [B, K]   float16
+          ok:    [B, K]   bool, True where logit is not NaN (cache hit)
+        """
+        if self._inst_logit is None or self._inst_emb is None:
+            raise RuntimeError("InstanceCache not opened.")
+        K = int(K)
+        pids = pair_ids.detach().cpu().numpy().astype(np.int64)
+        logit_np = np.asarray(self._inst_logit[pids, :K])   # [B, K]
+        emb_np = np.asarray(self._inst_emb[pids, :K])       # [B, K, D]
+        ok_np = ~np.isnan(logit_np.astype(np.float32))      # [B, K]
+        return (
+            torch.from_numpy(emb_np),
+            torch.from_numpy(logit_np),
+            torch.from_numpy(ok_np),
+        )
 
 

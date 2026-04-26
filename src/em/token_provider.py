@@ -122,6 +122,9 @@ class TokenProvider:
         sel_version_used: str,
         cheap_version_used: str,
         require_ready: bool = False,
+        # Pair-indexed params (new format)
+        num_pairs: int = 0,
+        inst_kmax: int = 0,
     ):
         self.cfg = cfg
 
@@ -137,9 +140,6 @@ class TokenProvider:
         self.device = device
         self.instance_model = instance_model
 
-        # 重要：policy 只允许单一来源（上层注入优先）
-        # - 若上层注入 policy：TokenProvider 仅使用它，不再创建新 policy
-        # - 若未注入：才根据 cfg.policy 创建（兼容旧用法）
         self._owns_policy = (policy is None)
         self.policy = policy if policy is not None else UpdatePolicy(self.cfg.policy)
 
@@ -150,6 +150,8 @@ class TokenProvider:
         self._dataset_hash_key = str(dataset_hash_key)
 
         self._total_cts = int(total_cts)
+        self._num_pairs = int(num_pairs)
+        self._inst_kmax = int(inst_kmax)
         self._inst_emb_dim = int(inst_emb_dim)
         self._inst_version = str(inst_version)
         self._sel_version_used = str(sel_version_used)
@@ -157,26 +159,43 @@ class TokenProvider:
         self._require_ready = bool(require_ready)
 
         self.store: Optional[MemmapCacheStore] = None
+        self._inst_fmt: Optional[str] = None  # "uid" or "pair"
         self._reopen_instance_store(require_ready=self._require_ready)
 
 
     def _reopen_instance_store(self, *, require_ready: bool) -> None:
-        # 重新构建 store，避免 stale memmap 句柄
         store = MemmapCacheStore(
             cache_root=self._em_cache_root,
             split=self._split,
             path_hash=self._path_hash,
             dataset_hash_key=self._dataset_hash_key,
         )
-        store.create_or_open_instance(
-            total_cts=self._total_cts,
-            emb_dim=self._inst_emb_dim,
-            inst_version=self._inst_version,
-            sel_version_used=self._sel_version_used,
-            cheap_version_used=self._cheap_version_used,
-            overwrite=False,
-            require_ready=bool(require_ready),
-        )
+
+        fmt = store.detect_instance_format()
+        self._inst_fmt = fmt
+
+        if fmt == "pair" and self._num_pairs > 0 and self._inst_kmax > 0:
+            store.create_or_open_instance_pair_indexed(
+                num_pairs=self._num_pairs,
+                kmax=self._inst_kmax,
+                emb_dim=self._inst_emb_dim,
+                inst_version=self._inst_version,
+                sel_version_used=self._sel_version_used,
+                cheap_version_used=self._cheap_version_used,
+                overwrite=False,
+                require_ready=bool(require_ready),
+            )
+        else:
+            # Legacy UID-indexed path
+            store.create_or_open_instance(
+                total_cts=self._total_cts,
+                emb_dim=self._inst_emb_dim,
+                inst_version=self._inst_version,
+                sel_version_used=self._sel_version_used,
+                cheap_version_used=self._cheap_version_used,
+                overwrite=False,
+                require_ready=bool(require_ready),
+            )
         self.store = store
 
     def on_cache_refreshed(self, refresh_plan: Dict[str, bool]) -> None:
@@ -246,9 +265,72 @@ class TokenProvider:
         }
 
     def _build_tokens_cached(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
-        # cached 分支：默认不训练 instance
-        assert self.store is not None, "[TokenProvider] store not opened."
-        
+        if self._inst_fmt == "pair":
+            return self._build_tokens_cached_pair(batch_cpu, train_inst=train_inst)
+        else:
+            return self._build_tokens_cached_uid(batch_cpu, train_inst=train_inst)
+
+    def _build_tokens_cached_pair(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+        """Pair-indexed cached read: direct [B,K,D] lookup by pair_id."""
+        assert self.store is not None
+
+        pair_id = batch_cpu["pair_id"].to(self.device, non_blocking=True)
+        y_pair = batch_cpu["y_pair"].to(self.device, non_blocking=True)
+        mask = batch_cpu["mask"].to(self.device, non_blocking=True)
+
+        pair_ids_cpu = batch_cpu["pair_id"].detach().cpu().to(torch.long)  # [B]
+        K = int(mask.shape[1])
+
+        emb_p, log_p, ok_p = self.store.read_instance_by_pairs(pair_ids_cpu, K)
+        # emb_p: [B, K, D], log_p: [B, K], ok_p: [B, K] bool
+
+        # Handle cache misses — only check positions covered by mask (valid CTS)
+        mask_cpu = mask.detach().cpu().bool()
+        # Count real misses: mask=True but ok=False (NaN in instance cache)
+        real_miss = mask_cpu & ~ok_p
+        miss_count = int(real_miss.sum().item())
+        if miss_count > 0:
+            if self.cfg.cache_missing == "error":
+                raise RuntimeError(f"[TokenProvider] instance_cache miss: {miss_count} slots")
+
+        # Replace NaN with 0 BEFORE masking (NaN * 0 = NaN, not 0)
+        emb_p = torch.nan_to_num(emb_p, nan=0.0)
+        log_p = torch.nan_to_num(log_p, nan=0.0)
+
+        # Zero out padded positions
+        emb_p = emb_p * mask_cpu.unsqueeze(-1).to(emb_p.dtype)
+        log_p = log_p * mask_cpu.to(log_p.dtype)
+
+        inst_emb = emb_p.to(self.device, non_blocking=False)
+        inst_logit = log_p.to(self.device, non_blocking=False)
+
+        pos = batch_cpu.get("pos", None)
+        esa = batch_cpu.get("esa_scores", None)
+        if pos is not None:
+            pos = pos.to(self.device, non_blocking=True)
+        if esa is not None:
+            esa = esa.to(self.device, non_blocking=True)
+
+        tokens = _assemble_tokens(
+            inst_emb=inst_emb,
+            inst_logit=inst_logit,
+            pos=pos, esa=esa,
+            mask=mask,
+            cfg=self.cfg.assemble,
+        )
+
+        return {
+            "pair_id": pair_id,
+            "y_pair": y_pair,
+            "mask": mask,
+            "tokens": tokens,
+            "train_instance": False,
+            "used_cache": True,
+        }
+
+    def _build_tokens_cached_uid(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+        """Legacy UID-indexed cached read."""
+        assert self.store is not None
         pair_id = batch_cpu["pair_id"].to(self.device, non_blocking=True)
         y_pair = batch_cpu["y_pair"].to(self.device, non_blocking=True)
         mask = batch_cpu["mask"].to(self.device, non_blocking=True)

@@ -34,77 +34,12 @@ def _open_selection_uids_mmap(em_cache_root: Union[str, Path], split: str, sel_m
     return np.memmap(uids_path, mode="r", dtype=np.int32, shape=(num_pairs, kmax))
 
 
-def _build_selected_uids(
-    *,
-    sel_uids_mmap: np.memmap,   # [num_pairs,kmax] int32, padded -1
-    total_cts: int,
-    chunk_pairs: int = 4096,
-) -> np.ndarray:
-    num_pairs, _ = sel_uids_mmap.shape
-    selected = np.zeros((int(total_cts),), dtype=np.bool_)
-
-    for s in range(0, num_pairs, int(chunk_pairs)):
-        e = min(num_pairs, s + int(chunk_pairs))
-        u = np.asarray(sel_uids_mmap[s:e, :]).reshape(-1)
-        u = u[u >= 0]
-        if u.size == 0:
-            continue
-        u = u[u < total_cts]
-        selected[u] = True
-
-    return np.nonzero(selected)[0].astype(np.int64)
-
-
-class UIDWrappedDataset(Dataset):
-    def __init__(self, base: ChunkedCTSDataset, uids: np.ndarray):
-        self.base = base
-        self.uids = np.asarray(uids, dtype=np.int64)
-
-    def __len__(self) -> int:
-        return int(self.uids.shape[0])
-
-    def __getitem__(self, i: int):
-        uid = int(self.uids[i])
-        raw = self.base[uid]  # ChunkedCTSDataset returns tuple (x,y,set_idx,esa,pos) or similar
-
-        # 兼容：如果未来 base 返回 dict，也转成 tuple
-        if isinstance(raw, dict):
-            x = raw.get("inputs", raw.get("X"))
-            y = raw.get("labels", raw.get("y"))
-            set_idx = raw.get("set_idx", raw.get("set_idxs"))
-            esa = raw.get("esa_scores", None)
-            pos = raw.get("pos", None)
-            base_tuple = (x, y, set_idx) if esa is None else ((x, y, set_idx, esa) if pos is None else (x, y, set_idx, esa, pos))
-        else:
-            base_tuple = tuple(raw)
-
-        # 返回 “原始样本tuple + uid”
-        return (*base_tuple, torch.tensor(uid, dtype=torch.long))
-
-def uid_cts_collate_fn(batch: List[Tuple[Any, ...]]) -> Dict[str, Any]:
-    """
-    batch元素形如:
-      (x,y,set_idx,esa,pos,uid)  或  (x,y,set_idx,uid) 等
-    做法:
-      - 取出最后一位 uid
-      - 剩余部分交给 cts_collate_fn 生成 {"inputs","labels","set_idx",...}
-      - 再把 uid 作为 [B] long 拼回去
-    """
-    base_batch = []
-    uids = []
-
-    for item in batch:
-        if not isinstance(item, (tuple, list)) or len(item) < 4:
-            raise TypeError(f"[uid_cts_collate_fn] bad item type/len: {type(item)} len={getattr(item,'__len__',lambda:None)()}")
-        uids.append(item[-1])
-        base_batch.append(tuple(item[:-1]))
-
-    out = cts_collate_fn(base_batch)
-
-    # uids -> [B] long
-    uid_t = torch.stack([torch.as_tensor(u).view(-1)[0].long() for u in uids], dim=0).view(-1)
-    out["uid"] = uid_t
-    return out
+def _open_selection_len_mmap(em_cache_root: Union[str, Path], split: str, sel_meta: Dict[str, Any]) -> np.memmap:
+    root = Path(str(em_cache_root))
+    sel_dir = root / "em_cache" / split / "selection"
+    len_path = sel_dir / "sel_len.i16.mmap"
+    num_pairs = int(sel_meta["num_pairs"])
+    return np.memmap(len_path, mode="r", dtype=np.int16, shape=(num_pairs,))
 
 
 @dataclass
@@ -124,14 +59,18 @@ class InstanceCacheBuildConfig:
     use_amp: bool = True
     normalize_emb: bool = False
 
-    # selection scan
-    scan_chunk_pairs: int = 4096
+    # pair-indexed build
+    pair_chunk_size: int = 256  # pairs per iteration
+
+    # DDP sharding
+    rank: int = 0
+    world_size: int = 1
 
 
 class InstanceCacheRunner:
     """
-    Build instance cache for all CTS uids that appear in selection cache.
-    Pure python callable from controller: no shell, no hydra main.
+    Build pair-indexed instance cache for all selected CTS per pair.
+    Stores inst_emb[num_pairs, kmax, emb_dim] and inst_logit[num_pairs, kmax].
     """
 
     def __init__(self, *, data_cfg: DataConfig, dataset_cache_root: str, em_cache_root: str):
@@ -152,7 +91,6 @@ class InstanceCacheRunner:
         dev = next(instance_model.parameters()).device
         use_amp = bool(cfg.use_amp) and (dev.type == "cuda")
 
-        # 临时切 eval，结束后恢复
         was_training = instance_model.training
         instance_model.eval()
 
@@ -182,8 +120,12 @@ class InstanceCacheRunner:
         use_amp: bool,
         sel_expected_version: Optional[str],
     ) -> None:
+        from src.utils.ddp import barrier as ddp_barrier
+
+        rank = int(cfg.rank)
+        world_size = int(cfg.world_size)
+
         cts_ds = ChunkedCTSDataset(self.dataset_cache_root, self.data_cfg, split)
-        total_cts = int(len(cts_ds))
 
         sel_meta_path = Path(self.em_cache_root) / "em_cache" / split / "selection" / "meta.json"
         cheap_meta_path = Path(self.em_cache_root) / "em_cache" / split / "cheap" / "meta.json"
@@ -211,86 +153,135 @@ class InstanceCacheRunner:
                 f"[InstanceRunner] sel_version mismatch: expected={sel_expected_version} got={sel_meta.get('sel_version')} (split={split})"
             )
 
-        # scan selected uids
-        sel_uids_mmap = _open_selection_uids_mmap(self.em_cache_root, split, sel_meta)
-        selected_uids = _build_selected_uids(
-            sel_uids_mmap=sel_uids_mmap,
-            total_cts=total_cts,
-            chunk_pairs=int(cfg.scan_chunk_pairs),
-        )
-        num_selected = int(selected_uids.shape[0])
-        print(f"[InstanceRunner:{split}] total_cts={total_cts} num_selected={num_selected} inst_version={inst_version}")
+        num_pairs = int(sel_meta["num_pairs"])
+        kmax = int(sel_meta["kmax"])
 
-        # open instance cache via MemmapCacheStore (保持与 TokenProvider 一致)
+        # Open selection memmaps
+        sel_uids_mmap = _open_selection_uids_mmap(self.em_cache_root, split, sel_meta)
+        sel_len_mmap = _open_selection_len_mmap(self.em_cache_root, split, sel_meta)
+
+        # Shard pair range across ranks
+        pair_start = (rank * num_pairs) // world_size
+        pair_end = ((rank + 1) * num_pairs) // world_size
+        shard_size = pair_end - pair_start
+
+        print(f"[InstanceRunner:{split}] rank={rank}/{world_size} num_pairs={num_pairs} kmax={kmax} "
+              f"pair_shard=[{pair_start},{pair_end}) ({shard_size}) inst_version={inst_version}")
+
+        # Open instance cache store (pair-indexed)
         store = MemmapCacheStore(
             cache_root=str(self.em_cache_root),
             split=str(split),
             path_hash=str(sel_meta["path_hash"]),
             dataset_hash_key=str(sel_meta["dataset_hash_key"]),
         )
-        store.create_or_open_instance(
-            total_cts=int(total_cts),
-            emb_dim=int(emb_dim),
-            inst_version=str(inst_version),
-            sel_version_used=str(sel_meta["sel_version"]),
-            cheap_version_used=str(sel_meta["cheap_version_used"]),
-            overwrite=bool(cfg.overwrite),
-        )
 
-
-        # 可选：跳过
-        if (not cfg.overwrite) and getattr(store, "inst_meta", None) is not None:
-            meta = store.inst_meta
-            if getattr(meta, "state", "") == "ready" and bool(cfg.skip_if_ready):
-                store.assert_instance_version_consistent(
-                    inst_version=str(inst_version),
+        # DDP: rank 0 creates, others wait then open existing
+        if world_size > 1:
+            if rank == 0:
+                store.create_or_open_instance_pair_indexed(
+                    num_pairs=num_pairs,
+                    kmax=kmax,
+                    emb_dim=emb_dim,
+                    inst_version=inst_version,
                     sel_version_used=str(sel_meta["sel_version"]),
                     cheap_version_used=str(sel_meta["cheap_version_used"]),
+                    overwrite=bool(cfg.overwrite),
                 )
+            ddp_barrier()
+            if rank != 0:
+                store.create_or_open_instance_pair_indexed(
+                    num_pairs=num_pairs,
+                    kmax=kmax,
+                    emb_dim=emb_dim,
+                    inst_version=inst_version,
+                    sel_version_used=str(sel_meta["sel_version"]),
+                    cheap_version_used=str(sel_meta["cheap_version_used"]),
+                    overwrite=False,
+                )
+        else:
+            store.create_or_open_instance_pair_indexed(
+                num_pairs=num_pairs,
+                kmax=kmax,
+                emb_dim=emb_dim,
+                inst_version=inst_version,
+                sel_version_used=str(sel_meta["sel_version"]),
+                cheap_version_used=str(sel_meta["cheap_version_used"]),
+                overwrite=bool(cfg.overwrite),
+            )
+
+        # Skip logic
+        if (not cfg.overwrite) and store.inst_meta is not None:
+            if store.inst_meta.state == "ready" and cfg.skip_if_ready:
                 print(f"[InstanceRunner] SKIP split={split} (already ready).")
                 return
 
-        wrapped = UIDWrappedDataset(cts_ds, selected_uids)
+        dev = next(instance_model.parameters()).device
+        pair_chunk_size = int(cfg.pair_chunk_size)
 
-        bs = int(cfg.batch_size)
-        nw = int(cfg.num_workers)
-        pin = bool(cfg.pin_memory)
-        persistent = bool(cfg.persistent_workers) and (nw > 0)
+        written_pairs = 0
+        written_cts = 0
+        t0 = __import__("time").time()
 
-        loader = DataLoader(
-            wrapped,
-            batch_size=bs,
-            shuffle=False,
-            num_workers=nw,
-            pin_memory=pin,
-            persistent_workers=persistent,
-            drop_last=False,
-            collate_fn=uid_cts_collate_fn,
+        pbar = tqdm(
+            range(pair_start, pair_end, pair_chunk_size),
+            desc=f"[InstanceRunner:{split}:r{rank}]",
+            dynamic_ncols=True,
+            disable=(world_size > 1 and rank != 0),
         )
 
-        dev = next(instance_model.parameters()).device
-        pbar = tqdm(loader, desc=f"[InstanceRunner:{split}]", dynamic_ncols=True)
+        for chunk_start in pbar:
+            chunk_end = min(chunk_start + pair_chunk_size, pair_end)
+            C = chunk_end - chunk_start
 
-        written = 0
-        for batch in pbar:
-            
-            if "uid" not in batch:
-                raise KeyError(f"[InstanceRunner] batch missing 'uid'. got={list(batch.keys())}")
+            # Read selection for this chunk of pairs
+            sel_u = np.asarray(sel_uids_mmap[chunk_start:chunk_end])  # [C, K]
+            sel_l = np.asarray(sel_len_mmap[chunk_start:chunk_end])   # [C]
 
-            x_cpu = batch.get("inputs", None)
-            if x_cpu is None:
-                x_cpu = batch.get("X", None)
-            if x_cpu is None:
-                raise KeyError(f"[InstanceRunner] batch missing 'inputs'/'X'. got={list(batch.keys())}")
+            # Gather all valid UIDs
+            all_uids = []
+            uid_counts = []
+            for i in range(C):
+                n = int(sel_l[i])
+                uids_i = sel_u[i, :n]
+                uids_i = uids_i[uids_i >= 0]
+                all_uids.append(uids_i)
+                uid_counts.append(len(uids_i))
 
-            uids = batch["uid"].view(-1).to(dtype=torch.long, device="cpu")  # [N] CPU long
+            total_valid = sum(uid_counts)
+            if total_valid == 0:
+                # No valid CTS for this chunk, skip
+                continue
 
-            # x_cpu 已经在 cts_collate_fn 里 float() 过了；这里再保证一次 dtype
-            x = x_cpu.to(dev, non_blocking=True)
+            flat_uids = np.concatenate(all_uids).astype(np.int64)
+            # batch_gather_by_uid expects a torch tensor
+            flat_uids_t = torch.from_numpy(flat_uids)
+
+            # Gather CTS inputs by UID (chunk stores 'X' not 'inputs')
+            batch_data = cts_ds.batch_gather_by_uid(flat_uids_t, fields=["X", "esa_scores", "pos"])
+            x = batch_data.get("X", None)
+            if x is None:
+                x = batch_data.get("inputs", None)
+            esa = batch_data.get("esa_scores", None)
+            pos = batch_data.get("pos", None)
+
+            # Convert to torch tensors if needed
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x)
+            if isinstance(esa, np.ndarray):
+                esa = torch.from_numpy(esa)
+            if isinstance(pos, np.ndarray):
+                pos = torch.from_numpy(pos)
+
+            x = x.to(dev, non_blocking=True)
             if x.dtype != torch.float32:
                 x = x.to(dtype=torch.float32)
+            if esa is not None:
+                esa = esa.to(dev, non_blocking=True).float()
+            if pos is not None:
+                pos = pos.to(dev, non_blocking=True).float()
 
-
+            # Run instance model forward
             if dev.type == "cuda":
                 with torch.autocast(device_type="cuda", enabled=bool(use_amp)):
                     feat, logit = get_embedding_and_logit(instance_model, x)
@@ -300,22 +291,48 @@ class InstanceCacheRunner:
             if cfg.normalize_emb:
                 feat = F.normalize(feat.float(), dim=-1)
 
-            emb_cpu = feat.detach().float().to("cpu", non_blocking=False).to(torch.float16).contiguous()   # [N,D]
-            log_cpu = logit.detach().float().view(-1).to("cpu", non_blocking=False).to(torch.float16).contiguous()  # [N]
+            feat_cpu = feat.detach().float().cpu()
+            logit_cpu = logit.detach().float().view(-1).cpu()
 
-            # 写回
-            store.write_instance_by_uids(
-                uids=uids,        # torch.Tensor [N] long CPU
-                logit=log_cpu,    # torch.Tensor [N] float16 CPU
-                emb=emb_cpu,      # torch.Tensor [N,D] float16 CPU
+            # Reshape flat results back to [C, K, D] and [C, K]
+            D = feat_cpu.shape[1]
+            emb_chunk = torch.zeros(C, kmax, D, dtype=torch.float16)
+            logit_chunk = torch.zeros(C, kmax, dtype=torch.float16)
+
+            offset = 0
+            for i in range(C):
+                n = uid_counts[i]
+                if n > 0:
+                    emb_chunk[i, :n] = feat_cpu[offset:offset + n].to(torch.float16)
+                    logit_chunk[i, :n] = logit_cpu[offset:offset + n].to(torch.float16)
+                offset += n
+
+            # Write to store
+            pair_ids = torch.arange(chunk_start, chunk_end, dtype=torch.long)
+            sel_len_t = torch.from_numpy(sel_l.astype(np.int32))
+
+            store.write_instance_by_pairs(
+                pair_ids=pair_ids,
+                logit=logit_chunk,
+                emb=emb_chunk,
+                sel_len=sel_len_t,
             )
 
-            written += int(uids.numel())
-            pbar.set_postfix(written=written, total=num_selected)
+            written_pairs += C
+            written_cts += total_valid
+            pbar.set_postfix(pairs=written_pairs, cts=written_cts, shard=shard_size)
 
+        # Flush + barrier + finalize
         store.flush_instance()
-        store.set_instance_ready()
-        print(f"[InstanceRunner] DONE split={split} (written={written})")
+        if world_size > 1:
+            ddp_barrier()
+
+        if rank == 0:
+            store.set_instance_ready()
+
+        dt = __import__("time").time() - t0
+        print(f"[InstanceRunner:{split}] rank={rank} DONE pairs={written_pairs}/{shard_size} "
+              f"cts={written_cts} time={dt:.1f}s")
 
 
 def run_instance_cache(
@@ -334,6 +351,8 @@ def run_instance_cache(
     num_workers: int = 8,
     use_amp: bool = True,
     normalize_emb: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> None:
     runner = InstanceCacheRunner(
         data_cfg=data_cfg,
@@ -348,6 +367,8 @@ def run_instance_cache(
         num_workers=int(num_workers),
         use_amp=bool(use_amp),
         normalize_emb=bool(normalize_emb),
+        rank=int(rank),
+        world_size=int(world_size),
     )
     runner.build_from_model(
         instance_model=instance_model,
@@ -355,5 +376,3 @@ def run_instance_cache(
         emb_dim=int(emb_dim),
         cfg=cfg,
     )
-
-
