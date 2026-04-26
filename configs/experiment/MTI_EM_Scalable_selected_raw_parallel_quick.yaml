@@ -1,0 +1,30 @@
+# @package _global_
+
+defaults:
+  - MTI_EM_Scalable_selected_raw
+
+experiment:
+  name: MTI_EM_Scalable_selected_raw_parallel_quick
+  task: scalable_pair_cache_build_parallel
+
+run:
+  mode: build_selected_pair_cache_parallel
+  split: train
+  kmax: 64
+
+scalable:
+  cache_root: cache/mti_full_topk_retrain_r4_v3relbl
+  num_pairs_hint: 480000
+  cheap_batch_size: 8192
+  esa_min_score: 6.0
+  num_workers: 8
+  task_pairs: 16
+  mp_start_method: spawn
+  selector:
+    name: stselector
+    k1_ratio: 0.5
+    mode: eval
+    epoch: 0
+
+# 使用现有的 512K checkpoint
+cheap_ckpt_path: /vepfs-mlp2/mlp-public/haoce/yjq/PAIRFormer/checkpoints/kmax=512_prefix/checkpoints/best.pt
