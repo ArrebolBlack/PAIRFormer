@@ -131,6 +131,8 @@ def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
     """
     Gather tensor from all ranks.
 
+    Handles CPU tensors when using NCCL backend by temporarily moving to CUDA.
+
     Returns:
         List of tensors from each rank. All ranks get the full list.
     """
@@ -141,8 +143,19 @@ def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
     if world_size == 1:
         return [tensor]
 
+    # NCCL only supports CUDA tensors — move to GPU if needed
+    was_cpu = (tensor.device.type == "cpu")
+    if was_cpu and dist.get_backend() == "nccl":
+        cuda_dev = torch.device(f"cuda:{get_local_rank()}")
+        tensor = tensor.to(cuda_dev, non_blocking=True)
+
     gather_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     dist.all_gather(gather_list, tensor)
+
+    # Move back to CPU if we moved it
+    if was_cpu:
+        gather_list = [t.cpu() for t in gather_list]
+
     return gather_list
 
 
