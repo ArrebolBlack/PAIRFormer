@@ -418,16 +418,10 @@ class PairSelectedTrainer:
                         except Exception:
                             pass
                 # Broadcast metrics to all ranks
-                from src.utils.ddp import is_rank0 as _is_r0
                 import torch.distributed as _dist
-                metric_keys = list(metrics.keys())
-                metric_vals = torch.tensor(
-                    [metrics.get(k, 0.0) for k in metric_keys],
-                    device=self.device,
-                )
-                _dist.broadcast(metric_vals, src=0)
-                for i, k in enumerate(metric_keys):
-                    metrics[k] = float(metric_vals[i].item())
+                metrics_payload = [metrics]
+                _dist.broadcast_object_list(metrics_payload, src=0)
+                metrics = metrics_payload[0]
             else:
                 logits_np = torch.cat(all_logits).numpy()
                 labels_np = torch.cat(all_labels).numpy()

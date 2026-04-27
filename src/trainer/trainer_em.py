@@ -592,14 +592,10 @@ class TrainerEM:
                                 pass
 
                     # Broadcast metrics from rank 0 to all ranks
-                    metric_keys = list(metrics.keys())
-                    metric_vals = torch.tensor(
-                        [metrics.get(k, 0.0) for k in metric_keys],
-                        device=self.device,
-                    )
-                    dist.broadcast(metric_vals, src=0)
-                    for i, k in enumerate(metric_keys):
-                        metrics[k] = float(metric_vals[i].item())
+                    # Use broadcast_object_list to handle variable-length dicts
+                    metrics_payload = [metrics]
+                    dist.broadcast_object_list(metrics_payload, src=0)
+                    metrics = metrics_payload[0]
                 else:
                     logits_np = local_logits.numpy()
                     labels_np = local_labels.numpy()
