@@ -405,18 +405,29 @@ class PairSelectedTrainer:
             # Gather all logits/labels from all ranks
             if is_ddp():
                 from src.utils.ddp import gather_tensors
-                all_logits = gather_tensors(torch.cat(all_logits))
-                all_labels = gather_tensors(torch.cat(all_labels))
+                gathered_logits = gather_tensors(torch.cat(all_logits))
+                gathered_labels = gather_tensors(torch.cat(all_labels))
                 # Only process on rank 0
                 if is_rank0():
-                    logits_np = all_logits.numpy()
-                    labels_np = all_labels.numpy()
+                    logits_np = torch.cat(gathered_logits).numpy()
+                    labels_np = torch.cat(gathered_labels).numpy()
                     cm = compute_metrics(labels_np, logits_np, self.task_cfg)
                     for k, v in cm.items():
                         try:
                             metrics[k] = float(v)
                         except Exception:
                             pass
+                # Broadcast metrics to all ranks
+                from src.utils.ddp import is_rank0 as _is_r0
+                import torch.distributed as _dist
+                metric_keys = list(metrics.keys())
+                metric_vals = torch.tensor(
+                    [metrics.get(k, 0.0) for k in metric_keys],
+                    device=self.device,
+                )
+                _dist.broadcast(metric_vals, src=0)
+                for i, k in enumerate(metric_keys):
+                    metrics[k] = float(metric_vals[i].item())
             else:
                 logits_np = torch.cat(all_logits).numpy()
                 labels_np = torch.cat(all_labels).numpy()

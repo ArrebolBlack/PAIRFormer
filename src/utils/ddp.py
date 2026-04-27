@@ -129,12 +129,14 @@ def all_reduce_dict(metrics: Dict[str, float], device: torch.device) -> Dict[str
 
 def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
     """
-    Gather tensor from all ranks.
+    Gather tensor from all ranks with padding to handle size mismatches.
 
-    Handles CPU tensors when using NCCL backend by temporarily moving to CUDA.
+    Handles:
+    - CPU tensors with NCCL backend (temporarily moves to CUDA)
+    - Different tensor sizes across ranks (pads to max size, trims after gather)
 
     Returns:
-        List of tensors from each rank. All ranks get the full list.
+        List of tensors from each rank, trimmed to original per-rank sizes.
     """
     if not is_ddp():
         return [tensor]
@@ -143,20 +145,37 @@ def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
     if world_size == 1:
         return [tensor]
 
-    # NCCL only supports CUDA tensors — move to GPU if needed
+    # NCCL only supports CUDA tensors
     was_cpu = (tensor.device.type == "cpu")
     if was_cpu and dist.get_backend() == "nccl":
         cuda_dev = torch.device(f"cuda:{get_local_rank()}")
         tensor = tensor.to(cuda_dev, non_blocking=True)
 
+    # Determine max size across all ranks via all_gather of local size
+    local_size = torch.tensor([tensor.shape[0]], dtype=torch.long, device=tensor.device)
+    sizes = [torch.zeros_like(local_size) for _ in range(world_size)]
+    dist.all_gather(sizes, local_size)
+    max_size = int(max(s.item() for s in sizes))
+
+    # Pad tensor to max_size if needed
+    if tensor.shape[0] < max_size:
+        pad = torch.zeros(max_size - tensor.shape[0], *tensor.shape[1:],
+                          dtype=tensor.dtype, device=tensor.device)
+        tensor = torch.cat([tensor, pad], dim=0)
+
     gather_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     dist.all_gather(gather_list, tensor)
 
-    # Move back to CPU if we moved it
-    if was_cpu:
-        gather_list = [t.cpu() for t in gather_list]
+    # Trim padding and move back to CPU if needed
+    result = []
+    for i, t in enumerate(gather_list):
+        actual_size = int(sizes[i].item())
+        t = t[:actual_size]
+        if was_cpu:
+            t = t.cpu()
+        result.append(t)
 
-    return gather_list
+    return result
 
 
 # =============================================================================
