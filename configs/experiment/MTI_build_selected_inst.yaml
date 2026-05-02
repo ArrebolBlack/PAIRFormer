@@ -21,9 +21,6 @@ data:
     test: data/MTI/MTI_pair_random_split.txt
   with_esa: true
   split_column: 6
-  col_mirna_seq: 4
-  col_mrna_seq: 2
-  col_label: 5
   split_map:
     train: train
     val: val
@@ -39,12 +36,7 @@ run:
 scalable:
   cache_root: ${paths.cache_root}
 
-instance_ckpt_path: checkpoints/CheapCTSNet/checkpoints/best.pt
-
-# DDP 支持
-ddp:
-  local_rank: 0
-  world_size: 1
+instance_ckpt_path: checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt
 
 instance_model:
   name: targetnet_optimized
