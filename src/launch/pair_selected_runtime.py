@@ -24,6 +24,7 @@ def build_selected_loader(
     num_workers: int,
     max_pairs: Optional[int] = None,
     shuffle: bool = False,
+    truncate_k: Optional[int] = None,
 ):
     ds = SelectedPairDataset(
         cache_root,
@@ -31,6 +32,10 @@ def build_selected_loader(
         cache_type=cache_type,
         max_pairs=max_pairs,
     )
+
+    def _collate(batch):
+        return selected_pair_collate(batch, truncate_k=truncate_k)
+
     loader = DataLoader(
         ds,
         batch_size=batch_size,
@@ -38,7 +43,7 @@ def build_selected_loader(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
-        collate_fn=selected_pair_collate,
+        collate_fn=_collate,
         drop_last=False,
     )
     return ds, loader

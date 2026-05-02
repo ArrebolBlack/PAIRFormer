@@ -113,6 +113,9 @@ def main(cfg: DictConfig) -> None:
     max_pairs = cfg.scalable.get("max_eval_pairs", None)
     batch_size = int(cfg.run.get("batch_size", 16))
     num_workers = int(cfg.run.get("num_workers", 4))
+    truncate_k = cfg.run.get("truncate_k", None)
+    if truncate_k is not None:
+        truncate_k = int(truncate_k)
     ds, loader = build_selected_loader(
         cache_root=cache_root,
         split=split,
@@ -121,10 +124,12 @@ def main(cfg: DictConfig) -> None:
         num_workers=num_workers,
         max_pairs=(None if max_pairs is None else int(max_pairs)),
         shuffle=False,
+        truncate_k=truncate_k,
     )
+    truncate_info = f" truncate_k={truncate_k}" if truncate_k else ""
     print(
         f"[eval_pair_selected] split={split} cache_type={cache_type} "
-        f"pairs={len(ds)} batch_size={batch_size}"
+        f"pairs={len(ds)} batch_size={batch_size}{truncate_info}"
     )
 
     data_cfg = DataConfig.from_omegaconf(cfg.data)

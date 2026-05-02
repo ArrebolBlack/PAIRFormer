@@ -112,6 +112,7 @@ def main(cfg: DictConfig) -> None:
             num_workers=int(cfg.scalable.get("num_workers", 8)),
             task_pairs=int(cfg.scalable.get("task_pairs", 16)),
             mp_start_method=str(cfg.scalable.get("mp_start_method", "spawn")),
+            candidate_pool_size=int(cfg.scalable.get("candidate_pool_size", 0)) or None,
         ),
     )
 

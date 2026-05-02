@@ -19,6 +19,7 @@ from src.data.em_cache import MemmapCacheStore
 
 from src.selectors.st_selector import STSelectorConfig
 from src.selectors.selector_module import SelectorModule
+from src.em.selector_runner import _restrict_topn_pool
 
 
 # -----------------------------------------------------------------------------
@@ -129,6 +130,13 @@ def main(cfg: DictConfig) -> None:
     # selector control knobs
     epoch = int(cfg.get("selector_epoch", 0))
 
+    # Robustness experiment: candidate_pool_size limits visible pool
+    candidate_pool_size = cfg.get("candidate_pool_size", None)
+    if candidate_pool_size is not None:
+        candidate_pool_size = int(candidate_pool_size)
+    candidate_pool_mode = str(cfg.get("candidate_pool_mode", "topn"))
+    candidate_pool_allow_below_kmax = bool(cfg.get("candidate_pool_allow_below_kmax", False))
+
     for split in splits:
         ds, _ = build_dataset_and_loader(
             data_cfg=data_cfg,
@@ -233,6 +241,23 @@ def main(cfg: DictConfig) -> None:
                     # meta: pos (only required by selector)
                     meta = ds.batch_gather_by_uid(uids, fields=("pos",))
                     pos = meta["pos"].view(-1).float().cpu()
+
+                    # --- Robustness: restrict candidate pool ---
+                    if candidate_pool_size is not None:
+                        uids, pos, cheap_logit, cheap_emb = _restrict_topn_pool(
+                            uids=uids,
+                            pos=pos,
+                            cheap_logit=cheap_logit,
+                            cheap_emb=cheap_emb,
+                            n_pool=candidate_pool_size,
+                            kmax=int(sel_cfg.kmax),
+                            mode=candidate_pool_mode,
+                            topn_ratio=1.0,
+                            seed=int(base_seed),
+                            pair_id=int(pair_id),
+                            allow_below_kmax=candidate_pool_allow_below_kmax,
+                        )
+                        n = int(cheap_logit.numel())
 
                     sel_uids, sel_len = selector(
                         uids=uids,

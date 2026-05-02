@@ -41,6 +41,7 @@ class SelectionCacheBuildConfig:
     candidate_pool_mode: str = "topn"           # "topn" or "topn_plus_rand"
     candidate_pool_topn_ratio: float = 1.0     # "topn" or "topn_plus_rand"
     candidate_pool_seed: int = 2020
+    candidate_pool_allow_below_kmax: bool = False  # allow n_pool < kmax for Robustness exp
 
     # DDP sharding
     rank: int = 0
@@ -69,6 +70,7 @@ def _restrict_topn_pool(
     topn_ratio: float,
     seed: int,
     pair_id: int,
+    allow_below_kmax: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if n_pool is None:
         return uids, pos, cheap_logit, cheap_emb
@@ -76,16 +78,22 @@ def _restrict_topn_pool(
     if n <= 0:
         return uids, pos, cheap_logit, cheap_emb
 
-    # 关键：保证 n_pool >= kmax，否则 selector 没法选满 K
-    n_eff = int(max(kmax, min(n_pool, n)))
+    # When allow_below_kmax=True (for Robustness experiment), permit n_pool < kmax
+    # so the selector picks fewer than K instances from a smaller visible pool.
+    if allow_below_kmax:
+        n_eff = int(min(n_pool, n))
+    else:
+        n_eff = int(max(kmax, min(n_pool, n)))
     if n_eff >= n:
         return uids, pos, cheap_logit, cheap_emb
 
     if mode == "topn":
         idx = torch.topk(cheap_logit, k=n_eff, dim=0, largest=True, sorted=True).indices
     elif mode == "topn_plus_rand":
-        base = int(max(kmax, min(n_eff, round(topn_ratio * n_eff))))
-        base = max(kmax, min(base, n_eff))
+        base = int(min(n_eff, round(topn_ratio * n_eff)))
+        if not allow_below_kmax:
+            base = max(kmax, base)
+        base = max(1, min(base, n_eff))
         base_idx = torch.topk(cheap_logit, k=base, dim=0, largest=True, sorted=True).indices
 
         remain = n_eff - base
@@ -364,6 +372,7 @@ class SelectionCacheRunner:
                     topn_ratio=float(cfg.candidate_pool_topn_ratio),
                     seed=int(cfg.candidate_pool_seed),
                     pair_id=int(pair_id),
+                    allow_below_kmax=bool(cfg.candidate_pool_allow_below_kmax),
                 )
 
             pair_ids_buf.append(int(pair_id))

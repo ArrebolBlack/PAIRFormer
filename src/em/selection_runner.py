@@ -28,6 +28,7 @@ def run_selection_cache(
     candidate_pool_mode="topn",
     candidate_pool_topn_ratio: float = 1.0,
     candidate_pool_seed: int = 2020,
+    candidate_pool_allow_below_kmax: bool = False,
     rank: int = 0,
     world_size: int = 1,
 ) -> None:
@@ -47,6 +48,7 @@ def run_selection_cache(
         candidate_pool_mode=candidate_pool_mode,
         candidate_pool_topn_ratio=candidate_pool_topn_ratio,
         candidate_pool_seed=candidate_pool_seed,
+        candidate_pool_allow_below_kmax=candidate_pool_allow_below_kmax,
         rank=int(rank),
         world_size=int(world_size),
     )

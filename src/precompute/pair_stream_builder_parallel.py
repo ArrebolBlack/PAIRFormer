@@ -31,6 +31,7 @@ class PairStreamParallelBuildConfig:
     num_workers: int = 8
     task_pairs: int = 16
     mp_start_method: str = "spawn"
+    candidate_pool_size: Optional[int] = None  # Robustness exp: limit visible pool
 
 
 def _chunk_records(records: Iterable[PairRecord], chunk_size: int) -> Iterator[List[PairRecord]]:
@@ -115,6 +116,13 @@ class PairStreamBuilderParallel:
         self.cache_writer = cache_writer
         self.cfg = cfg
         self.device = torch.device(cfg.device)
+        self._need_cheap_emb = False
+        # Detect if selector needs cheap_emb by creating a probe
+        try:
+            probe = selector_factory()
+            self._need_cheap_emb = getattr(probe.cfg, 'keep_cheap_emb', False) if hasattr(probe, 'cfg') else False
+        except Exception:
+            pass
 
     def build(self, records: Iterable[PairRecord]) -> None:
         self.cheap_model.to(self.device).eval()
@@ -180,32 +188,52 @@ class PairStreamBuilderParallel:
         selector.reset(pair_id=int(pair_id))
 
         n = int(xs_tensor.shape[0])
-        start = 0
-        while start < n:
-            end = min(n, start + int(self.cfg.cheap_batch_size))
-            x = xs_tensor[start:end].to(self.device, non_blocking=True).float()
-            esa = esa_tensor[start:end].to(self.device, non_blocking=True)
-            pos = pos_tensor[start:end].to(self.device, non_blocking=True)
+
+        # --- Phase 1: score all candidates with cheap model ---
+        all_logit = torch.empty(n, dtype=torch.float32)
+        all_feat = torch.empty(n, self.cheap_emb_dim, dtype=torch.float32) if self._need_cheap_emb else None
+        offset = 0
+        while offset < n:
+            end = min(n, offset + int(self.cfg.cheap_batch_size))
+            x = xs_tensor[offset:end].to(self.device, non_blocking=True).float()
+            esa = esa_tensor[offset:end].to(self.device, non_blocking=True)
+            pos = pos_tensor[offset:end].to(self.device, non_blocking=True)
             feat, logit = get_embedding_and_logit(
                 self.cheap_model,
                 x,
                 esa_scores=esa,
                 pos=pos,
             )
-            feat = feat.detach().cpu()
-            logit = logit.detach().cpu()
+            batch_size = end - offset
+            all_logit[offset:end] = logit.detach().cpu()[:batch_size]
+            if all_feat is not None:
+                all_feat[offset:end] = feat.detach().cpu()[:batch_size]
+            offset = end
 
-            for i in range(end - start):
-                selector.add(
-                    StreamSelectorInput(
-                        x=xs_tensor[start + i],
-                        esa=float(esa_tensor[start + i].item()),
-                        pos=float(pos_tensor[start + i].item()),
-                        cheap_logit=float(logit[i].item()),
-                        cheap_emb=feat[i],
-                    )
+        # --- Phase 2 (optional): restrict candidate pool for Robustness experiment ---
+        if self.cfg.candidate_pool_size is not None and n > self.cfg.candidate_pool_size:
+            n_pool = int(self.cfg.candidate_pool_size)
+            top_idx = torch.topk(all_logit, k=n_pool, largest=True).indices
+            top_idx = top_idx.sort().values  # preserve original order
+            xs_tensor = xs_tensor[top_idx]
+            esa_tensor = esa_tensor[top_idx]
+            pos_tensor = pos_tensor[top_idx]
+            all_logit = all_logit[top_idx]
+            if all_feat is not None:
+                all_feat = all_feat[top_idx]
+            n = n_pool
+
+        # --- Phase 3: feed to selector ---
+        for i in range(n):
+            selector.add(
+                StreamSelectorInput(
+                    x=xs_tensor[i],
+                    esa=float(esa_tensor[i].item()),
+                    pos=float(pos_tensor[i].item()),
+                    cheap_logit=float(all_logit[i].item()),
+                    cheap_emb=all_feat[i] if all_feat is not None else torch.empty(0),
                 )
-            start = end
+            )
 
         selected = selector.finalize()
         self.cache_writer.write_pair(
