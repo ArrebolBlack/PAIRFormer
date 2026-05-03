@@ -728,8 +728,11 @@ def main(cfg: DictConfig) -> None:
     test_loader_boot = build_eval_loader_for_split(bootstrap_split)
 
     # NEW: require_ready 取决于 test_instance_mode
-    require_inst_cache_ready = (test_instance_mode == "cached")
-    tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=require_inst_cache_ready)
+    # online mode: don't require instance cache, use online forward pass
+    if test_instance_mode == "online":
+        tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=False)
+    else:
+        tp_boot = build_token_provider_for_split(bootstrap_split, require_ready=True)
 
     trainer = TrainerEM(
         cfg=tr_cfg,
@@ -774,6 +777,7 @@ def main(cfg: DictConfig) -> None:
             instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
 
     def run_test_eval_for_current_trainer(tag_prefix_local: str) -> None:
+        _pk = {"use_instance_cache": False} if test_instance_mode == "online" else None
         for split_idx in test_splits:
             print(f"[eval_em][{tag_prefix_local}] Building test loader/token_provider for split='{split_idx}'")
 
@@ -808,6 +812,7 @@ def main(cfg: DictConfig) -> None:
                     reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
                     softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
                     topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                    predict_kwargs=_pk,
                 )
 
             # ---------- (B) val best_threshold (optional) ----------
@@ -836,6 +841,7 @@ def main(cfg: DictConfig) -> None:
                         reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
                         softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
                         topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                        predict_kwargs=_pk,
                     )
             else:
                 print(f"[eval_em][Test {split_idx}][{tag_prefix_local}] Skip val-best eval because run.best_threshold is None.")
@@ -861,6 +867,7 @@ def main(cfg: DictConfig) -> None:
                     reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
                     softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
                     topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
+                    predict_kwargs=_pk,
                 )
 
             best_thr_test = res_sweep.get("best_threshold", None)

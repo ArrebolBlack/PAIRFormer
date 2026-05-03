@@ -1,0 +1,43 @@
+# @package _global_
+# deepTargetPro 80/20 split, zero overlap, warmup restored for K=64
+
+defaults:
+  - deepTargetPro_EM_Pipeline
+
+experiment_name: "deepTargetPro_8020_split_K64"
+experiment:
+  name: "deepTargetPro_8020_split_K64"
+
+seed: 2020
+
+paths:
+  cache_root: "cache_dtp_8020_split"
+
+data:
+  path:
+    train: "data/rebuttal/deepTargetPro_8020_split/deepTargetPro_Train_Validation.txt"
+    val:   "data/rebuttal/deepTargetPro_8020_split/deepTargetPro_Train_Validation.txt"
+    test:  "data/rebuttal/deepTargetPro_8020_split/deepTargetPro_Test.txt"
+
+run:
+  kmax: 64
+  num_epochs: 100
+  eval_test_after_train: true
+  eval_test_with_last: true
+  eval_test_with_best: true
+  test_instance_mode: online
+  force_overwrite_bootstrap: true
+
+em:
+  policy:
+    warmup_epochs: 30
+
+trainer_em:
+  num_epochs: 100
+  monitor: f1
+  greater_is_better: true
+
+logging:
+  wandb:
+    project: "dtp_8020_split"
+    tags: ["8020_split", "K64", "warmup30"]

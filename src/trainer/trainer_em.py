@@ -718,7 +718,7 @@ class TrainerEM:
                 self.ema.shadow[k] = v.to(self.device)
 
     @torch.no_grad()
-    def predict(self, loader: Any, use_ema: bool = True) -> Dict[str, Any]:
+    def predict(self, loader: Any, use_ema: bool = True, use_instance_cache: Optional[bool] = None) -> Dict[str, Any]:
         ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
         with ctx:
             self.agg_model.eval()
@@ -728,7 +728,7 @@ class TrainerEM:
             all_pair_id = []
 
             for batch_cpu in tqdm(loader, desc="Predict", disable=not is_rank0()):
-                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch)
+                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch, use_instance_cache=use_instance_cache)
 
                 tokens = out.get("tokens", None)
                 y = out.get("y_pair", None)

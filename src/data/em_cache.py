@@ -540,10 +540,17 @@ class MemmapCacheStore:
 
 
             if int(d.get("total_cts")) != int(total_cts) or int(d.get("emb_dim")) != int(emb_dim):
-                raise RuntimeError(
-                    f"InstanceCache exists but shape mismatch: meta(total_cts={d.get('total_cts')}, emb_dim={d.get('emb_dim')}) "
-                    f"vs requested(total_cts={total_cts}, emb_dim={emb_dim})."
-                )
+                if not require_ready:
+                    import shutil
+                    print(f"[InstanceCache] shape mismatch but require_ready=False, removing stale cache at {self.inst_dir}")
+                    shutil.rmtree(self.inst_dir, ignore_errors=True)
+                    os.makedirs(self.inst_dir, exist_ok=True)
+                    return  # skip rest — cache will be built on demand
+                else:
+                    raise RuntimeError(
+                        f"InstanceCache exists but shape mismatch: meta(total_cts={d.get('total_cts')}, emb_dim={d.get('emb_dim')}) "
+                        f"vs requested(total_cts={total_cts}, emb_dim={emb_dim})."
+                    )
 
             meta_dtype_logits = _dtype_from_str(d.get("dtype_logits"))
             meta_dtype_emb = _dtype_from_str(d.get("dtype_emb"))

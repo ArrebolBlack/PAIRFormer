@@ -310,6 +310,7 @@ def evaluate_with_trainer(
     reduction: str = "max",
     softmax_temp: float = 1.0,
     topk: int = 3,
+    predict_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     高层评估函数：给定 Trainer 和 DataLoader，在 **不直接操心模型细节** 的情况下完成评估。
@@ -331,7 +332,10 @@ def evaluate_with_trainer(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) 调 Trainer 的 predict 接口
-    outputs = trainer.predict(loader, use_ema=True)
+    _predict_kwargs = {"use_ema": True}
+    if predict_kwargs:
+        _predict_kwargs.update(predict_kwargs)
+    outputs = trainer.predict(loader, **_predict_kwargs)
 
     logits = outputs.get("logits")
     labels = outputs.get("labels")

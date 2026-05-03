@@ -1000,6 +1000,7 @@ def main(cfg: DictConfig) -> None:
     val_eval_dir = Path(eval_dir) / "val"
     val_eval_dir.mkdir(parents=True, exist_ok=True)
 
+    _val_pk = {"use_instance_cache": val_use_inst_cache_default}
     val_eval_result = evaluate_with_trainer(
         trainer=trainer,
         loader=val_loader,
@@ -1014,6 +1015,7 @@ def main(cfg: DictConfig) -> None:
         reduction=cfg.run.get("eval_reduction", "max"),
         softmax_temp=cfg.run.get("eval_softmax_temp", 1.0),
         topk=cfg.run.get("eval_topk", 3),
+        predict_kwargs=_val_pk,
     )
 
     best_threshold = val_eval_result.get("best_threshold", None)

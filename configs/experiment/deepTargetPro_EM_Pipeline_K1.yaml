@@ -1,0 +1,39 @@
+# @package _global_
+# configs/experiment/deepTargetPro_EM_Pipeline_K1.yaml
+# EXP PLAN 3.2: deepTargetPro K=1 baseline (transfer learning from miRAW encoders)
+# Inherits from deepTargetPro_EM_Pipeline.yaml, overrides kmax and training params
+
+defaults:
+  - deepTargetPro_EM_Pipeline
+
+experiment_name: "deepTargetPro_EM_Pipeline_K1"
+experiment:
+  name: "deepTargetPro_EM_Pipeline_K1"
+
+run:
+  kmax: 1
+  num_epochs: 50
+  eval_test_after_train: true
+  eval_test_with_last: true
+  eval_test_with_best: true
+
+em:
+  selector_module:
+    cfg:
+      k1_ratio: 1.0
+  policy:
+    warmup_epochs: 0
+
+trainer_em:
+  num_epochs: 50
+  lr_agg: 3e-5
+  lr_inst: 0.0
+  wd_inst: 0.0
+  scheduler_t_max: 50
+  monitor: f1
+  greater_is_better: true
+
+logging:
+  wandb:
+    project: "rebuttal_EXP3_K1_deepTargetPro"
+    tags: ["EXP3", "K1", "deepTargetPro"]
