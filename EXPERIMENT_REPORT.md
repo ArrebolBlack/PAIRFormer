@@ -272,18 +272,15 @@ Decoder:  -- 置换不变
 
 #### 3.4.4 聚合器架构消融实验
 
-**对比的聚合器类型** (均在 V2 relabel 数据上, K=64, d_model=1024):
+**对比的聚合器类型** (均在 V3 pipeline, 相同 cache, K=64, d_model=1024):
 
-| 聚合器 | 架构 | 参数量 | Val F1 |
-|--------|------|--------|--------|
-| PairSetTransformerAggregator (SAB) | Set Transformer, L=4, H=16 | ~18M | 0.7353* |
-| PairGNNAggregator | k-NN Graph + GAT, L=3, k=8 | ~37M | 0.7602 |
-| PairGNNMoEAggregator | GNN + MoE (4 experts) | ~64M | 0.7597 |
-| PairCNNAggregator | Sorted 1D-CNN, dilated | ~14M | 0.6865 |
+| 聚合器 | 架构 | 参数量 | Test F1 | Test PR-AUC | Test ROC-AUC |
+|--------|------|--------|---------|-------------|--------------|
+| **PairSetTransformerAggregator (SAB)** | **Set Transformer, L=4, H=16** | **~18M** | **0.7715** | **0.8117** | **0.8187** |
+| PairGNNAggregator | k-NN Graph + GAT, L=3, k=8 | ~37M | 0.7602 | 0.8049 | 0.8049 |
+| PairCNNAggregator | Sorted 1D-CNN, dilated | ~14M | 0.6850 | 0.7641 | 0.7445 |
 
-*注: 不同聚合器实验使用了不同的数据处理流程, 上述对比仅供参考。Set Transformer 在完整 V3 pipeline 中 (K=512) 达到了最好的 0.7913。*
-
-**结论**: Set Transformer (SAB) 在参数效率和性能上均表现最优。CNN 聚合器因依赖固定排序而性能较差 (0.6865)。GNN 聚合器性能接近但参数量翻倍。
+**结论**: Set Transformer (SAB) 在参数效率和性能上均表现最优, 以最小的参数量取得最高的 F1 (+1.1pp vs GNN, +8.7pp vs CNN)。CNN 聚合器因依赖固定排序而性能较差。GNN 聚合器性能接近但参数量是 SAB 的 2 倍。
 
 #### 3.4.5 Set Transformer 缩放消融
 
@@ -366,14 +363,15 @@ Decoder:  -- 置换不变
 
 **SWA K=256 增量训练收益**: 0.7815 -> 0.7832 -> 0.7847 -> 0.7854, 持续延长训练带来渐进提升。
 
-#### 4.1.3 聚合器类型对比 (V3 pipeline, K=64, X-Large encoder)
+#### 4.1.3 聚合器类型对比 (V3 pipeline, K=64, X-Large encoder, 相同 cache)
 
-| 聚合器 | Val F1 | 参数量 |
-|--------|--------|--------|
-| PairSetTransformerAggregator (ST05, SAB) | 0.6923 | ~18M |
-| PairCNNAggregator | 0.6865 | ~14M |
-| PairGNNAggregator | 0.7602 | ~37M |
-| PairGNNMoEAggregator | 0.7597 | ~64M |
+| 聚合器 | Test F1 | Test PR-AUC | Test ROC-AUC | 参数量 |
+|--------|---------|-------------|--------------|--------|
+| **PairSetTransformerAggregator (SAB)** | **0.7715** | **0.8117** | **0.8187** | **~18M** |
+| PairGNNAggregator | 0.7602 | 0.8049 | 0.8049 | ~37M |
+| PairCNNAggregator | 0.6850 | 0.7641 | 0.7445 | ~14M |
+
+*注: 之前版本中 SAB=0.6923 来自 ST05 实验（使用了不同的数据 split），已更正。所有聚合器均在相同 cache (cache_mti_full_topk_retrain_r4_v3relbl, K=64, 63095 test pairs) 上评估。*
 
 #### 4.1.4 多种子实验
 
