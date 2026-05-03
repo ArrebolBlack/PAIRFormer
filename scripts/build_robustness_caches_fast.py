@@ -72,25 +72,44 @@ def main():
 
     config_dir = str(Path("configs").resolve())
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
-        cfg = compose(config_name="config", overrides=[f"experiment=MTI_train_selected_inst"])
+        cfg = compose(config_name="config", overrides=[f"experiment=MTI_build_selected_inst"])
 
     data_cfg = DataConfig.from_omegaconf(cfg.data)
 
-    # Cheap model
-    cheap_cfg = cfg.cheap_model
-    cheap_model = build_model(
-        str(cheap_cfg.get("arch", cheap_cfg.get("name"))), cheap_cfg, data_cfg=data_cfg
-    )
+    # Cheap model - construct manually since config may not have cheap_model section
+    cheap_cfg = OmegaConf.create({
+        "arch": "CheapCTSNet_TinyConv",
+        "num_channels": [16, 16],
+        "num_blocks": [2, 2],
+        "pool_size": 2,
+        "stem_kernel_size": 5,
+        "block_kernel_size": 3,
+        "skip_connection": True,
+        "dropout": 0.3,
+        "in_channels": 10,
+        "seq_len": 50,
+    })
+    cheap_model = build_model("CheapCTSNet_TinyConv", cheap_cfg, data_cfg=data_cfg)
     load_ckpt_into_model(cheap_model, Path(args.cheap_ckpt), device=device, use_ema_shadow=False)
     cheap_model.to(device).eval()
     cheap_emb_dim = cheap_model.linear.out_features if hasattr(cheap_model, 'linear') else 64
     print(f"[Robustness Fast] Cheap model loaded, emb_dim={cheap_emb_dim}")
 
-    # Instance model
-    inst_cfg = cfg.instance_model
-    instance_model = build_model(
-        str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg
-    )
+    # Instance model (X-Large: se_reduction=8, target_output_length=12 → emb_dim=128*12=1536)
+    inst_cfg = OmegaConf.create({
+        "arch": "TargetNet_Optimized",
+        "num_channels": [64, 64, 128, 128],
+        "num_blocks": [3, 3, 3, 3],
+        "multi_scale": True,
+        "se_type": "cbam",
+        "se_reduction": 8,
+        "target_output_length": 12,
+        "use_bn": True,
+        "dropout": 0.1,
+        "in_channels": 10,
+        "seq_len": 50,
+    })
+    instance_model = build_model("TargetNet_Optimized", inst_cfg, data_cfg=data_cfg)
     load_ckpt_into_model(instance_model, Path(args.inst_ckpt), device=device, use_ema_shadow=False)
     instance_model.to(device).eval()
     inst_emb_dim = instance_model.linear.in_features if hasattr(instance_model, 'linear') else 1536
@@ -111,8 +130,7 @@ def main():
             num_pairs=num_pairs,
             kmax=K,
             inst_emb_dim=inst_emb_dim,
-            has_cheap_logit=False,
-            has_cheap_emb=False,
+            has_inst_logit=True,
         )
         writers[n] = writer
         print(f"[Robustness Fast] n={n} -> {out_dir}")
