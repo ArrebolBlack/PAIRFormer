@@ -1,0 +1,67 @@
+# @package _global_
+# Full pipeline Stage 1: TargetNet_Optimized on 80/20 balanced split data
+# CTS windows are auto-extracted from full mRNA transcripts
+
+defaults:
+  - miRAW_TargetNet_Optimized_baseline
+  - _self_
+
+experiment_name: "miRAW_8020_full_TargetNet_Opt"
+experiment:
+  name: miRAW_8020_full_TargetNet_Opt
+  task: window_level_train
+
+seed: 2020
+
+data:
+  path:
+    train: "data/rebuttal/miRAW_8020_split/miRAW_Train_Validation.txt"
+    val:   "data/rebuttal/miRAW_8020_split/miRAW_Train_Validation.txt"
+    test:  "data/rebuttal/miRAW_8020_split/miRAW_Test.txt"
+
+model:
+  arch_variant: "opt4_tiny"
+
+paths:
+  cache_root: "cache_miRAW_8020_full_s1"
+
+run:
+  num_epochs: 100
+  batch_size: 512
+  reduction: "softmax"
+  train_reduction: ${run.reduction}
+  eval_reduction:  ${run.reduction}
+  test_reduction:  ${run.reduction}
+  train_softmax_temp: 1.0
+  eval_softmax_temp: 1.0
+  test_softmax_temp: 1.0
+  train_topk: 3
+  eval_topk: 3
+  test_topk: 3
+
+train:
+  optimizer: adamw
+  lr: 0.005
+  weight_decay: 0.0
+  scheduler: cosine
+  loss_type: bce_focal
+  focal_gamma: 1.0
+  focal_alpha: 0.4
+  focal_lambda: 1
+  bce_lambda: 0.01
+  esa_weighting: true
+  esa_scale: 10.0
+  esa_lambda_pos: 1.0
+  esa_lambda_neg: 0.5
+  amp: true
+  grad_clip: 1.0
+  ema:
+    enabled: true
+    decay: 0.999
+  monitor: loss
+  greater_is_better: false
+
+logging:
+  wandb:
+    project: "miRAW_8020_full"
+    tags: ["TargetNet_Optimized", "Stage1", "8020_balanced"]
