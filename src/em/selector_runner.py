@@ -89,6 +89,12 @@ def _restrict_topn_pool(
 
     if mode == "topn":
         idx = torch.topk(cheap_logit, k=n_eff, dim=0, largest=True, sorted=True).indices
+    elif mode == "random":
+        # Robustness experiment: uniformly sample n_eff candidates from the full pool
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(int(seed + pair_id))
+        perm = torch.randperm(n, generator=gen)
+        idx = perm[:n_eff]
     elif mode == "topn_plus_rand":
         base = int(min(n_eff, round(topn_ratio * n_eff)))
         if not allow_below_kmax:

@@ -32,6 +32,7 @@ class PairStreamParallelBuildConfig:
     task_pairs: int = 16
     mp_start_method: str = "spawn"
     candidate_pool_size: Optional[int] = None  # Robustness exp: limit visible pool
+    candidate_pool_mode: str = "topn"  # "topn" or "random"
 
 
 def _chunk_records(records: Iterable[PairRecord], chunk_size: int) -> Iterator[List[PairRecord]]:
@@ -213,14 +214,22 @@ class PairStreamBuilderParallel:
         # --- Phase 2 (optional): restrict candidate pool for Robustness experiment ---
         if self.cfg.candidate_pool_size is not None and n > self.cfg.candidate_pool_size:
             n_pool = int(self.cfg.candidate_pool_size)
-            top_idx = torch.topk(all_logit, k=n_pool, largest=True).indices
-            top_idx = top_idx.sort().values  # preserve original order
-            xs_tensor = xs_tensor[top_idx]
-            esa_tensor = esa_tensor[top_idx]
-            pos_tensor = pos_tensor[top_idx]
-            all_logit = all_logit[top_idx]
+            pool_mode = str(self.cfg.candidate_pool_mode)
+            if pool_mode == "random":
+                # Uniformly sample n_pool candidates (Robustness experiment)
+                gen = torch.Generator(device="cpu")
+                gen.manual_seed(int(pair_id))
+                idx = torch.randperm(n, generator=gen)[:n_pool]
+            else:
+                # Default: top-n by cheap score
+                idx = torch.topk(all_logit, k=n_pool, largest=True).indices
+            idx = idx.sort().values  # preserve original order
+            xs_tensor = xs_tensor[idx]
+            esa_tensor = esa_tensor[idx]
+            pos_tensor = pos_tensor[idx]
+            all_logit = all_logit[idx]
             if all_feat is not None:
-                all_feat = all_feat[top_idx]
+                all_feat = all_feat[idx]
             n = n_pool
 
         # --- Phase 3: feed to selector ---
