@@ -52,7 +52,7 @@ def load_results(results_dir):
     file_map = {
         "miRAW": "miRAW_n_distribution.json",
         "deepTargetPro": "deepTargetPro_n_distribution.json",
-        "MTI_new": "MTI_new_n_distribution_.json",
+        "MTI_new": "MTI_n_distribution.json",
     }
     for ds, fname in file_map.items():
         path = os.path.join(results_dir, fname)
@@ -124,10 +124,8 @@ def plot_main_figure(results, output_dir):
 
         frac_gt_k = 100.0 * (n_vals > BUDGET_K).sum() / len(n_vals)
         stats_text = (
-            f"N = {s['num_pairs']:,}\n"
-            f"median = {s['n_median']:.0f}\n"
-            f"P95 = {s['n_p95']:.0f}\n"
-            f">{BUDGET_K} = {frac_gt_k:.1f}%"
+            f"|D|={s['num_pairs']:,}  med={s['n_median']:.0f}\n"
+            f">{BUDGET_K}: {frac_gt_k:.1f}%"
         )
         ax.text(0.97, 0.97, stats_text, transform=ax.transAxes,
                 fontsize=8, va="top", ha="right",
