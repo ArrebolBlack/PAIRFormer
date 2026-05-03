@@ -2,18 +2,25 @@
 
 ## 2026-05-04
 
-### Baseline 结果
-- 10-fold 默认配置：F1=0.8151±0.0288, ROC-AUC=0.8812±0.0181
-- fold1 单独：F1=0.8203, ROC-AUC=0.8951
+### Baseline
+- fold1 默认配置：F1=0.8203, ROC-AUC=0.8951（n_layers=3, d_model=256, bs=64, kmax=64, warmup=10）
+- 10-fold mean：F1=0.8151±0.0288
 
-### 已完成
-- [x] 10-fold balanced 80/20 数据准备和训练
-- [x] fold1 cache (kmax=64) 已构建，state=ready
-- [x] 确认代码无 early stopping（跑满 num_epochs，取 best ckpt）
-- [x] 确认远程前置：CheapCTSNet ckpt 512KB, TargetNet_Optimized ckpt 240KB, 数据 2.3MB
+### Round A: K Budget Sweep ✅ 完成
 
-### 当前
-- 准备 Round A K sweep 实验计划
+| K    | Test F1 | 备注           |
+|------|---------|---------------|
+| 8    | 0.8444  | 最优，极小预算  |
+| 32   | 0.8333  |               |
+| 64   | 0.8341  |               |
+| 128  | 0.8224  |               |
+| 256  | 0.8304  |               |
+| 512  | 0.8297  |               |
+| 1024 | 0.8203  |               |
+| 2048 | 构建中   |               |
 
-### 卡点
-- 无
+**结论**：小K更优，K=8已接近饱和。大K反而引入噪声。固定 K=64 进入 Round B（兼顾性能和鲁棒性）。
+
+### 当前：Round B Model Capacity Sweep
+- 固定 kmax=64，搜索 n_layers × d_model
+- 分发到 A100 执行
