@@ -154,41 +154,39 @@ def plot_fig3a(out_dir):
 
 
 # =========================================================
-# Figure 3b: Robustness vs n (F1 + PR-AUC on same axis)
+# Figure 3b: Robustness vs n (dual panel: PR-AUC + F1)
 # =========================================================
 
 def plot_fig3b(out_dir):
     _setup()
-    fig, ax = plt.subplots(figsize=(3.35, 2.45))
+    fig, axes = plt.subplots(1, 2, figsize=(6.9, 2.45), sharex=True)
+    panels = [("PR-AUC", "prauc"), ("F1@0.5", "f1")]
 
-    y_f1 = np.array(ROBUST["f1"])
-    y_prauc = np.array(ROBUST["prauc"])
+    for ax, (ylabel, key) in zip(axes, panels):
+        y = np.array(ROBUST[key])
 
-    ax.plot(N_PLOT, y_f1, color=C_BLUE, ls="-", lw=2.0,
-            marker="o", ms=5.2, mfc=C_BLUE, mec="white", mew=0.8,
-            label="F1@0.5", zorder=3)
-    ax.plot(N_PLOT, y_prauc, color=C_ORANGE, ls="--", lw=2.0,
-            marker="^", ms=5.4, mfc=C_ORANGE, mec="white", mew=0.8,
-            label="PR-AUC", zorder=3)
+        ax.plot(N_PLOT, y, color=C_BLUE, ls="-", lw=2.0,
+                marker="o", ms=5.2, mfc=C_BLUE, mec="white", mew=0.8,
+                zorder=3)
 
-    ax.set_xscale("log", base=2)
-    ax.set_xticks(N_PLOT)
-    ax.set_xticklabels(N_LABELS)
-    ax.tick_params(axis="x", which="minor", bottom=False)
-    ax.set_xlabel(r"Visible pool size $n$")
-    ax.set_ylabel("Metric value")
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(N_PLOT)
+        ax.set_xticklabels(N_LABELS)
+        ax.tick_params(axis="x", which="minor", bottom=False)
+        ax.set_xlabel(r"Visible pool size $n$")
+        ax.set_ylabel(ylabel)
 
-    _style_ax(ax)
+        _style_ax(ax)
 
-    ax.yaxis.set_major_locator(MultipleLocator(0.1))
-    ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
-    lo, hi = ax.get_ylim()
-    ax.set_ylim(max(0.0, lo - 0.02), min(1.01, hi + 0.02))
+        ax.yaxis.set_major_locator(MultipleLocator(0.05))
+        ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+        lo, hi = ax.get_ylim()
+        ax.set_ylim(max(0.0, lo - 0.02), min(1.01, hi + 0.02))
 
-    _add_kstar(ax)
+    axes[0].text(0.02, 0.98, "(b)", transform=axes[0].transAxes,
+                 ha="left", va="top", fontweight="bold")
 
-    ax.legend(**LEGEND_KW)
-
+    fig.subplots_adjust(wspace=0.28)
     _save(fig, "fig4_MTI", out_dir)
 
 
