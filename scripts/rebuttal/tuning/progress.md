@@ -49,4 +49,5 @@
 ---
 
 ### 当前：Round D — 10-fold 验证
-- 最终配置：k=64, nl=3, dm=64, dim_ff=128, n_heads=2, bs=4, lr=1.06e-4, wu=5
+- 最终配置：k=64, nl=3, dm=128, dim_ff=256, n_heads=4, bs=1, lr=3.75e-5, wu=5
+- fold1 F1=0.8505, vs baseline 0.8203 (+3.7%)

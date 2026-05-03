@@ -3,7 +3,7 @@
 # Plan D: 10-fold Validation — Final Config
 # =============================================================================
 # 最终配置（Round A+B+C 结论）：
-#   k=64, nl=3, dm=64, dim_ff=128, n_heads=2, bs=4, lr=1.06e-4, wu=5
+#   k=64, nl=3, dm=128, dim_ff=256, n_heads=4, bs=1, lr=3.75e-5, wu=5
 #
 # 分发方式：
 #   8×A100: 8 fold 并行 (GPU0-7 各一个 fold) + 2 fold 第二轮
@@ -27,11 +27,11 @@ set -e
 
 BEST_K=64
 NL=3
-DM=64
-DIM_FF=128
-N_HEADS=2
-BS=4
-LR="1.1e-4"
+DM=128
+DIM_FF=256
+N_HEADS=4
+BS=1
+LR="3.75e-5"
 WU=5
 GPU_ID="${GPU:-0}"
 FOLD="${FOLD:-}"
