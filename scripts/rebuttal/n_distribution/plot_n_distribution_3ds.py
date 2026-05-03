@@ -124,9 +124,8 @@ def plot_main_figure(results, output_dir):
 
         frac_gt_k = 100.0 * (n_vals > BUDGET_K).sum() / len(n_vals)
         stats_text = (
-            f"|D|={s['num_pairs']:,}\n"
-            f"med={s['n_median']:.0f}\n"
-            f">{BUDGET_K}: {frac_gt_k:.1f}%"
+            f"N={s['num_pairs']:,} | med={s['n_median']:.0f}\n"
+            f">K={BUDGET_K}: {frac_gt_k:.1f}%"
         )
         ax.text(0.97, 0.97, stats_text, transform=ax.transAxes,
                 fontsize=8, va="top", ha="right",
