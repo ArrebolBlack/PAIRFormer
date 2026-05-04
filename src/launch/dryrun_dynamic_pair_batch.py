@@ -8,23 +8,19 @@ from typing import Any, Dict, Optional
 
 import hydra
 import torch
-from omegaconf import DictConfig
 from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
 from src.data.dataset import ChunkedCTSDataset
 from src.data.em_cache import MemmapCacheStore
-from src.data.pair_dataset_dynamic import DynamicPairDataset
-
 from src.data.pair_batch_builder import PairBatchBuilder, PairBatchBuilderConfig
-
-from src.em.token_provider import _assemble_tokens, TokenAssembleConfig
-from src.data.pair_batch_contract import validate_pair_batch
-
-
 from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
-from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu 
+from src.data.pair_batch_contract import validate_pair_batch
+from src.data.pair_dataset_dynamic import DynamicPairDataset
+from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
+from src.em.token_provider import TokenAssembleConfig, _assemble_tokens
 
 # '''
 # # 在仓库根目录（确保 ./configs 存在）
@@ -38,7 +34,7 @@ from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
 #   +em_cache_root=/data/jiaqi.yin/TargetNet_light_1126/TargetNet_refactored_1126/cache
 # '''
 
-'''
+"""
 
 python -m src.launch.dryrun_dynamic_pair_batch \
   experiment=miRAW_TargetNet_Optimized \
@@ -50,7 +46,8 @@ python -m src.launch.dryrun_dynamic_pair_batch \
   run.cache_path=/data/jiaqi.yin/TargetNet_light_1126/TargetNet_refactored_1126/cache \
   +em_cache_root=/data/jiaqi.yin/TargetNet_light_1126/TargetNet_refactored_1126/cache
 
-'''
+"""
+
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:
     """
@@ -83,7 +80,6 @@ def _resolve_cache_root_like_train_py(cfg: DictConfig, orig_cwd: Path) -> str:
     return str(cache_root)
 
 
-
 def _load_json(p: Path) -> Dict[str, Any]:
     with open(p, "r") as f:
         return json.load(f)
@@ -92,8 +88,9 @@ def _load_json(p: Path) -> Dict[str, Any]:
 def _strip_prefix(k: str) -> str:
     for pref in ("model.", "module.", "net."):
         if k.startswith(pref):
-            return k[len(pref):]
+            return k[len(pref) :]
     return k
+
 
 def load_ckpt_into_model(
     model: torch.nn.Module,
@@ -129,6 +126,7 @@ def load_ckpt_into_model(
     model.to(device)
     model.eval()
 
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     orig_cwd = Path(get_original_cwd())
@@ -152,7 +150,6 @@ def main(cfg: DictConfig) -> None:
     split = str(run_cfg.get("split", "train"))
     kmax = int(run_cfg.get("kmax", 512))
     batch_size = int(run_cfg.get("batch_size", 4))
-
 
     # 1) CTS dataset (CPU)
     data_cfg = DataConfig.from_omegaconf(cfg.data)
@@ -205,8 +202,7 @@ def main(cfg: DictConfig) -> None:
             f"but cheap meta says cheap_version={cheap_meta.get('cheap_version')}."
         )
 
-
-    # 3) Build instance model 
+    # 3) Build instance model
     ckpt_path = _resolve_path(cfg.get("instance_ckpt_path", None), orig_cwd)
     if (ckpt_path is None) or (not ckpt_path.exists()):
         raise FileNotFoundError(
@@ -215,16 +211,19 @@ def main(cfg: DictConfig) -> None:
         )
 
     # EMA 默认对齐训练配置位置：cfg.train.ema.enabled；也允许脚本级覆盖：+instance_use_ema=...
-    use_ema_shadow_default = bool(getattr(getattr(cfg.train, "ema", {}), "enabled", False)) if "train" in cfg else False
+    use_ema_shadow_default = (
+        bool(getattr(getattr(cfg.train, "ema", {}), "enabled", False)) if "train" in cfg else False
+    )
     use_ema_shadow = bool(cfg.get("instance_use_ema", use_ema_shadow_default))
 
     model_name = str(cfg.model.get("arch", cfg.model.get("name")))
     from src.models.registry import build_model
 
     instance_model = build_model(model_name, cfg.model, data_cfg=data_cfg)
-    load_ckpt_into_model(instance_model, str(ckpt_path), device=device, use_ema_shadow=use_ema_shadow)
+    load_ckpt_into_model(
+        instance_model, str(ckpt_path), device=device, use_ema_shadow=use_ema_shadow
+    )
     instance_model = instance_model.to(device).eval()
-
 
     # # 4) Pair dataset + builder(collate)
     # pair_ds = DynamicPairDataset(cts_ds)
@@ -271,7 +270,6 @@ def main(cfg: DictConfig) -> None:
 
     # print("[DryRun] OK")
 
-
     # 4) Pair dataset + CPU builder(collate)
     pair_ds = DynamicPairDataset(cts_ds)
 
@@ -308,10 +306,18 @@ def main(cfg: DictConfig) -> None:
     y_pair_cpu = batch_cpu["y_pair"]
     pair_id_cpu = batch_cpu["pair_id"]
 
-    print(f"[DryRun-CPU] split={split} device={device} kmax={kmax} bs={batch_size} nw={num_workers}")
-    print(f"[DryRun-CPU] pair_id: {tuple(pair_id_cpu.shape)} dtype={pair_id_cpu.dtype} device={pair_id_cpu.device}")
-    print(f"[DryRun-CPU] y_pair : {tuple(y_pair_cpu.shape)} dtype={y_pair_cpu.dtype} device={y_pair_cpu.device}")
-    print(f"[DryRun-CPU] mask   : {tuple(mask_cpu.shape)} dtype={mask_cpu.dtype} device={mask_cpu.device} true={int(mask_cpu.sum().item())}")
+    print(
+        f"[DryRun-CPU] split={split} device={device} kmax={kmax} bs={batch_size} nw={num_workers}"
+    )
+    print(
+        f"[DryRun-CPU] pair_id: {tuple(pair_id_cpu.shape)} dtype={pair_id_cpu.dtype} device={pair_id_cpu.device}"
+    )
+    print(
+        f"[DryRun-CPU] y_pair : {tuple(y_pair_cpu.shape)} dtype={y_pair_cpu.dtype} device={y_pair_cpu.device}"
+    )
+    print(
+        f"[DryRun-CPU] mask   : {tuple(mask_cpu.shape)} dtype={mask_cpu.dtype} device={mask_cpu.device} true={int(mask_cpu.sum().item())}"
+    )
     if X is None:
         print("[DryRun-CPU] X      : None (all-empty selection in this batch)")
     else:
@@ -338,8 +344,8 @@ def main(cfg: DictConfig) -> None:
     assemble_cfg = TokenAssembleConfig(
         use_inst_emb=True,
         use_inst_logit=True,
-        use_pos=False,     # 需要时改 True
-        use_esa=False,     # 需要时改 True
+        use_pos=False,  # 需要时改 True
+        use_esa=False,  # 需要时改 True
     )
 
     tokens = _assemble_tokens(
@@ -363,7 +369,9 @@ def main(cfg: DictConfig) -> None:
     if tokens is None:
         print("[DryRun-GPU] tokens : None (all-empty selection in this batch)")
     else:
-        print(f"[DryRun-GPU] tokens : {tuple(tokens.shape)} dtype={tokens.dtype} device={tokens.device}")
+        print(
+            f"[DryRun-GPU] tokens : {tuple(tokens.shape)} dtype={tokens.dtype} device={tokens.device}"
+        )
 
     print("[DryRun] OK (CPU collate + GPU step)")
 
@@ -387,7 +395,9 @@ def main(cfg: DictConfig) -> None:
         cts_ds=cts_ds,
         store=store,
         instance_model=instance_model,
-        cfg=PairBatchBuilderConfig(kmax=kmax, device=str(device), include_pos=False, include_esa=False),
+        cfg=PairBatchBuilderConfig(
+            kmax=kmax, device=str(device), include_pos=False, include_esa=False
+        ),
     )
 
     pairs_same = [{"pair_id": int(x)} for x in batch_cpu["pair_id"].tolist()]
@@ -403,7 +413,12 @@ def main(cfg: DictConfig) -> None:
         cfg=assemble_cfg,
     )
 
-    batch_out2 = {"pair_id": gpu_direct["pair_id"], "y_pair": gpu_direct["y_pair"], "mask": gpu_direct["mask"], "tokens": tokens2}
+    batch_out2 = {
+        "pair_id": gpu_direct["pair_id"],
+        "y_pair": gpu_direct["y_pair"],
+        "mask": gpu_direct["mask"],
+        "tokens": tokens2,
+    }
     validate_pair_batch(batch_out2, name="gpu_builder_out", require_tokens=True)
 
     # compare
@@ -415,7 +430,6 @@ def main(cfg: DictConfig) -> None:
         print(f"[Compare] max|CPU+GPUstep - GPUcollate| (K={K_show},D={D_show}) = {diff:.6g}")
 
     return
-
 
 
 if __name__ == "__main__":

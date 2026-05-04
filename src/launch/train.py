@@ -59,32 +59,30 @@ train.py
 
 from __future__ import annotations
 
+import numbers
 import os
+import time
 from pathlib import Path
 from typing import List
-import numbers 
-
-import torch
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+import torch
 from hydra.utils import get_original_cwd
+from omegaconf import DictConfig, OmegaConf
+
+from src.config.arch_space import ARCH_SPACE
 
 # 项目内模块
 from src.config.data_config import DataConfig
 from src.data.builder import (
     build_dataset_and_loader,
-    get_set_labels,
     build_pair_level_dataset_and_loader,
+    get_set_labels,
 )
-from src.trainer.trainer import Trainer
-from src.models.registry import build_model
 from src.evaluator.evaluator import evaluate_with_trainer
+from src.models.registry import build_model
+from src.trainer.trainer import Trainer
 from src.utils import set_seeds
-
-from src.config.arch_space import ARCH_SPACE
-
-import time 
 
 
 def apply_arch_variant(cfg):
@@ -92,16 +90,19 @@ def apply_arch_variant(cfg):
     if v is not None:
         arch = ARCH_SPACE[v]
         cfg.model.num_channels = arch["num_channels"]
-        cfg.model.num_blocks   = arch["num_blocks"]
-        cfg.model.multi_scale  = arch["multi_scale"]
+        cfg.model.num_blocks = arch["num_blocks"]
+        cfg.model.multi_scale = arch["multi_scale"]
+
 
 # ---------------------- #
 # 辅助函数
 # ---------------------- #
 
 
+from typing import Any, Dict, Iterable, Tuple
+
 import numpy as np
-from typing import Dict, Any, Iterable, Tuple
+
 
 def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
     """
@@ -125,8 +126,6 @@ def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
             continue
 
         yield k, v_float
-
-
 
 
 def setup_wandb(cfg: DictConfig):
@@ -172,12 +171,14 @@ def setup_wandb(cfg: DictConfig):
     return run
 
 
-# Distill 
+# Distill
+
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+
 
 def load_model_state(model: nn.Module, ckpt_path: str, device: torch.device) -> None:
     ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -186,9 +187,9 @@ def load_model_state(model: nn.Module, ckpt_path: str, device: torch.device) -> 
     cleaned = {}
     for k, v in state_dict.items():
         if k.startswith("model."):
-            k = k[len("model."):]
+            k = k[len("model.") :]
         if k.startswith("net."):
-            k = k[len("net."):]
+            k = k[len("net.") :]
         cleaned[k] = v
 
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
@@ -202,7 +203,9 @@ def load_model_state(model: nn.Module, ckpt_path: str, device: torch.device) -> 
         p.requires_grad_(False)
 
 
-def build_teacher_from_cfg(cfg: DictConfig, data_cfg: DataConfig, device: torch.device) -> nn.Module:
+def build_teacher_from_cfg(
+    cfg: DictConfig, data_cfg: DataConfig, device: torch.device
+) -> nn.Module:
     # 需要在 cfg.run 里提供：
     #   - distill_teacher_arch: e.g. "TargetNet_Optimized"
     #   - distill_teacher_ckpt: 路径
@@ -222,6 +225,7 @@ def build_teacher_from_cfg(cfg: DictConfig, data_cfg: DataConfig, device: torch.
 # ---------------------- #
 # 主入口
 # ---------------------- #
+
 
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig):
@@ -292,7 +296,7 @@ def main(cfg: DictConfig):
     # 安全读取 experiment.task（老实验没有 experiment 字段）
     experiment_cfg = cfg.get("experiment", None)
     task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
-    
+
     # 用于效率实验
     def build_loader_for_split(split_name: str):
         """
@@ -325,7 +329,6 @@ def main(cfg: DictConfig):
             set_labels_local = get_set_labels(data_cfg, split_name)
             return ds, ld, set_labels_local, True
 
-
     if task_mode == "pair_level_train":
         # ===================== Pair-level 分支 =====================
         pair_cfg = cfg.data.pair
@@ -349,7 +352,6 @@ def main(cfg: DictConfig):
             shuffle=False,
             drop_last=False,
         )
-
 
         # pair-level: 每个 sample 就是一个 pair，不需要额外 set 聚合
         val_set_labels = None
@@ -378,11 +380,8 @@ def main(cfg: DictConfig):
             drop_last=False,
         )
 
-
         val_set_labels = get_set_labels(data_cfg, "val")
         aggregate_sets = True
-
-
 
     # ---- 构建模型 ----
     # model_name 通常用 cfg.model.arch 或 cfg.model.name 作为 registry key
@@ -394,7 +393,6 @@ def main(cfg: DictConfig):
     if bool(cfg.run.get("distill_enabled", False)):
         teacher_model = build_teacher_from_cfg(cfg, data_cfg=data_cfg, device=device)
 
-
     # ---- 构建 Trainer ----
     trainer = Trainer(
         model=model,
@@ -403,7 +401,7 @@ def main(cfg: DictConfig):
         run_cfg=cfg.run,
         device=device,
         logger=wandb_run,
-        teacher_model=teacher_model,   # <<<<<< Distill新增
+        teacher_model=teacher_model,  # <<<<<< Distill新增
     )
 
     # 若需要从 checkpoint 恢复
@@ -532,7 +530,6 @@ def main(cfg: DictConfig):
     else:
         print("[Train] No best_threshold from evaluator (maybe sweep disabled).")
 
-
     # ---- 把最终 val 标量 metrics 写入 WandB summary（若启用） ----
     if wandb_run is not None:
         import wandb  # type: ignore
@@ -545,7 +542,6 @@ def main(cfg: DictConfig):
                 wandb_run.summary["val/best_threshold"] = float(best_threshold)
             except (TypeError, ValueError):
                 pass
-
 
     # ============================================================
     # Efficiency: inference throughput benchmark (pairs/s)
@@ -581,6 +577,7 @@ def main(cfg: DictConfig):
         # 写入 wandb：同时 log + summary（便于直接抄表）
         if wandb_run is not None:
             import wandb  # type: ignore
+
             log_dict = {
                 f"eff/{bench_split}/infer_pairs_per_s": float(infer_stats["infer_pairs_per_s"]),
                 f"eff/{bench_split}/infer_peak_vram_gb": float(infer_stats["infer_peak_vram_gb"]),
@@ -592,7 +589,6 @@ def main(cfg: DictConfig):
             for k, v in log_dict.items():
                 wandb_run.summary[k] = float(v)
 
-                
     # ============================================================
     # 额外：可选地在训练结束后，直接对 test 集做评估
     # - 可以选择用 last 权重（当前 trainer 状态）
@@ -638,7 +634,9 @@ def main(cfg: DictConfig):
                 # ===================== 按 task 分支构建 test dataset =====================
                 if task_mode == "pair_level_train":
                     if pair_cfg is None:
-                        raise ValueError("[Train] experiment.task='pair_level_train' but cfg.data.pair is missing.")
+                        raise ValueError(
+                            "[Train] experiment.task='pair_level_train' but cfg.data.pair is missing."
+                        )
 
                     test_ds, test_loader = build_pair_level_dataset_and_loader(
                         pair_cfg=pair_cfg,
@@ -678,6 +676,7 @@ def main(cfg: DictConfig):
 
                 # ---------- (A) 阈值 0.5 的报告 ----------
                 from copy import deepcopy
+
                 task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
                 # 这里假设 task.threshold 是一个 float（当前实现就是）
                 task_fixed.threshold = 0.5
@@ -695,7 +694,7 @@ def main(cfg: DictConfig):
                     set_labels=test_set_labels,
                     aggregate_sets=aggregate_sets,
                     tag=f"{split_idx}_{tag_prefix}_thr0.5",
-                    do_threshold_sweep=False,               # ✅ 只看 0.5，不扫
+                    do_threshold_sweep=False,  # ✅ 只看 0.5，不扫
                     sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
                     reduction=cfg.run.get("test_reduction", "max"),
                     softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
@@ -723,14 +722,16 @@ def main(cfg: DictConfig):
                         set_labels=test_set_labels,
                         aggregate_sets=aggregate_sets,
                         tag=f"{split_idx}_{tag_prefix}_valbest",
-                        do_threshold_sweep=False,           # ✅ 固定 val best 阈值
+                        do_threshold_sweep=False,  # ✅ 固定 val best 阈值
                         sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
                         reduction=cfg.run.get("test_reduction", "max"),
                         softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
                         topk=cfg.run.get("test_topk", 3),
                     )
                 else:
-                    print(f"[Train][Test {split_idx}][{tag_prefix}] Skip val-best eval because best_threshold is None.")
+                    print(
+                        f"[Train][Test {split_idx}][{tag_prefix}] Skip val-best eval because best_threshold is None."
+                    )
 
                 # ---------- (C) 在 test 上做 sweep，找 test F1 最大阈值 ----------
                 task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
@@ -748,7 +749,7 @@ def main(cfg: DictConfig):
                     set_labels=test_set_labels,
                     aggregate_sets=aggregate_sets,
                     tag=f"{split_idx}_{tag_prefix}_sweep",
-                    do_threshold_sweep=True,               # ✅ 在 test 上扫阈值
+                    do_threshold_sweep=True,  # ✅ 在 test 上扫阈值
                     sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
                     reduction=cfg.run.get("test_reduction", "max"),
                     softmax_temp=cfg.run.get("test_softmax_temp", 1.0),
@@ -770,7 +771,9 @@ def main(cfg: DictConfig):
                     print(np.array(cm_fixed))
 
                 # ---- (B) 使用 val best_threshold ----
-                metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
+                metrics_valbest = (
+                    res_valbest.get("metrics", {}) if res_valbest is not None else None
+                )
                 if metrics_valbest is not None:
                     print(
                         f"\n[Test {split_idx}][{tag_prefix}] "
@@ -832,13 +835,17 @@ def main(cfg: DictConfig):
                         wandb_run.summary[f"{prefix}_sweep/{k}"] = v
                     if best_thr_test is not None:
                         try:
-                            wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
+                            wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(
+                                best_thr_test
+                            )
                         except (TypeError, ValueError):
                             pass
 
         # 先用 last 权重（当前 trainer 状态）做一次测试
         if eval_with_last:
-            print("\n[Train] Evaluating on test set with LAST checkpoint (current trainer state)...")
+            print(
+                "\n[Train] Evaluating on test set with LAST checkpoint (current trainer state)..."
+            )
             run_test_eval_for_current_trainer(tag_prefix="last")
 
         # 再可选地加载 best.ckpt，再测一遍
@@ -854,10 +861,10 @@ def main(cfg: DictConfig):
                     f"best checkpoint not found at: {best_ckpt_path}"
                 )
 
-
     # ---- 最后再 finish WandB ----
     if wandb_run is not None:
         wandb.finish()
+
 
 if __name__ == "__main__":
     main()

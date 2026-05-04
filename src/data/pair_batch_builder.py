@@ -172,4 +172,3 @@ class PairBatchBuilder:
             "inst_logit": inst_logit,
         }
         return out
-

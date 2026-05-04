@@ -3,14 +3,12 @@
 导入具体模型文件，触发 @register_model 的 side-effect 注册。
 """
 
-from . import TargetNet            # noqa: F401
+from . import PairCNNAggregator  # noqa: F401
+from . import PairGNNAggregator  # noqa: F401
+from . import PairGNNMoEAggregator  # noqa: F401
+from . import TargetNet  # noqa: F401
 from . import TargetNet_Optimized  # noqa: F401
-from . import my_transformer       # noqa: F401
-from . import TargetNet_transformer       # noqa: F401
-from . import PairTransformerAggregator
+from . import TargetNet_transformer  # noqa: F401
+from . import my_transformer  # noqa: F401
 from . import pair_maxpool_cache  # noqa: F401
-from . import CheapCTSNet
-from . import PairSetTransformerAggregator
-from . import PairCNNAggregator          # noqa: F401
-from . import PairGNNAggregator          # noqa: F401
-from . import PairGNNMoEAggregator       # noqa: F401
+from . import CheapCTSNet, PairSetTransformerAggregator, PairTransformerAggregator

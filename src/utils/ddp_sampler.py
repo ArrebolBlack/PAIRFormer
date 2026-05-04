@@ -10,7 +10,7 @@ from typing import Any, Optional
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 
-from .ddp import is_ddp, barrier
+from .ddp import barrier, is_ddp
 
 
 def get_ddp_sampler(
@@ -90,6 +90,7 @@ def build_ddp_loader(
 def get_effective_batch_size(batch_size: int) -> int:
     """Get effective batch size considering DDP: batch_size * world_size."""
     from .ddp import get_world_size
+
     return batch_size * get_world_size()
 
 
@@ -103,6 +104,7 @@ def disable_persistent_workers_if_ddp(persistent_workers: bool, num_workers: int
 def get_worker_init_fn(rank: int, base_seed: int = 2020) -> Any:
     """Create worker init function with rank-specific seed."""
     import random
+
     import numpy as np
 
     def worker_init_fn(worker_id: int):

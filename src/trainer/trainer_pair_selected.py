@@ -6,9 +6,8 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 from torch import optim
-from tqdm import tqdm
-
 from torch.optim.swa_utils import AveragedModel
+from tqdm import tqdm
 
 from src.evaluator.metrics import compute_metrics
 from src.models.extractors import get_embedding_and_logit
@@ -111,13 +110,17 @@ class PairSelectedTrainer:
             )
 
         self.sched_agg = self._build_scheduler(self.opt_agg, cfg.scheduler_agg)
-        self.sched_inst = self._build_scheduler(self.opt_inst, cfg.scheduler_inst) if self.opt_inst is not None else None
+        self.sched_inst = (
+            self._build_scheduler(self.opt_inst, cfg.scheduler_inst)
+            if self.opt_inst is not None
+            else None
+        )
         self.amp_enabled = bool(cfg.use_amp and device.type == "cuda")
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp_enabled)
 
         # warmup state
         self.warmup_steps: int = max(0, int(getattr(cfg, "warmup_steps", 0)))
-        self._warmup_done: bool = (self.warmup_steps == 0)
+        self._warmup_done: bool = self.warmup_steps == 0
         self._base_lrs_agg: list = [pg["lr"] for pg in self.opt_agg.param_groups]
 
         self.token_dropout_rate: float = float(getattr(cfg, "token_dropout_rate", 0.0))
@@ -149,7 +152,9 @@ class PairSelectedTrainer:
                 patience=int(self.cfg.scheduler_patience),
             )
         if name == "cosine":
-            return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(self.cfg.scheduler_t_max))
+            return optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=int(self.cfg.scheduler_t_max)
+            )
         if name == "step":
             return optim.lr_scheduler.StepLR(
                 optimizer,
@@ -177,16 +182,19 @@ class PairSelectedTrainer:
 
         feat_valid = None
         logit_valid = None
-        need_online = (
-            (self.use_inst_emb and inst_emb_cached is None)
-            or (self.use_inst_logit and inst_logit_cached is None)
+        need_online = (self.use_inst_emb and inst_emb_cached is None) or (
+            self.use_inst_logit and inst_logit_cached is None
         )
 
         if need_online:
             if self.instance_model is None:
-                raise RuntimeError("Instance model is required for selected_raw or missing selected_inst features.")
+                raise RuntimeError(
+                    "Instance model is required for selected_raw or missing selected_inst features."
+                )
             if X is None:
-                raise RuntimeError("Batch does not contain raw windows X, but online instance forward is required.")
+                raise RuntimeError(
+                    "Batch does not contain raw windows X, but online instance forward is required."
+                )
 
             X_flat = X.view(B * K, C, L).float()
             mask_flat = mask.view(B * K)
@@ -212,7 +220,9 @@ class PairSelectedTrainer:
             if inst_emb_cached is not None:
                 feats.append(inst_emb_cached.to(self.device, non_blocking=True))
             else:
-                emb_flat = torch.zeros((B * K, feat_valid.shape[1]), device=self.device, dtype=feat_valid.dtype)
+                emb_flat = torch.zeros(
+                    (B * K, feat_valid.shape[1]), device=self.device, dtype=feat_valid.dtype
+                )
                 emb_flat.index_copy_(0, valid, feat_valid)
                 feats.append(emb_flat.view(B, K, -1))
 
@@ -295,9 +305,13 @@ class PairSelectedTrainer:
                     self.scaler.unscale_(self.opt_agg)
                     if self.opt_inst is not None:
                         self.scaler.unscale_(self.opt_inst)
-                    torch.nn.utils.clip_grad_norm_(self.agg_model.parameters(), float(self.cfg.clip_grad_norm))
+                    torch.nn.utils.clip_grad_norm_(
+                        self.agg_model.parameters(), float(self.cfg.clip_grad_norm)
+                    )
                     if self.instance_model is not None and self.train_instance_model:
-                        torch.nn.utils.clip_grad_norm_(self.instance_model.parameters(), float(self.cfg.clip_grad_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            self.instance_model.parameters(), float(self.cfg.clip_grad_norm)
+                        )
                 self.scaler.step(self.opt_agg)
                 if self.opt_inst is not None:
                     self.scaler.step(self.opt_inst)
@@ -330,7 +344,9 @@ class PairSelectedTrainer:
         return {
             "loss": total_loss / max(1, total_seen),
             "lr_agg": float(self.opt_agg.param_groups[0]["lr"]),
-            "lr_inst": float(self.opt_inst.param_groups[0]["lr"]) if self.opt_inst is not None else 0.0,
+            "lr_inst": (
+                float(self.opt_inst.param_groups[0]["lr"]) if self.opt_inst is not None else 0.0
+            ),
             "optimizer_steps": float(optimizer_steps),
         }
 
@@ -408,9 +424,15 @@ class PairSelectedTrainer:
             all_pair_id.append(pair_id.detach().cpu())
 
         return {
-            "logits": torch.cat(all_logits).numpy() if all_logits else np.zeros((0,), dtype=np.float32),
-            "labels": torch.cat(all_labels).numpy() if all_labels else np.zeros((0,), dtype=np.float32),
-            "pair_id": torch.cat(all_pair_id).numpy() if all_pair_id else np.zeros((0,), dtype=np.int64),
+            "logits": (
+                torch.cat(all_logits).numpy() if all_logits else np.zeros((0,), dtype=np.float32)
+            ),
+            "labels": (
+                torch.cat(all_labels).numpy() if all_labels else np.zeros((0,), dtype=np.float32)
+            ),
+            "pair_id": (
+                torch.cat(all_pair_id).numpy() if all_pair_id else np.zeros((0,), dtype=np.int64)
+            ),
         }
 
     def step_schedulers(self, metrics: Dict[str, float]) -> None:
@@ -437,7 +459,9 @@ class PairSelectedTrainer:
     def save_checkpoint(self, path: str) -> None:
         ckpt = {
             "agg_state_dict": self.agg_model.state_dict(),
-            "inst_state_dict": self.instance_model.state_dict() if self.instance_model is not None else None,
+            "inst_state_dict": (
+                self.instance_model.state_dict() if self.instance_model is not None else None
+            ),
             "opt_agg": self.opt_agg.state_dict(),
             "opt_inst": self.opt_inst.state_dict() if self.opt_inst is not None else None,
             "sched_agg": None if self.sched_agg is None else self.sched_agg.state_dict(),

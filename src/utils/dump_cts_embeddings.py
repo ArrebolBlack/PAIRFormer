@@ -42,33 +42,30 @@ python -m src.utils.dump_cts_embeddings \
     2) 否则，run_tag = {train_dataset_stem}__{model_arch}__{ckpt_stem}
 """
 
-import json
 import argparse
+import json
 import os
+import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
+import psutil
 import torch
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from src.config.data_config import DataConfig
 from src.data.builder import build_dataset_and_loader
+from src.models.extractors import get_embedding_and_logit
 from src.models.registry import build_model
 
 # from src.models.TargetNet import TargetNet
 # from src.models.TargetNet_Optimized import TargetNet_Optimized
 # from src.models.TargetNet_transformer import TargetNetTransformer1D
 
-from src.models.extractors import get_embedding_and_logit
 
 
-import os
-import time
-import json
-import subprocess
-import psutil
-import torch
 
 
 def get_total_rss_bytes(proc: psutil.Process) -> int:
@@ -87,10 +84,10 @@ def get_total_rss_bytes(proc: psutil.Process) -> int:
     return total
 
 
-
 # =================================================
 #  Argument parsing
 # =================================================
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -279,11 +276,10 @@ def parse_args():
 #     )
 
 
-
-
 # =================================================
 #  Load model + weights
 # =================================================
+
 
 def load_model(model_cfg: DictConfig, ckpt_path: str, device: torch.device):
     if ckpt_path is None:
@@ -319,9 +315,9 @@ def load_model(model_cfg: DictConfig, ckpt_path: str, device: torch.device):
     for k, v in state_dict.items():
         new_k = k
         if new_k.startswith("model."):
-            new_k = new_k[len("model."):]
+            new_k = new_k[len("model.") :]
         if new_k.startswith("net."):
-            new_k = new_k[len("net."):]
+            new_k = new_k[len("net.") :]
         cleaned_state_dict[new_k] = v
 
     missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
@@ -342,6 +338,7 @@ def ensure_dir(path):
 # =================================================
 #  Helper: 在线 Top-K 更新
 # =================================================
+
 
 def _compute_score(score_mode: str, logit: torch.Tensor, esa: torch.Tensor) -> float:
     if score_mode == "logit":
@@ -430,6 +427,7 @@ def _online_update_entry(
 #  Dump a single split (streaming per-pair + shard 写盘)
 # =================================================
 
+
 def dump_split(
     data_cfg_root: DictConfig,
     model: torch.nn.Module,
@@ -475,7 +473,6 @@ def dump_split(
     """
     global peak_rss
 
-
     print(f"\n===== Dumping split: {split} =====")
 
     # ---- 构建 DataConfig ----
@@ -515,7 +512,7 @@ def dump_split(
 
     # streaming 当前正在累积的 pair
     current_pid = None
-    current_entry = None   # {"embeddings": [], "logits": [], "esa": [], "pos": [], "scores": [], "min_score": ..., "min_idx": ...}
+    current_entry = None  # {"embeddings": [], "logits": [], "esa": [], "pos": [], "scores": [], "min_score": ..., "min_idx": ...}
     current_label = None
 
     def _new_pair_entry():
@@ -539,12 +536,12 @@ def dump_split(
         if len(current_entry["embeddings"]) == 0:
             print(f"[WARN] pair {current_pid} has 0 CTS after filtering, skip.")
         else:
-            emb = torch.stack(current_entry["embeddings"], dim=0)   # [M_i, d_emb]
-            logits = torch.stack(current_entry["logits"], dim=0)    # [M_i]
-            esa = torch.stack(current_entry["esa"], dim=0)          # [M_i]
+            emb = torch.stack(current_entry["embeddings"], dim=0)  # [M_i, d_emb]
+            logits = torch.stack(current_entry["logits"], dim=0)  # [M_i]
+            esa = torch.stack(current_entry["esa"], dim=0)  # [M_i]
 
             if len(current_entry["pos"]) > 0:
-                pos_tensor = torch.stack(current_entry["pos"], dim=0)   # [M_i]
+                pos_tensor = torch.stack(current_entry["pos"], dim=0)  # [M_i]
             else:
                 pos_tensor = None
 
@@ -562,10 +559,12 @@ def dump_split(
             shard_name = f"{split}_shard{shard_idx:04d}.pt"
             out_path = os.path.join(out_root, shard_name)
             torch.save(shard_pairs, out_path)
-            shard_meta.append({
-                "path": shard_name,
-                "num_pairs": len(shard_pairs),
-            })
+            shard_meta.append(
+                {
+                    "path": shard_name,
+                    "num_pairs": len(shard_pairs),
+                }
+            )
             print(
                 f"[dump_split:{split}] Saved shard {shard_idx} with "
                 f"{len(shard_pairs)} pairs to {out_path}"
@@ -588,9 +587,9 @@ def dump_split(
                     f"got {type(batch)}. 请确认 build_dataset_and_loader 是否被正确使用。"
                 )
 
-            x = batch["inputs"].to(device)          # [B, C, L]
-            y = batch["labels"].view(-1)            # [B]
-            set_idx = batch["set_idx"].view(-1)     # [B]
+            x = batch["inputs"].to(device)  # [B, C, L]
+            y = batch["labels"].view(-1)  # [B]
+            set_idx = batch["set_idx"].view(-1)  # [B]
 
             if "esa_scores" in batch:
                 esa_score = batch["esa_scores"].view(-1)
@@ -665,9 +664,6 @@ def dump_split(
                 rss = get_total_rss_bytes(proc)
                 peak_rss = max(peak_rss, rss)
 
-
-
-
         # 所有 batch 结束，flush 最后一个 pair
         flush_current_pair()
 
@@ -676,10 +672,12 @@ def dump_split(
         shard_name = f"{split}_shard{shard_idx:04d}.pt"
         out_path = os.path.join(out_root, shard_name)
         torch.save(shard_pairs, out_path)
-        shard_meta.append({
-            "path": shard_name,
-            "num_pairs": len(shard_pairs),
-        })
+        shard_meta.append(
+            {
+                "path": shard_name,
+                "num_pairs": len(shard_pairs),
+            }
+        )
         print(
             f"[dump_split:{split}] Saved final shard {shard_idx} with "
             f"{len(shard_pairs)} pairs to {out_path}"
@@ -695,12 +693,10 @@ def dump_split(
     print(f"[dump_split:{split}] Shards written   : {len(shard_meta)}")
 
 
-
-
-
 # =================================================
 #  Main
 # =================================================
+
 
 def main():
 
@@ -708,7 +704,7 @@ def main():
     t0 = time.perf_counter()
     proc = psutil.Process(os.getpid())
     peak_rss = 0
-    
+
     args = parse_args()
 
     model_cfg = OmegaConf.load(args.config)
@@ -724,7 +720,6 @@ def main():
         torch.cuda.reset_peak_memory_stats()
 
     model = load_model(model_cfg, args.checkpoint, device)
-
 
     model_arch = getattr(model, "_registry_name", model.__class__.__name__)
 
@@ -806,15 +801,15 @@ def main():
         )
 
     elapsed_s = time.perf_counter() - t0
-    peak_cpu_gb = peak_rss / (1024 ** 3)
+    peak_cpu_gb = peak_rss / (1024**3)
 
     peak_vram_gb = 0.0
     if torch.cuda.is_available():
-        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
 
     # out_root = 你 dump 输出目录（pair_cache/...）
     du_bytes = int(subprocess.check_output(["du", "-sb", str(out_root)]).split()[0])
-    disk_gb = du_bytes / (1024 ** 3)
+    disk_gb = du_bytes / (1024**3)
 
     summary = {
         "dump_elapsed_min": elapsed_s / 60.0,

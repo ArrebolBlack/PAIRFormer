@@ -19,7 +19,7 @@ collate.py
 这样，Trainer 和模型只需要面向这个统一接口，便于你接入各种模型（TargetNet / Transformer / DiT）。
 """
 
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple
 
 import torch
 
@@ -58,7 +58,6 @@ def cts_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
         pos = None
     else:
         xs, ys, idxs, esas, pos = zip(*batch)
-    
 
     # X: [B, C, L]，保持 uint8，减少 CPU 侧膨胀与拷贝；在 GPU 上再转 float
     x = torch.stack(xs, dim=0)
@@ -78,7 +77,7 @@ def cts_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
     if esas is not None:
         esa_scores = torch.stack(esas, dim=0).view(-1).float()
         batch_dict["esa_scores"] = esa_scores
-    
+
     if pos is not None:
         pos = torch.stack(pos, dim=0).view(-1).float()
         batch_dict["pos"] = pos

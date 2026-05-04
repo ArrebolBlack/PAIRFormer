@@ -48,7 +48,9 @@ def _chunk_records(records: Iterable[PairRecord], chunk_size: int) -> Iterator[L
         yield buf
 
 
-def _assign_window_labels(pair_label: float, esa_vals: List[float], *, label_policy: str, pseudo_topr: int) -> List[int]:
+def _assign_window_labels(
+    pair_label: float, esa_vals: List[float], *, label_policy: str, pseudo_topr: int
+) -> List[int]:
     n = len(esa_vals)
     if n == 0:
         return []
@@ -64,7 +66,9 @@ def _assign_window_labels(pair_label: float, esa_vals: List[float], *, label_pol
     raise ValueError(f"Unknown label_policy: {label_policy}")
 
 
-def _process_pair_chunk(task: Tuple[Sequence[PairRecord], object, WindowShardBuildConfig]) -> PairWindowsChunk:
+def _process_pair_chunk(
+    task: Tuple[Sequence[PairRecord], object, WindowShardBuildConfig]
+) -> PairWindowsChunk:
     records, data_cfg, cfg = task
     xs_all: List[torch.Tensor] = []
     esa_all: List[float] = []
@@ -111,7 +115,9 @@ def _process_pair_chunk(task: Tuple[Sequence[PairRecord], object, WindowShardBui
         pos = torch.empty((0,), dtype=torch.float32)
         label = torch.empty((0,), dtype=torch.int8)
         pair_id = torch.empty((0,), dtype=torch.int32)
-    return PairWindowsChunk(X=X, esa=esa, pos=pos, label=label, pair_id=pair_id, num_pairs=len(records))
+    return PairWindowsChunk(
+        X=X, esa=esa, pos=pos, label=label, pair_id=pair_id, num_pairs=len(records)
+    )
 
 
 class WindowShardBuilderParallel:

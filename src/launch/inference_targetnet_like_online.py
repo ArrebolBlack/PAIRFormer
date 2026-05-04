@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
-import time
 import dataclasses
+import hashlib
 import json
 import os
-import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -28,10 +31,8 @@ from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
 from src.data.builder import get_or_build_blocks
+from src.data.cache_identity import dataset_identity
 from src.data.dataset import ChunkedCTSDataset
-from src.models.registry import build_model
-from src.models.extractors import get_embedding_and_logit
-
 from src.launch.bench_utils import (
     BenchConfig,
     append_records_to_csv,
@@ -42,8 +43,8 @@ from src.launch.bench_utils import (
     select_pair_ids_subset,
     summarize_repeats_to_records,
 )
-
-from src.data.cache_identity import dataset_identity
+from src.models.extractors import get_embedding_and_logit
+from src.models.registry import build_model
 
 
 # -----------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
         kk = k
         for pref in ("model.", "module.", "net."):
             if kk.startswith(pref):
-                kk = kk[len(pref):]
+                kk = kk[len(pref) :]
         cleaned[kk] = v
     return cleaned
 
@@ -129,7 +130,9 @@ def _load_single_model_ckpt(model: torch.nn.Module, ckpt_path: Path, device: tor
     else:
         sd = ckpt
     if not isinstance(sd, dict):
-        raise RuntimeError(f"[inference_targetnet_like_online] ckpt is not a state_dict-like dict: {ckpt_path}")
+        raise RuntimeError(
+            f"[inference_targetnet_like_online] ckpt is not a state_dict-like dict: {ckpt_path}"
+        )
     model.load_state_dict(_strip_prefix_state_dict(sd), strict=False)
     model.to(device).eval()
 
@@ -145,11 +148,19 @@ def _load_instance_from_em_ckpt(
     """
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     if not isinstance(ckpt, dict):
-        raise RuntimeError(f"[inference_targetnet_like_online] checkpoint is not a dict: {ckpt_path}")
+        raise RuntimeError(
+            f"[inference_targetnet_like_online] checkpoint is not a dict: {ckpt_path}"
+        )
 
     cand_inst = None
-    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict",
-              "instance_model", "inst_model", "cts_model"):
+    for k in (
+        "instance_state_dict",
+        "inst_state_dict",
+        "instance_model_state_dict",
+        "instance_model",
+        "inst_model",
+        "cts_model",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_inst = ckpt[k]
             break
@@ -190,9 +201,13 @@ def _load_instance_from_em_ckpt(
     cand_inst = _strip_prefix_state_dict(cand_inst)
     miss_i, unexp_i = instance_model.load_state_dict(cand_inst, strict=False)
     if miss_i:
-        print(f"[inference_targetnet_like_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}")
+        print(
+            f"[inference_targetnet_like_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}"
+        )
     if unexp_i:
-        print(f"[inference_targetnet_like_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}")
+        print(
+            f"[inference_targetnet_like_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}"
+        )
     instance_model.to(device).eval()
 
 
@@ -217,7 +232,9 @@ class PairIndexAdapter:
                     return int(getattr(pi, attr))
                 except Exception:
                     pass
-        raise RuntimeError("[inference_targetnet_like_online] Cannot infer num_pairs from pair_index.")
+        raise RuntimeError(
+            "[inference_targetnet_like_online] Cannot infer num_pairs from pair_index."
+        )
 
     def __len__(self) -> int:
         return int(self._num_pairs)
@@ -229,7 +246,9 @@ class PairIndexAdapter:
     def get_pair_slice(self, pair_id: int) -> Tuple[int, int]:
         pi = self.pair_index
         if pair_id < 0 or pair_id >= self._num_pairs:
-            raise IndexError(f"[inference_targetnet_like_online] pair_id out of range: {pair_id} / {self._num_pairs}")
+            raise IndexError(
+                f"[inference_targetnet_like_online] pair_id out of range: {pair_id} / {self._num_pairs}"
+            )
 
         if hasattr(pi, "pair_offsets") and getattr(pi, "pair_offsets") is not None:
             off = getattr(pi, "pair_offsets")
@@ -248,7 +267,9 @@ class PairIndexAdapter:
                 s, e = getattr(pi, m)(pair_id)
                 return int(s), int(e)
 
-        raise RuntimeError("Cannot resolve pair slice from PairIndex; adapt PairIndexAdapter.get_pair_slice().")
+        raise RuntimeError(
+            "Cannot resolve pair slice from PairIndex; adapt PairIndexAdapter.get_pair_slice()."
+        )
 
     def get_n_full(self, pair_id: int) -> int:
         s, e = self.get_pair_slice(pair_id)
@@ -330,6 +351,7 @@ class TargetNetOnlineForward:
         return out
 
     from contextlib import contextmanager
+
     @contextmanager
     def _profile(self, name: str, timer: Any = None):
         if timer is not None and hasattr(timer, "section"):
@@ -365,7 +387,9 @@ class TargetNetOnlineForward:
             t = t.reshape(-1)
         return t
 
-    def _batch_gather_all(self, uids_all: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _batch_gather_all(
+        self, uids_all: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns CPU tensors aligned with uids_all:
           X_flat:  [M,C,L] uint8 CPU
@@ -380,7 +404,9 @@ class TargetNetOnlineForward:
                 fields=("X", "pos", "esa_scores"),
             )
             if not isinstance(out, Mapping):
-                raise RuntimeError("[inference_targetnet_like_online] batch_gather_by_uid must return a Mapping")
+                raise RuntimeError(
+                    "[inference_targetnet_like_online] batch_gather_by_uid must return a Mapping"
+                )
 
             X = out["X"]
             pos = out.get("pos", out.get("positions", None))
@@ -396,7 +422,9 @@ class TargetNetOnlineForward:
             pos = self._normalize_gather_1d(pos).to(dtype=torch.float32, device="cpu").contiguous()
             esa = self._normalize_gather_1d(esa).to(dtype=torch.float32, device="cpu").contiguous()
             if X.dim() != 3:
-                raise RuntimeError(f"[inference_targetnet_like_online] Expect X_flat [M,C,L], got {tuple(X.shape)}")
+                raise RuntimeError(
+                    f"[inference_targetnet_like_online] Expect X_flat [M,C,L], got {tuple(X.shape)}"
+                )
             return X, esa, pos
 
         # fallback slow path
@@ -411,10 +439,14 @@ class TargetNetOnlineForward:
                 pos = float(sample[4]) if len(sample) > 4 else 0.0
             elif isinstance(sample, Mapping):
                 x = sample.get("X", sample.get("inputs", sample.get("x")))
-                esa = float(sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0))))
+                esa = float(
+                    sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0)))
+                )
                 pos = float(sample.get("pos", 0.0))
             else:
-                raise RuntimeError(f"[inference_targetnet_like_online] unsupported sample type: {type(sample)}")
+                raise RuntimeError(
+                    f"[inference_targetnet_like_online] unsupported sample type: {type(sample)}"
+                )
 
             x = x if torch.is_tensor(x) else torch.as_tensor(x)
             x = x.to(dtype=torch.uint8, device="cpu").contiguous()
@@ -461,8 +493,16 @@ class TargetNetOnlineForward:
                 offsets_n.append((cur, cur + ln))
                 cur += ln
 
-            uids_all = torch.cat(uids_chunks, dim=0) if uids_chunks else torch.empty((0,), dtype=torch.long)
-            pair_idx_all = torch.cat(pair_idx_chunks, dim=0) if pair_idx_chunks else torch.empty((0,), dtype=torch.long)
+            uids_all = (
+                torch.cat(uids_chunks, dim=0)
+                if uids_chunks
+                else torch.empty((0,), dtype=torch.long)
+            )
+            pair_idx_all = (
+                torch.cat(pair_idx_chunks, dim=0)
+                if pair_idx_chunks
+                else torch.empty((0,), dtype=torch.long)
+            )
 
             if uids_all.numel() == 0:
                 return torch.zeros((), device=self.device)
@@ -498,7 +538,9 @@ class TargetNetOnlineForward:
                         _, logit = get_embedding_and_logit(inst, X, esa_scores=esa, pos=pos)
 
                     if logit is None:
-                        raise RuntimeError("[inference_targetnet_like_online] instance_model produced no logit.")
+                        raise RuntimeError(
+                            "[inference_targetnet_like_online] instance_model produced no logit."
+                        )
 
                     if logit.dim() == 2 and logit.shape[-1] == 1:
                         logit = logit.squeeze(-1)
@@ -601,7 +643,13 @@ def main(cfg: DictConfig) -> None:
     pi = PairIndexAdapter(pair_index_raw)
 
     # subset pair ids (stable across K runs)
-    subset_path = Path(str(run_cfg.get("bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json"))))
+    subset_path = Path(
+        str(
+            run_cfg.get(
+                "bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json")
+            )
+        )
+    )
     if not subset_path.is_absolute():
         subset_path = run_dir / subset_path
 
@@ -649,7 +697,9 @@ def main(cfg: DictConfig) -> None:
     # build instance model
     inst_cfg = cfg.get("instance_model", None) or cfg.get("cts_model", None)
     if inst_cfg is None:
-        raise KeyError("[inference_targetnet_like_online] missing instance model config: cfg.instance_model / cfg.cts_model")
+        raise KeyError(
+            "[inference_targetnet_like_online] missing instance model config: cfg.instance_model / cfg.cts_model"
+        )
     inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
     instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device).eval()
 
@@ -657,9 +707,13 @@ def main(cfg: DictConfig) -> None:
     # priority 1) run.checkpoint (EM ckpt) -> extract instance weights (same as BR-MIL/Naive)
     # fallback 2) cfg.instance_ckpt_path (standalone)
     if run_cfg.get("checkpoint", None) is not None:
-        em_ckpt = _resolve_required_ckpt_path(run_cfg.get("checkpoint"), run_dir=run_dir, orig_cwd=orig_cwd)
+        em_ckpt = _resolve_required_ckpt_path(
+            run_cfg.get("checkpoint"), run_dir=run_dir, orig_cwd=orig_cwd
+        )
         if not em_ckpt.exists():
-            raise FileNotFoundError(f"[inference_targetnet_like_online] EM checkpoint not found: {em_ckpt}")
+            raise FileNotFoundError(
+                f"[inference_targetnet_like_online] EM checkpoint not found: {em_ckpt}"
+            )
         _load_instance_from_em_ckpt(em_ckpt, instance_model=instance_model, device=device)
         print(f"[inference_targetnet_like_online] instance loaded from EM ckpt: {em_ckpt}")
     else:
@@ -672,7 +726,9 @@ def main(cfg: DictConfig) -> None:
                 f"Got instance_ckpt_path={inst_ckpt}"
             )
         _load_single_model_ckpt(instance_model, inst_ckpt, device)
-        print(f"[inference_targetnet_like_online] instance loaded from standalone ckpt: {inst_ckpt}")
+        print(
+            f"[inference_targetnet_like_online] instance loaded from standalone ckpt: {inst_ckpt}"
+        )
 
     modules = TargetNetOnlineModules(instance_model=instance_model)
 
@@ -716,7 +772,9 @@ def main(cfg: DictConfig) -> None:
             prof = forward_fn.profile_summary_ms(reset=True)
             profile_repeats.append(prof)
             print(f"[inference_targetnet_like_online] profile(ms/call) repeat={r}: {prof}")
-            print(f"[inference_targetnet_like_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}")
+            print(
+                f"[inference_targetnet_like_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}"
+            )
 
     records = summarize_repeats_to_records(
         pipeline="TargetNet_like_online",

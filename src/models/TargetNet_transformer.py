@@ -6,8 +6,8 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
-from src.models.registry import register_model
 from src.models.modules.transformer import TransformerConfig, TransformerEncoder
+from src.models.registry import register_model
 
 
 @register_model("TargetNetTransformer1D")
@@ -53,7 +53,7 @@ class TargetNetTransformer1D(nn.Module):
         d_model = int(p.get("d_model", 256))
         n_layers = int(p.get("n_layers", 4))
         n_heads = int(p.get("n_heads", 8))
-        d_ff = int(p.get("dim_ff", 1024))      # 对应 TransformerConfig.d_ff
+        d_ff = int(p.get("dim_ff", 1024))  # 对应 TransformerConfig.d_ff
         dropout = float(p.get("dropout", 0.1))
         ff_activation = str(p.get("ff_activation", "gelu")).lower()
 

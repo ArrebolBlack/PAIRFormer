@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
+import hashlib
 import json
 import os
-import hashlib
-from pathlib import Path
-from typing import Any, Dict, Optional, Iterable, Tuple, List
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import hydra
 import torch
@@ -25,24 +28,20 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
-from src.data.dataset import ChunkedCTSDataset
-from src.data.pair_dataset_dynamic import DynamicPairDataset
-from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
 from src.data.builder import get_or_build_blocks
-
-from src.models.registry import build_model
+from src.data.dataset import ChunkedCTSDataset
+from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
+from src.data.pair_dataset_dynamic import DynamicPairDataset
+from src.em.cheap_runner import CheapCacheBuildConfig, CheapCacheRunner
+from src.em.instance_runner import run_instance_cache
+from src.em.selection_runner import run_selection_cache
 from src.em.token_provider import TokenProvider, TokenProviderConfig
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
-
-from src.trainer.trainer_em import TrainerEM, TrainerEMConfig
 from src.evaluator.evaluator import evaluate_with_trainer
-
-from src.em.cheap_runner import CheapCacheRunner, CheapCacheBuildConfig
-from src.em.selection_runner import run_selection_cache
-from src.em.instance_runner import run_instance_cache
-
-from src.utils import set_seeds
 from src.launch.train import iter_scalar_metrics, setup_wandb
+from src.models.registry import build_model
+from src.trainer.trainer_em import TrainerEM, TrainerEMConfig
+from src.utils import set_seeds
 
 
 # -----------------------------------------------------------------------------
@@ -95,7 +94,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
         kk = k
         for pref in ("model.", "module.", "net."):
             if kk.startswith(pref):
-                kk = kk[len(pref):]
+                kk = kk[len(pref) :]
         cleaned[kk] = v
     return cleaned
 
@@ -148,12 +147,25 @@ def _load_em_checkpoint_into_models(
     cand_agg = None
     cand_inst = None
 
-    for k in ("agg_state_dict", "agg_model_state_dict", "aggregator_state_dict", "agg_model", "aggregator"):
+    for k in (
+        "agg_state_dict",
+        "agg_model_state_dict",
+        "aggregator_state_dict",
+        "agg_model",
+        "aggregator",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_agg = ckpt[k]
             break
 
-    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict", "instance_model", "inst_model", "cts_model"):
+    for k in (
+        "instance_state_dict",
+        "inst_state_dict",
+        "instance_model_state_dict",
+        "instance_model",
+        "inst_model",
+        "cts_model",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_inst = ckpt[k]
             break
@@ -193,7 +205,11 @@ def _load_em_checkpoint_into_models(
                         kk = k.split(".", 1)[1]
                         if kk in agg_keys:
                             agg_sd[kk] = v
-                    if k.startswith("instance_model.") or k.startswith("inst_model.") or k.startswith("cts_model."):
+                    if (
+                        k.startswith("instance_model.")
+                        or k.startswith("inst_model.")
+                        or k.startswith("cts_model.")
+                    ):
                         kk = k.split(".", 1)[1]
                         if kk in inst_keys:
                             inst_sd[kk] = v
@@ -318,6 +334,7 @@ def main(cfg: DictConfig) -> None:
 
     # lazy datasets
     _cts_ds_by_split: Dict[str, ChunkedCTSDataset] = {}
+
     def _get_cts_ds(split: str) -> ChunkedCTSDataset:
         if split in _cts_ds_by_split:
             return _cts_ds_by_split[split]
@@ -331,13 +348,17 @@ def main(cfg: DictConfig) -> None:
     # ----------------------------
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
     if inst_cfg is None:
-        raise KeyError("[eval_em] missing instance model config: cfg.instance_model / cfg.cts_model / cfg.model_instance")
+        raise KeyError(
+            "[eval_em] missing instance model config: cfg.instance_model / cfg.cts_model / cfg.model_instance"
+        )
     inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
     instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device)
 
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
     if agg_cfg is None:
-        raise KeyError("[eval_em] missing aggregator model config: cfg.model (or cfg.agg_model / cfg.pair_model).")
+        raise KeyError(
+            "[eval_em] missing aggregator model config: cfg.model (or cfg.agg_model / cfg.pair_model)."
+        )
     agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
     agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device)
 
@@ -352,11 +373,13 @@ def main(cfg: DictConfig) -> None:
     pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
 
     # eval policy: use test_instance_mode from config (default: cached for backward compatibility)
-    policy_eval = UpdatePolicy(UpdatePolicyConfig(
-        warmup_epochs=0,
-        instance_mode=test_instance_mode,  # "cached" or "online"
-        cheap_mode="cached",
-    ))
+    policy_eval = UpdatePolicy(
+        UpdatePolicyConfig(
+            warmup_epochs=0,
+            instance_mode=test_instance_mode,  # "cached" or "online"
+            cheap_mode="cached",
+        )
+    )
 
     # ---- cheap model ----
     cheap_model = None
@@ -370,7 +393,9 @@ def main(cfg: DictConfig) -> None:
             orig_cwd,
         )
         if cheap_ckpt is None:
-            raise RuntimeError("[eval_em] cheap_ckpt_path is None (required to rebuild cheap cache).")
+            raise RuntimeError(
+                "[eval_em] cheap_ckpt_path is None (required to rebuild cheap cache)."
+            )
         if cheap_ckpt.exists():
             ckpt = torch.load(str(cheap_ckpt), map_location="cpu")
             sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
@@ -427,13 +452,14 @@ def main(cfg: DictConfig) -> None:
         or _oc_select(cfg, "selector")
     )
     if sel_mod_node is None:
-        raise KeyError("[eval_em] Missing selector config: cfg.em.selector_module (must contain _target_).")
+        raise KeyError(
+            "[eval_em] Missing selector config: cfg.em.selector_module (must contain _target_)."
+        )
 
     selector_module = instantiate(sel_mod_node)
 
-    sel_version_cfg = (
-        _oc_select(cfg, "em.sel_version", default=None)
-        or _oc_select(cfg, "sel_version", default=None)
+    sel_version_cfg = _oc_select(cfg, "em.sel_version", default=None) or _oc_select(
+        cfg, "sel_version", default=None
     )
     sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
     sel_hash = _stable_cfg_hash(sel_mod_container)
@@ -486,16 +512,13 @@ def main(cfg: DictConfig) -> None:
             overwrite=bool(overwrite),
             skip_if_ready=bool(skip_if_ready),
             sel_version=str(sel_version),
-
             pair_batch_size=int(sel_pair_batch_size),
-
             # >>>>>> 关键：传进去 <<<<<<
             candidate_pool_size=cand_pool_size,
             candidate_pool_mode=cand_pool_mode,
             candidate_pool_topn_ratio=cand_pool_topn_ratio,
             candidate_pool_seed=cand_pool_seed,
         )
-
 
     # ---- instance cache runner knobs ----
     inst_node = em_node.get("instance_cache", {})
@@ -560,7 +583,9 @@ def main(cfg: DictConfig) -> None:
         total_cts_local = int(len(ds))
 
         sel_version_used = str(sel_meta.get("sel_version", "sel_v0"))
-        cheap_version_used = str(sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version)))
+        cheap_version_used = str(
+            sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version))
+        )
 
         tp = TokenProvider(
             cfg=token_provider_cfg,
@@ -629,7 +654,6 @@ def main(cfg: DictConfig) -> None:
         grad_accum_steps=int(tr_node.get("grad_accum_steps", 1)),
         clip_grad_norm=float(tr_node.get("clip_grad_norm", 0.0)),
         use_amp=bool(tr_node.get("use_amp", False)),
-
         loss_type=str(tr_node.get("loss_type", "bce")),
         esa_weighting=bool(tr_node.get("esa_weighting", False)),
         focal_alpha=float(tr_node.get("focal_alpha", 0.25)),
@@ -644,7 +668,6 @@ def main(cfg: DictConfig) -> None:
         esa_scale=float(tr_node.get("esa_scale", 10.0)),
         esa_lambda_pos=float(tr_node.get("esa_lambda_pos", 1.0)),
         esa_lambda_neg=float(tr_node.get("esa_lambda_neg", 0.5)),
-
         optimizer=str(tr_node.get("optimizer", "adamw")),
         betas=betas,
         eps=float(tr_node.get("eps", 1e-8)),
@@ -653,7 +676,6 @@ def main(cfg: DictConfig) -> None:
         wd_agg=float(tr_node.get("wd_agg", 1e-2)),
         lr_inst=float(tr_node.get("lr_inst", 1e-5)),
         wd_inst=float(tr_node.get("wd_inst", 0.0)),
-
         scheduler_agg=str(tr_node.get("scheduler_agg", "none")),
         scheduler_inst=str(tr_node.get("scheduler_inst", "none")),
         scheduler_t_max=int(tr_node.get("scheduler_t_max", tr_node.get("num_epochs", 10))),
@@ -661,7 +683,6 @@ def main(cfg: DictConfig) -> None:
         scheduler_gamma=float(tr_node.get("scheduler_gamma", 0.1)),
         scheduler_factor=float(tr_node.get("scheduler_factor", 0.2)),
         scheduler_patience=int(tr_node.get("scheduler_patience", 5)),
-
         monitor=str(tr_node.get("monitor", "loss")),
         greater_is_better=bool(tr_node.get("greater_is_better", False)),
         ema_enabled=bool(tr_node.get("ema_enabled", False)),
@@ -672,7 +693,9 @@ def main(cfg: DictConfig) -> None:
     # 6) Resolve checkpoint (MUST use run.checkpoint)
     # ----------------------------
     ckpt_path_cfg = run_cfg.get("checkpoint", None)
-    ckpt_path = _resolve_ckpt_path(ckpt_path_cfg, run_dir=run_dir, orig_cwd=orig_cwd, ckpt_dir=ckpt_dir)
+    ckpt_path = _resolve_ckpt_path(
+        ckpt_path_cfg, run_dir=run_dir, orig_cwd=orig_cwd, ckpt_dir=ckpt_dir
+    )
     if not ckpt_path.exists():
         raise FileNotFoundError(f"[eval_em] checkpoint not found: {ckpt_path}")
 
@@ -685,16 +708,34 @@ def main(cfg: DictConfig) -> None:
     #    IMPORTANT: do NOT build instance cache before loading ckpt weights
     # ----------------------------
     bootstrap_epoch0 = int(em_node.get("bootstrap", {}).get("epoch", 0))
-    bootstrap_overwrite_all = True if force_overwrite_bootstrap else bool(em_node.get("bootstrap", {}).get("overwrite_all", True))
-    bootstrap_skip_if_ready = False if bootstrap_overwrite_all else bool(em_node.get("bootstrap", {}).get("skip_if_ready", True))
+    bootstrap_overwrite_all = (
+        True
+        if force_overwrite_bootstrap
+        else bool(em_node.get("bootstrap", {}).get("overwrite_all", True))
+    )
+    bootstrap_skip_if_ready = (
+        False
+        if bootstrap_overwrite_all
+        else bool(em_node.get("bootstrap", {}).get("skip_if_ready", True))
+    )
 
     print(
         "[eval_em] BOOTSTRAP plan (pre-ckpt): "
         f"overwrite_all={bootstrap_overwrite_all} skip_if_ready={bootstrap_skip_if_ready} splits={test_splits}"
     )
     # build cheap + selection (instance after ckpt)
-    cheap_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
-    selection_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready, splits=test_splits)
+    cheap_refresh_fn(
+        bootstrap_epoch0,
+        overwrite=bootstrap_overwrite_all,
+        skip_if_ready=bootstrap_skip_if_ready,
+        splits=test_splits,
+    )
+    selection_refresh_fn(
+        bootstrap_epoch0,
+        overwrite=bootstrap_overwrite_all,
+        skip_if_ready=bootstrap_skip_if_ready,
+        splits=test_splits,
+    )
 
     # ----------------------------
     # 8) Load ckpt into (agg, inst) weights (NO trainer yet)
@@ -715,11 +756,11 @@ def main(cfg: DictConfig) -> None:
             "[eval_em] BOOTSTRAP plan (post-ckpt): "
             f"build_instance_cache=True overwrite=True splits={test_splits}"
         )
-        instance_refresh_fn(epoch=bootstrap_epoch0, overwrite=True, skip_if_ready=False, splits=test_splits)
-    else:
-        print(
-            f"[eval_em] SKIP instance cache build (test_instance_mode={test_instance_mode})"
+        instance_refresh_fn(
+            epoch=bootstrap_epoch0, overwrite=True, skip_if_ready=False, splits=test_splits
         )
+    else:
+        print(f"[eval_em] SKIP instance cache build (test_instance_mode={test_instance_mode})")
 
     # ----------------------------
     # 10) Build Trainer AFTER bootstrap+ckpt (and optionally instance_cache)
@@ -743,7 +784,7 @@ def main(cfg: DictConfig) -> None:
         token_provider_val=tp_boot,
         controller=None,
         train_loader=test_loader_boot,  # dummy
-        val_loader=test_loader_boot,    # dummy
+        val_loader=test_loader_boot,  # dummy
         logger=wandb_run,
         task_cfg=(cfg.task if "task" in cfg else None),
     )
@@ -774,18 +815,24 @@ def main(cfg: DictConfig) -> None:
         selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
         # NEW: 只在 cached 模式下才重建 instance cache
         if test_instance_mode == "cached":
-            instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+            instance_refresh_fn(
+                epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split]
+            )
 
     def run_test_eval_for_current_trainer(tag_prefix_local: str) -> None:
         _pk = {"use_instance_cache": False} if test_instance_mode == "online" else None
         for split_idx in test_splits:
-            print(f"[eval_em][{tag_prefix_local}] Building test loader/token_provider for split='{split_idx}'")
+            print(
+                f"[eval_em][{tag_prefix_local}] Building test loader/token_provider for split='{split_idx}'"
+            )
 
             _refresh_em_caches_for_split(split_idx, epoch_for_build=int(bootstrap_epoch0))
 
             test_loader = build_eval_loader_for_split(split_idx)
             # NEW: require_ready 取决于 test_instance_mode
-            tp_test = build_token_provider_for_split(split_idx, require_ready=(test_instance_mode == "cached"))
+            tp_test = build_token_provider_for_split(
+                split_idx, require_ready=(test_instance_mode == "cached")
+            )
 
             test_root = Path(eval_dir) / "test" / str(split_idx) / tag_prefix_local
             test_root.mkdir(parents=True, exist_ok=True)
@@ -810,7 +857,9 @@ def main(cfg: DictConfig) -> None:
                     do_threshold_sweep=False,
                     sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
                     reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                    softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                    softmax_temp=float(
+                        run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))
+                    ),
                     topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                     predict_kwargs=_pk,
                 )
@@ -838,13 +887,19 @@ def main(cfg: DictConfig) -> None:
                         tag=f"{split_idx}_{tag_prefix_local}_valbest",
                         do_threshold_sweep=False,
                         sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        reduction=run_cfg.get(
+                            "test_reduction", run_cfg.get("eval_reduction", "max")
+                        ),
+                        softmax_temp=float(
+                            run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))
+                        ),
                         topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                         predict_kwargs=_pk,
                     )
             else:
-                print(f"[eval_em][Test {split_idx}][{tag_prefix_local}] Skip val-best eval because run.best_threshold is None.")
+                print(
+                    f"[eval_em][Test {split_idx}][{tag_prefix_local}] Skip val-best eval because run.best_threshold is None."
+                )
 
             # ---------- (C) sweep on test ----------
             task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
@@ -865,7 +920,9 @@ def main(cfg: DictConfig) -> None:
                     do_threshold_sweep=True,
                     sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
                     reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                    softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                    softmax_temp=float(
+                        run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))
+                    ),
                     topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                     predict_kwargs=_pk,
                 )
@@ -888,19 +945,25 @@ def main(cfg: DictConfig) -> None:
 
             metrics_sweep = res_sweep.get("metrics_at_best", res_sweep.get("metrics", {}))
             if best_thr_test is not None and "metrics_at_best" in res_sweep:
-                print(f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (best threshold={float(best_thr_test):.4f}):")
+                print(
+                    f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (best threshold={float(best_thr_test):.4f}):"
+                )
             else:
                 try:
                     base_thr = float(task_sweep.threshold)
                 except Exception:
                     base_thr = float("nan")
-                print(f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (base threshold={base_thr:.4f}):")
+                print(
+                    f"\n[Test {split_idx}][{tag_prefix_local}] Sweep metrics (base threshold={base_thr:.4f}):"
+                )
 
             for k, v in iter_scalar_metrics(metrics_sweep):
                 print(f"  {k}: {v:.4f}")
 
             if best_thr_test is not None:
-                print(f"[Test {split_idx}][{tag_prefix_local}] Best threshold on test = {float(best_thr_test):.4f}")
+                print(
+                    f"[Test {split_idx}][{tag_prefix_local}] Best threshold on test = {float(best_thr_test):.4f}"
+                )
 
             # wandb summary
             if wandb_run is not None:
@@ -925,6 +988,7 @@ def main(cfg: DictConfig) -> None:
     if wandb_run is not None:
         try:
             import wandb  # type: ignore
+
             wandb.finish()
         except Exception:
             pass

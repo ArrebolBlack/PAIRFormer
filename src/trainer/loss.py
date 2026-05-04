@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +19,7 @@ class BinaryLossInputs:
     - focal_gamma / focal_alpha / focal_lambda / bce_lambda
     - sample_weight: Optional[Tensor] (外部可传入；旧 Trainer 里来自 ESA weighting)
     """
+
     train_cfg: Any  # DictConfig / dataclass / 任意有属性的对象
 
 

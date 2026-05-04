@@ -68,10 +68,18 @@ class WindowShardWriter:
         shape_x = (self.max_samples, self.channels, self.seq_len)
         shape_1 = (self.max_samples,)
         self.X = np.memmap(self.shard_dir / "X.u8.mmap", mode="w+", dtype=np.uint8, shape=shape_x)
-        self.esa = np.memmap(self.shard_dir / "esa.f16.mmap", mode="w+", dtype=np.float16, shape=shape_1)
-        self.pos = np.memmap(self.shard_dir / "pos.f16.mmap", mode="w+", dtype=np.float16, shape=shape_1)
-        self.label = np.memmap(self.shard_dir / "label.i8.mmap", mode="w+", dtype=np.int8, shape=shape_1)
-        self.pair_id = np.memmap(self.shard_dir / "pair_id.i32.mmap", mode="w+", dtype=np.int32, shape=shape_1)
+        self.esa = np.memmap(
+            self.shard_dir / "esa.f16.mmap", mode="w+", dtype=np.float16, shape=shape_1
+        )
+        self.pos = np.memmap(
+            self.shard_dir / "pos.f16.mmap", mode="w+", dtype=np.float16, shape=shape_1
+        )
+        self.label = np.memmap(
+            self.shard_dir / "label.i8.mmap", mode="w+", dtype=np.int8, shape=shape_1
+        )
+        self.pair_id = np.memmap(
+            self.shard_dir / "pair_id.i32.mmap", mode="w+", dtype=np.int32, shape=shape_1
+        )
 
         self._cursor = 0
         self._write_meta()
@@ -101,7 +109,9 @@ class WindowShardWriter:
         if n <= 0:
             return 0
         if n > self.remaining:
-            raise RuntimeError(f"Shard full: shard={self.shard_id} need={n} remaining={self.remaining}")
+            raise RuntimeError(
+                f"Shard full: shard={self.shard_id} need={n} remaining={self.remaining}"
+            )
 
         s, e = self._cursor, self._cursor + n
         self.X[s:e] = X.detach().cpu().numpy().astype(np.uint8, copy=False)
@@ -172,10 +182,18 @@ class WindowShardReader:
         c = int(self.meta.channels)
         l = int(self.meta.seq_len)
         self.X = np.memmap(self.shard_dir / "X.u8.mmap", mode="r", dtype=np.uint8, shape=(n, c, l))
-        self.esa = np.memmap(self.shard_dir / "esa.f16.mmap", mode="r", dtype=np.float16, shape=(n,))
-        self.pos = np.memmap(self.shard_dir / "pos.f16.mmap", mode="r", dtype=np.float16, shape=(n,))
-        self.label = np.memmap(self.shard_dir / "label.i8.mmap", mode="r", dtype=np.int8, shape=(n,))
-        self.pair_id = np.memmap(self.shard_dir / "pair_id.i32.mmap", mode="r", dtype=np.int32, shape=(n,))
+        self.esa = np.memmap(
+            self.shard_dir / "esa.f16.mmap", mode="r", dtype=np.float16, shape=(n,)
+        )
+        self.pos = np.memmap(
+            self.shard_dir / "pos.f16.mmap", mode="r", dtype=np.float16, shape=(n,)
+        )
+        self.label = np.memmap(
+            self.shard_dir / "label.i8.mmap", mode="r", dtype=np.int8, shape=(n,)
+        )
+        self.pair_id = np.memmap(
+            self.shard_dir / "pair_id.i32.mmap", mode="r", dtype=np.int32, shape=(n,)
+        )
 
     def __len__(self) -> int:
         return int(self.meta.num_samples)

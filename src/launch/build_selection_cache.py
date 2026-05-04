@@ -6,25 +6,24 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
+import hydra
 import numpy as np
 import torch
-import hydra
-from omegaconf import DictConfig
 from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
 from tqdm import tqdm
 
 from src.config.data_config import DataConfig
 from src.data.builder import build_dataset_and_loader
 from src.data.em_cache import MemmapCacheStore
-
-from src.selectors.st_selector import STSelectorConfig
-from src.selectors.selector_module import SelectorModule
 from src.em.selector_runner import _restrict_topn_pool
-
+from src.selectors.selector_module import SelectorModule
+from src.selectors.st_selector import STSelectorConfig
 
 # -----------------------------------------------------------------------------
 # helpers: path resolve (match build_cheap_cache / train.py philosophy)
 # -----------------------------------------------------------------------------
+
 
 def _resolve_cache_root_like_train_py(cfg: DictConfig, orig_cwd: Path) -> str:
     """
@@ -88,23 +87,18 @@ def main(cfg: DictConfig) -> None:
     # NOTE: base_seed 用于 exploration 的可复现噪声；hash_seed 用于 Axis-SimHash dims 固定采样
     base_seed = int(cfg.get("seed", 2020))
     sel_cfg = STSelectorConfig(
-        kmax=int(cfg.get("selector_kmax", 128)), # 512
-
+        kmax=int(cfg.get("selector_kmax", 128)),  # 512
         # Step A
-        k1_ratio=float(cfg.get("selector_k1_ratio", 1)), # 0.5
+        k1_ratio=float(cfg.get("selector_k1_ratio", 1)),  # 0.5
         score_use_sigmoid=bool(cfg.get("selector_score_use_sigmoid", False)),
-
         # exploration (train only; default off)
         exploration_sigma=float(cfg.get("selector_exploration_sigma", 0.0)),
         base_seed=int(cfg.get("selector_base_seed", base_seed)),
-
         # Step B / pos binning
         pos_bin_eps=float(cfg.get("selector_pos_bin_eps", 1e-6)),
-
         # Step C / hash dedup
         use_hash_dedup=bool(cfg.get("selector_use_hash_dedup", True)),
         hash_seed=int(cfg.get("selector_hash_seed", base_seed)),
-
         # Step D / balanced quota
         score_norm_z=bool(cfg.get("selector_score_norm_z", True)),
         score_norm_eps=float(cfg.get("selector_score_norm_eps", 1e-6)),
@@ -165,7 +159,7 @@ def main(cfg: DictConfig) -> None:
                 f"[SelectionCache] cheap cache not ready for split={split}: state={cheap_meta.get('state')}. "
                 f"Run cheap step first."
             )
-        
+
         dataset_hash_key = cheap_meta["dataset_hash_key"]
         path_hash = cheap_meta["path_hash"]
         cheap_version_used = cheap_meta["cheap_version"]
@@ -213,7 +207,12 @@ def main(cfg: DictConfig) -> None:
             overwrite=overwrite,
         )
 
-        if (not overwrite) and (store.sel_meta is not None) and (store.sel_meta.state == "ready") and skip_if_ready:
+        if (
+            (not overwrite)
+            and (store.sel_meta is not None)
+            and (store.sel_meta.state == "ready")
+            and skip_if_ready
+        ):
             store.assert_version_consistent()
             print(f"[SelectionCache] SKIP split={split} (already ready).")
             continue

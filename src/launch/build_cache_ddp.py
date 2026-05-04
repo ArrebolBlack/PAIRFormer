@@ -22,8 +22,8 @@ Reuses the same experiment config (MTI_EM_Pipeline) as train_em.py.
 """
 from __future__ import annotations
 
-import os
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -34,16 +34,15 @@ from hydra.utils import get_original_cwd, instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from src.config.data_config import DataConfig
-from src.data.dataset import ChunkedCTSDataset
 from src.data.builder import get_or_build_blocks
-from src.models.registry import build_model
-from src.em.cheap_runner import CheapCacheRunner, CheapCacheBuildConfig, load_ckpt_into_model
-from src.em.selection_runner import run_selection_cache
+from src.data.dataset import ChunkedCTSDataset
+from src.em.cheap_runner import CheapCacheBuildConfig, CheapCacheRunner, load_ckpt_into_model
 from src.em.instance_runner import run_instance_cache
+from src.em.selection_runner import run_selection_cache
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
+from src.models.registry import build_model
 from src.utils import set_seeds
-
-from src.utils.ddp import setup_ddp, cleanup_ddp, is_ddp, is_rank0, barrier, print_on_rank0
+from src.utils.ddp import barrier, cleanup_ddp, is_ddp, is_rank0, print_on_rank0, setup_ddp
 
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:
@@ -63,7 +62,7 @@ def _load_ckpt_clean(model: torch.nn.Module, ckpt_path: str, device: torch.devic
     for k, v in sd.items():
         for pref in ("model.", "module.", "net."):
             if k.startswith(pref):
-                k = k[len(pref):]
+                k = k[len(pref) :]
         cleaned[k] = v
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing:
@@ -94,13 +93,17 @@ def main(cfg: DictConfig) -> None:
     # ---- DDP setup ----
     rank, local_rank, world_size = setup_ddp()
     if world_size > 1:
-        print_on_rank0(f"[build_cache_ddp] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}")
+        print_on_rank0(
+            f"[build_cache_ddp] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}"
+        )
         device = torch.device(f"cuda:{local_rank}")
         set_seeds(int(cfg.get("seed", 2020)) + rank)
     else:
         print("[build_cache_ddp] Single GPU mode")
         dev_req = str(cfg.get("device", "cuda"))
-        device = torch.device("cuda:0" if dev_req == "cuda" and torch.cuda.is_available() else dev_req)
+        device = torch.device(
+            "cuda:0" if dev_req == "cuda" and torch.cuda.is_available() else dev_req
+        )
 
     orig_cwd = Path(get_original_cwd())
     em_node = cfg.get("em", {})
@@ -154,11 +157,24 @@ def main(cfg: DictConfig) -> None:
     selector_module = instantiate(sel_mod_node)
 
     import hashlib
+
     sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
-    sel_hash = hashlib.sha1(json.dumps(sel_mod_container, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:10]
-    sel_version_cfg = OmegaConf.select(cfg, "em.sel_version", default=None) or OmegaConf.select(cfg, "sel_version", default=None)
-    sel_version = f"sel_{sel_hash}" if sel_version_cfg is None or str(sel_version_cfg).lower() in ("", "none", "null", "auto") else str(sel_version_cfg)
-    sel_kmax = int(selector_module.cfg.kmax) if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax") else kmax
+    sel_hash = hashlib.sha1(
+        json.dumps(sel_mod_container, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:10]
+    sel_version_cfg = OmegaConf.select(cfg, "em.sel_version", default=None) or OmegaConf.select(
+        cfg, "sel_version", default=None
+    )
+    sel_version = (
+        f"sel_{sel_hash}"
+        if sel_version_cfg is None or str(sel_version_cfg).lower() in ("", "none", "null", "auto")
+        else str(sel_version_cfg)
+    )
+    sel_kmax = (
+        int(selector_module.cfg.kmax)
+        if hasattr(selector_module, "cfg") and hasattr(selector_module.cfg, "kmax")
+        else kmax
+    )
 
     sel_node = em_node.get("selection_cache", {})
     sel_pair_batch_size = int(sel_node.get("pair_batch_size", 10240))
@@ -178,7 +194,8 @@ def main(cfg: DictConfig) -> None:
         raise KeyError("[build_cache_ddp] Missing cheap_model config")
     cheap_model = build_model(
         str(cheap_arch_cfg.get("arch", cheap_arch_cfg.get("name"))),
-        cheap_arch_cfg, data_cfg=data_cfg,
+        cheap_arch_cfg,
+        data_cfg=data_cfg,
     ).to(device)
 
     cheap_ckpt = _resolve_path(

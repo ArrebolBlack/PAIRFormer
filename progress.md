@@ -158,6 +158,159 @@ N/A
 
 ---
 
+## 第3轮：清理根目录临时文件 (已完成)
+
+### 当前子任务
+清理根目录的临时文件，移动到合适的目录
+
+### 这轮准备怎么做
+1. 识别根目录的9个临时文件
+2. 创建组织目录（results/temp, scripts/temp, tests/temp）
+3. 使用git mv移动文件保持历史
+4. 提交更改
+
+### 怎么判断这轮做成了
+- [x] 所有临时文件已从根目录移走
+- [x] 根目录只包含必要文件
+- [x] Git历史完整
+- [x] 更改已提交并推送
+
+### 结果要更新到哪个状态文件里
+- progress.md（本文件）
+- Git commit
+
+### 完成情况
+**状态**: ✅ 已完成
+
+**执行记录**:
+1. 创建results/temp/, scripts/temp/, tests/temp/目录
+2. 移动3个JSON结果文件到results/temp/
+3. 移动3个临时脚本到scripts/temp/
+4. 移动2个测试文件和1个配置到tests/temp/
+5. 提交并推送
+
+**下一步**:
+开始第4轮：整理实验配置文件
+
+---
+
+## 第4轮：整理实验配置文件 (已完成)
+
+### 当前子任务
+整理77个实验配置文件，分类为核心/变体/归档
+
+### 这轮准备怎么做
+1. 分析所有77个配置文件
+2. 识别论文实验相关的核心配置
+3. 创建variants/和archive/目录
+4. 使用git mv移动配置文件
+5. 创建configs/experiment/README.md
+
+### 怎么判断这轮做成了
+- [x] 27个核心配置保留在configs/experiment/
+- [x] 10个变体配置移到variants/
+- [x] 40个历史配置移到archive/
+- [x] 创建详细的README.md
+- [x] 提交并推送
+
+### 结果要更新到哪个状态文件里
+- progress.md（本文件）
+- config_analysis.md（分类分析）
+- configs/experiment/README.md（配置文档）
+
+### 完成情况
+**状态**: ✅ 已完成
+
+**执行记录**:
+1. 创建config_analysis.md分析77个配置
+2. 识别核心配置：
+   - miRAW (9): Table 1, Fig 2, 消融实验
+   - deepTargetPro (4): Table 2, 外部验证
+   - MTI (14): Fig 2a, 大规模实验, shard工具
+3. 创建variants/和archive/目录
+4. 移动10个变体配置到variants/
+5. 移动40个历史配置到archive/
+6. 创建详细的configs/experiment/README.md
+7. 提交并推送
+
+**关键成果**:
+- 配置文件从77个精简到27个核心配置
+- 清晰的目录结构：core (27) / variants (10) / archive (40)
+- 完整的文档说明每个配置的用途和论文对应关系
+
+**下一步**:
+开始第5轮：整理文档结构
+
+---
+
+## 第5轮：整理文档结构 (已完成)
+
+### 当前子任务
+整理50+个markdown文档，分类归档
+
+### 这轮准备怎么做
+1. 列出所有markdown文档
+2. 分类为主文档/实验报告/技术文档
+3. 创建docs/reports/目录
+4. 移动文档到相应位置
+5. 创建docs/README.md索引
+
+### 怎么判断这轮做成了
+- [x] 根目录markdown ≤ 9个
+- [x] 4个实验报告移到docs/reports/
+- [x] 创建docs/README.md
+- [x] 提交并推送
+
+### 结果要更新到哪个状态文件里
+- progress.md（本文件）
+- docs_analysis.md（分类分析）
+- docs/README.md（文档索引）
+
+### 完成情况
+**状态**: ✅ 已完成
+
+**执行记录**:
+1. 分析57个markdown文档分布
+2. 创建docs_analysis.md分类方案
+3. 移动4个实验报告到docs/reports/
+4. 创建详细的docs/README.md索引
+5. 提交并推送
+
+**文档分布**:
+- 根目录（9个）：核心文档
+- docs/（7个）：技术文档和部署指南
+- docs/reports/（4个）：实验总结报告
+- experiments/（12个）：实验计划和EXP8报告
+- scripts/rebuttal/（25个）：Rebuttal实验文档
+
+**下一步**:
+开始第6轮：代码格式化
+
+---
+
+## 第6轮：代码格式化 (进行中)
+
+### 当前子任务
+使用black和isort格式化Python代码
+
+### 这轮准备怎么做
+1. 安装black和isort
+2. 格式化src/目录所有Python文件
+3. 检查格式化结果
+4. 提交更改
+
+### 怎么判断这轮做成了
+- [ ] black格式化完成
+- [ ] isort排序完成
+- [ ] 代码通过格式检查
+- [ ] 提交并推送
+
+### 结果要更新到哪个状态文件里
+- progress.md（本文件）
+- Git commit
+
+---
+
 ## 模板：后续轮次
 
 ### 当前子任务

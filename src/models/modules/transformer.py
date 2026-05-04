@@ -1,17 +1,18 @@
 # src/models/modules/transformer.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Literal
 
 import math
+from dataclasses import dataclass
+from typing import Literal, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # -----------------------
 # 配置对象（方便从 cfg.model.params 里构造）
 # -----------------------
+
 
 @dataclass
 class TransformerConfig:
@@ -35,6 +36,7 @@ class TransformerConfig:
 # 位置编码：Sinusoidal
 # -----------------------
 
+
 class SinusoidalPositionalEncoding(nn.Module):
     """
     标准 Transformer 中的绝对正弦位置编码（不可训练）。
@@ -45,8 +47,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, d_model)  # (L, D)
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float32) *
-            (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -65,6 +66,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 # -----------------------
 # RoPE: Rotary Positional Embedding
 # -----------------------
+
 
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -98,9 +100,16 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor
 # Multi-head Self-Attention (Pre-LN)
 # -----------------------
 
+
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, causal: bool = False,
-                 use_rope: bool = False):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float = 0.0,
+        causal: bool = False,
+        use_rope: bool = False,
+    ):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
 
@@ -157,6 +166,7 @@ class MultiHeadSelfAttention(nn.Module):
 # FFN
 # -----------------------
 
+
 class FeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0, activation: str = "gelu"):
         super().__init__()
@@ -189,6 +199,7 @@ class FeedForward(nn.Module):
 # -----------------------
 # Transformer Block (Pre-LN)
 # -----------------------
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg: TransformerConfig):
@@ -227,6 +238,7 @@ class TransformerBlock(nn.Module):
 # Transformer Encoder (通用)
 # -----------------------
 
+
 class TransformerEncoder(nn.Module):
     """
     通用 Encoder：
@@ -255,9 +267,7 @@ class TransformerEncoder(nn.Module):
         else:
             self.pos_encoding = None  # RoPE 在 attention 内部应用；"none" 则完全不用
 
-        self.layers = nn.ModuleList(
-            [TransformerBlock(cfg) for _ in range(cfg.num_layers)]
-        )
+        self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         self.final_ln = nn.LayerNorm(cfg.d_model)
 
         # 如果想做 LM，可以选择 tie embedding with output head

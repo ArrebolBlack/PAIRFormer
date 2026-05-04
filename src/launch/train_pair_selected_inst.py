@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
-from pathlib import Path
 import os
+from pathlib import Path
 
 import hydra
 import torch
@@ -34,8 +35,21 @@ from src.trainer.trainer_pair_selected import PairSelectedTrainer, PairSelectedT
 from src.utils import set_seeds
 
 # DDP imports
-from src.utils.ddp import setup_ddp, cleanup_ddp, is_ddp, is_rank0, get_rank, get_world_size, print_on_rank0, barrier
-from src.utils.ddp_sampler import get_ddp_sampler, set_epoch_for_sampler, disable_persistent_workers_if_ddp
+from src.utils.ddp import (
+    barrier,
+    cleanup_ddp,
+    get_rank,
+    get_world_size,
+    is_ddp,
+    is_rank0,
+    print_on_rank0,
+    setup_ddp,
+)
+from src.utils.ddp_sampler import (
+    disable_persistent_workers_if_ddp,
+    get_ddp_sampler,
+    set_epoch_for_sampler,
+)
 
 
 def _apply_sync_batchnorm(model: torch.nn.Module) -> torch.nn.Module:
@@ -59,7 +73,9 @@ def main(cfg: DictConfig) -> None:
     # which is False before setup_ddp() is called (chicken-and-egg).
     rank, local_rank, world_size = setup_ddp()
     if world_size > 1:
-        print_on_rank0(f"[train_pair_selected_inst] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}")
+        print_on_rank0(
+            f"[train_pair_selected_inst] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}"
+        )
         device = torch.device(f"cuda:{local_rank}")
     else:
         print("[train_pair_selected_inst] Single GPU mode")
@@ -150,7 +166,9 @@ def main(cfg: DictConfig) -> None:
     # ---- Build models ----
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     agg_cfg = cfg.model
-    agg_model = build_model(str(agg_cfg.get("arch", agg_cfg.get("name"))), agg_cfg, data_cfg=data_cfg).to(device)
+    agg_model = build_model(
+        str(agg_cfg.get("arch", agg_cfg.get("name"))), agg_cfg, data_cfg=data_cfg
+    ).to(device)
 
     # Apply SyncBatchNorm for DDP
     if is_ddp():
@@ -159,7 +177,9 @@ def main(cfg: DictConfig) -> None:
     instance_model = None
     if bool(cfg.run.get("load_instance_into_ckpt", False)):
         inst_cfg = cfg.instance_model
-        instance_model = build_model(str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg).to(device)
+        instance_model = build_model(
+            str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg
+        ).to(device)
 
         if is_ddp():
             instance_model = _apply_sync_batchnorm(instance_model)
@@ -229,13 +249,19 @@ def main(cfg: DictConfig) -> None:
     resumed = False
     if bool(cfg.run.get("resume", False)) or (cfg.run.get("checkpoint", None) is not None):
         ckpt_path_cfg = cfg.run.get("checkpoint", None)
-        ckpt_path = _resolve_ckpt(ckpt_path_cfg, orig_cwd=run_dir) if ckpt_path_cfg is not None else (ckpt_dir / "best.pt")
+        ckpt_path = (
+            _resolve_ckpt(ckpt_path_cfg, orig_cwd=run_dir)
+            if ckpt_path_cfg is not None
+            else (ckpt_dir / "best.pt")
+        )
         if ckpt_path is not None and ckpt_path.exists():
             trainer.load_checkpoint(str(ckpt_path), map_location=device)
             print_on_rank0(f"[train_pair_selected_inst] Resumed from checkpoint: {ckpt_path}")
             resumed = True
         else:
-            print_on_rank0(f"[train_pair_selected_inst] No checkpoint found at {ckpt_path}, start from scratch.")
+            print_on_rank0(
+                f"[train_pair_selected_inst] No checkpoint found at {ckpt_path}, start from scratch."
+            )
 
     start_epoch = int(trainer.epoch) + 1 if resumed else int(trainer.epoch)
 
@@ -283,7 +309,9 @@ def main(cfg: DictConfig) -> None:
         test_splits = cfg.run.get("test_splits", ["test"])
         if isinstance(test_splits, str):
             test_splits = [test_splits]
-        best_ckpt_path = _resolve_ckpt(cfg.run.get("best_ckpt_path", str(default_best_checkpoint(ckpt_dir))), orig_cwd=run_dir)
+        best_ckpt_path = _resolve_ckpt(
+            cfg.run.get("best_ckpt_path", str(default_best_checkpoint(ckpt_dir))), orig_cwd=run_dir
+        )
 
         def run_test_eval_for_current_trainer(tag_prefix: str) -> None:
             val_best_threshold = None
@@ -309,7 +337,9 @@ def main(cfg: DictConfig) -> None:
                     sweep_num_thresholds=sweep_num_thresholds,
                 )
                 val_best_threshold = float(val_sweep["sweep_best_threshold"])
-                print_on_rank0(f"[train_pair_selected_inst][{tag_prefix}] val_best_threshold={val_best_threshold:.6f}")
+                print_on_rank0(
+                    f"[train_pair_selected_inst][{tag_prefix}] val_best_threshold={val_best_threshold:.6f}"
+                )
 
             for sp in [str(x) for x in list(test_splits)]:
                 print_on_rank0(f"[train_pair_selected_inst][{tag_prefix}] Evaluating split='{sp}'")
@@ -349,13 +379,16 @@ def main(cfg: DictConfig) -> None:
             run_test_eval_for_current_trainer("last")
         if eval_with_best and best_ckpt_path is not None and best_ckpt_path.exists():
             trainer.load_checkpoint(str(best_ckpt_path), map_location=device)
-            print_on_rank0(f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}")
+            print_on_rank0(
+                f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}"
+            )
             run_test_eval_for_current_trainer("best")
 
     # ---- Cleanup ----
     if wandb_run is not None:
         try:
             import wandb
+
             wandb.finish()
         except Exception:
             pass

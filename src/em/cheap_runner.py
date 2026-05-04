@@ -16,15 +16,15 @@ from src.data.builder import build_dataset_and_loader
 from src.data.cache_identity import dataset_identity
 from src.data.em_cache import MemmapCacheStore
 
-
 # -------------------------
 # small helpers
 # -------------------------
 
+
 def _strip_prefix(k: str) -> str:
     for pref in ("model.", "module.", "net."):
         if k.startswith(pref):
-            return k[len(pref):]
+            return k[len(pref) :]
     return k
 
 
@@ -50,7 +50,9 @@ def load_ckpt_into_model(
     if missing:
         print(f"[CheapRunner] WARN missing keys: {len(missing)} (first 10): {missing[:10]}")
     if unexpected:
-        print(f"[CheapRunner] WARN unexpected keys: {len(unexpected)} (first 10): {unexpected[:10]}")
+        print(
+            f"[CheapRunner] WARN unexpected keys: {len(unexpected)} (first 10): {unexpected[:10]}"
+        )
 
     if use_ema_shadow and isinstance(ckpt, dict) and isinstance(ckpt.get("ema_shadow", None), dict):
         ema_shadow = ckpt["ema_shadow"]
@@ -63,7 +65,9 @@ def load_ckpt_into_model(
     model.eval()
 
 
-def extract_batch(batch: Dict[str, Any]) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+def extract_batch(
+    batch: Dict[str, Any]
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Based on your window-level pipeline output (cts_collate_fn + ChunkedCTSDataset):
       - inputs: [B, C, L]
@@ -128,6 +132,7 @@ def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
 # -------------------------
 # Runner configs
 # -------------------------
+
 
 @dataclass
 class CheapCacheBuildConfig:
@@ -197,7 +202,9 @@ class CheapCacheRunner:
         print(f"[CheapRunner] dataset_cache_root={self.dataset_cache_root}")
         print(f"[CheapRunner] em_cache_root={self.em_cache_root}")
         print(f"[CheapRunner] device={self.device} amp={cfg.amp} has_entropy={cfg.has_entropy}")
-        print(f"[CheapRunner] splits={cfg.splits} overwrite={cfg.overwrite} skip_if_ready={cfg.skip_if_ready}")
+        print(
+            f"[CheapRunner] splits={cfg.splits} overwrite={cfg.overwrite} skip_if_ready={cfg.skip_if_ready}"
+        )
         print(f"[CheapRunner] cheap_version={cheap_version}")
         print(f"[CheapRunner] emb_dim(asserted)={emb_dim}")
 
@@ -222,7 +229,8 @@ class CheapCacheRunner:
         emb_dim: int,
         cfg: CheapCacheBuildConfig,
     ) -> None:
-        from src.utils.ddp import is_ddp, is_rank0, barrier as ddp_barrier
+        from src.utils.ddp import barrier as ddp_barrier
+        from src.utils.ddp import is_ddp, is_rank0
 
         rank = int(cfg.rank)
         world_size = int(cfg.world_size)
@@ -286,7 +294,12 @@ class CheapCacheRunner:
             )
 
         # 3) skip logic
-        if (not cfg.overwrite) and store.cheap_meta is not None and store.cheap_meta.state == "ready" and cfg.skip_if_ready:
+        if (
+            (not cfg.overwrite)
+            and store.cheap_meta is not None
+            and store.cheap_meta.state == "ready"
+            and cfg.skip_if_ready
+        ):
             if store.cheap_meta.cheap_version != str(cheap_version):
                 raise RuntimeError(
                     f"[CheapRunner] Found ready cache but cheap_version mismatch for split={split}:\n"
@@ -297,7 +310,11 @@ class CheapCacheRunner:
             print(f"[CheapRunner] SKIP split={split} (already ready).")
             return
 
-        if (not cfg.overwrite) and store.cheap_meta is not None and store.cheap_meta.cheap_version != str(cheap_version):
+        if (
+            (not cfg.overwrite)
+            and store.cheap_meta is not None
+            and store.cheap_meta.cheap_version != str(cheap_version)
+        ):
             raise RuntimeError(
                 f"[CheapRunner] Existing cache cheap_version != requested for split={split}:\n"
                 f"  existing={store.cheap_meta.cheap_version}\n"
@@ -311,14 +328,21 @@ class CheapCacheRunner:
         shard_size = shard_end - shard_start
 
         if world_size > 1:
-            print(f"[CheapRunner:{split}] rank={rank}/{world_size} shard=[{shard_start},{shard_end}) ({shard_size}/{total_cts})")
+            print(
+                f"[CheapRunner:{split}] rank={rank}/{world_size} shard=[{shard_start},{shard_end}) ({shard_size}/{total_cts})"
+            )
 
         # 5) Iterate and write only our shard
         offset = 0
         written = 0
         t0 = time.time()
 
-        pbar = tqdm(loader, desc=f"[CheapRunner:{split}:r{rank}]", dynamic_ncols=True, disable=(world_size > 1 and rank != 0))
+        pbar = tqdm(
+            loader,
+            desc=f"[CheapRunner:{split}:r{rank}]",
+            dynamic_ncols=True,
+            disable=(world_size > 1 and rank != 0),
+        )
         for batch in pbar:
             x, esa, pos = extract_batch(batch)
             B = int(x.shape[0])
@@ -388,4 +412,6 @@ class CheapCacheRunner:
 
         dt = time.time() - t0
         out_dir = Path(self.em_cache_root) / "em_cache" / split / "cheap"
-        print(f"[CheapRunner:{split}] rank={rank} written={written}/{shard_size} time={dt:.1f}s -> {out_dir}")
+        print(
+            f"[CheapRunner:{split}] rank={rank} written={written}/{shard_size} time={dt:.1f}s -> {out_dir}"
+        )

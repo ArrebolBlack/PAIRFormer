@@ -19,12 +19,16 @@ from src.utils import set_seeds
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     set_seeds(int(cfg.get("seed", 2020)))
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     split = str(cfg.run.get("split", "train"))
     root = str(cfg.scalable.cache_root)
     data_cfg = DataConfig.from_omegaconf(cfg.data)
 
-    teacher = build_model(str(cfg.run.distill_teacher_arch), cfg.run.distill_teacher_model, data_cfg=data_cfg).to(device)
+    teacher = build_model(
+        str(cfg.run.distill_teacher_arch), cfg.run.distill_teacher_model, data_cfg=data_cfg
+    ).to(device)
     load_model_state(teacher, str(cfg.run.distill_teacher_ckpt), device)
     runner = TeacherRunner(
         teacher=teacher,
@@ -43,7 +47,14 @@ def main(cfg: DictConfig) -> None:
     for shard in manifest.shards:
         shard_id = int(shard["shard_id"])
         num_samples = int(shard["num_samples"])
-        writer = TeacherShardWriter(root, split=split, shard_id=shard_id, num_samples=num_samples, emb_dim=emb_dim, has_feat=has_feat)
+        writer = TeacherShardWriter(
+            root,
+            split=split,
+            shard_id=shard_id,
+            num_samples=num_samples,
+            emb_dim=emb_dim,
+            has_feat=has_feat,
+        )
         local_start = offset_global
         batch_size = int(cfg.run.get("batch_size", 2048))
         start = 0

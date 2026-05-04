@@ -25,21 +25,21 @@ src/evaluator/metrics.py
       若为 False，表示模型输出已经是概率 [0, 1]，不会再做变换。
 """
 
-from typing import Dict, Any, Optional, Sequence, Tuple, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from omegaconf import DictConfig
 from sklearn.metrics import (
     accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
     average_precision_score,
     confusion_matrix,
-    mean_squared_error,
+    f1_score,
     mean_absolute_error,
+    mean_squared_error,
+    precision_score,
     r2_score,
+    recall_score,
+    roc_auc_score,
 )
 
 
@@ -75,7 +75,6 @@ def _get_cfg_value(cfg: Any, key: str, default: Any) -> Any:
         return default
 
 
-
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     """
     数值稳定版 sigmoid，避免 np.exp 溢出：
@@ -95,6 +94,7 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     out[neg_mask] = exp_x / (1.0 + exp_x)
 
     return out
+
 
 def compute_metrics(
     y_true: np.ndarray,
@@ -334,7 +334,9 @@ def find_best_threshold_by_f1(sweep_result: Dict[str, np.ndarray]) -> Dict[str, 
     precision_list = np.asarray(sweep_result.get("precision", []))
     recall_list = np.asarray(sweep_result.get("recall", []))
 
-    best_precision = float(precision_list[best_idx]) if precision_list.size > best_idx else float("nan")
+    best_precision = (
+        float(precision_list[best_idx]) if precision_list.size > best_idx else float("nan")
+    )
     best_recall = float(recall_list[best_idx]) if recall_list.size > best_idx else float("nan")
 
     return {
@@ -349,6 +351,7 @@ def find_best_threshold_by_f1(sweep_result: Dict[str, np.ndarray]) -> Dict[str, 
 # ---------------------------------------------------------------------------
 # Ranking
 # ---------------------------------------------------------------------------
+
 
 def _make_groups_from_set_idx(set_idx: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -368,6 +371,7 @@ def _make_groups_from_set_idx(set_idx: np.ndarray) -> Tuple[np.ndarray, np.ndarr
     starts = np.concatenate([np.array([0], dtype=np.int64), change])
     ends = np.concatenate([change, np.array([sorted_set.size], dtype=np.int64)])
     return order, starts, ends
+
 
 def _dcg_at_k(relevances: np.ndarray, k: int, gain: str = "identity") -> float:
     """
@@ -409,11 +413,13 @@ def _bucket_by_pair_size(
 
     if strategy == "fixed":
         if fixed_edges is None or len(fixed_edges) < 2:
-            raise ValueError("fixed_edges must be provided with at least 2 elements, e.g. [1,3,6,11,21,10**9]")
+            raise ValueError(
+                "fixed_edges must be provided with at least 2 elements, e.g. [1,3,6,11,21,10**9]"
+            )
         edges = np.asarray(fixed_edges, dtype=np.int64)
         # bucket i: [edges[i], edges[i+1])，最后一个可用很大值封顶
         bucket_id = np.searchsorted(edges[1:], sizes, side="right")  # map to 0..B-1
-        bucket_ranges = [(int(edges[i]), int(edges[i+1] - 1)) for i in range(len(edges) - 1)]
+        bucket_ranges = [(int(edges[i]), int(edges[i + 1] - 1)) for i in range(len(edges) - 1)]
         return bucket_id, bucket_ranges
 
     if strategy == "quantile":
@@ -451,8 +457,8 @@ def compute_pair_ranking_metrics_from_teacher(
     set_idx_window: np.ndarray,
     *,
     ks: Sequence[int] = (1, 3, 5, 10),
-    relevance_transform: str = "sigmoid",   # "sigmoid" | "minmax" | "none"
-    gain: str = "identity",                # "identity" | "exp2"
+    relevance_transform: str = "sigmoid",  # "sigmoid" | "minmax" | "none"
+    gain: str = "identity",  # "identity" | "exp2"
     compute_topk_overlap: bool = True,
     # 分桶
     bucket_strategy: Optional[str] = "quantile",  # None 表示不分桶
@@ -468,6 +474,7 @@ def compute_pair_ranking_metrics_from_teacher(
 
     输入均为“全验证集级别”的 window 粒度数组，shape=(N_windows,)
     """
+
     def _to_1d(x, name: str):
         x = np.asarray(x)
         # (N,1) -> (N,)
@@ -502,7 +509,9 @@ def compute_pair_ranking_metrics_from_teacher(
 
     # 预先准备输出数组（per-pair）
     ndcg_per_k = {k: np.zeros(num_pairs, dtype=np.float64) for k in ks}
-    overlap_per_k = {k: np.zeros(num_pairs, dtype=np.float64) for k in ks} if compute_topk_overlap else None
+    overlap_per_k = (
+        {k: np.zeros(num_pairs, dtype=np.float64) for k in ks} if compute_topk_overlap else None
+    )
     pair_sizes = np.zeros(num_pairs, dtype=np.int64)
     pair_ids = np.zeros(num_pairs, dtype=np.int64)
 
@@ -620,7 +629,7 @@ def compute_pair_ranking_metrics_from_teacher(
 
 
 # ---------------------------------------------------------------------------
-# Teacher-Student agreement metrics 
+# Teacher-Student agreement metrics
 # ---------------------------------------------------------------------------
 
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -630,6 +639,7 @@ import numpy as np
 try:
     # sklearn 依赖 scipy，通常环境里都有
     from scipy.stats import spearmanr as _spearmanr
+
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
@@ -664,7 +674,7 @@ def spearman_global(teacher_logits: Any, student_logits: Any) -> Dict[str, float
     rs = s.argsort().argsort().astype(np.float64)
     rt -= rt.mean()
     rs -= rs.mean()
-    denom = (np.sqrt((rt * rt).mean()) * np.sqrt((rs * rs).mean()) + 1e-12)
+    denom = np.sqrt((rt * rt).mean()) * np.sqrt((rs * rs).mean()) + 1e-12
     rho = float((rt * rs).mean() / denom)
     return {"spearman_rho": rho, "spearman_p": float("nan"), "n": int(t.size)}
 
@@ -721,7 +731,7 @@ def spearman_by_set(
             rs = s_i.argsort().argsort().astype(np.float64)
             rt -= rt.mean()
             rs -= rs.mean()
-            denom = (np.sqrt((rt * rt).mean()) * np.sqrt((rs * rs).mean()) + 1e-12)
+            denom = np.sqrt((rt * rt).mean()) * np.sqrt((rs * rs).mean()) + 1e-12
             rho = float((rt * rs).mean() / denom)
 
         if np.isfinite(rho):

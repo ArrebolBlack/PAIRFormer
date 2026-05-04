@@ -35,7 +35,9 @@ def _resolve_ckpt_dir(run_dir: Path, cfg: DictConfig) -> Path:
     return run_dir / subdir / exp_name
 
 
-def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False):
+def _make_loader(
+    root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False
+):
     ds = WindowShardDataset(
         root,
         split=split,
@@ -60,7 +62,9 @@ def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_s
     return ds, ld
 
 
-def _distill_bce(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
+def _distill_bce(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float
+) -> torch.Tensor:
     T = max(float(temperature), 1e-6)
     teacher_prob = torch.sigmoid(teacher_logits / T).detach()
     return F.binary_cross_entropy_with_logits(student_logits / T, teacher_prob) * (T * T)
@@ -69,7 +73,9 @@ def _distill_bce(student_logits: torch.Tensor, teacher_logits: torch.Tensor, tem
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     set_seeds(int(cfg.get("seed", 2020)))
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     run_dir = Path.cwd()
     ckpt_dir = _resolve_ckpt_dir(run_dir, cfg)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -82,47 +88,80 @@ def main(cfg: DictConfig) -> None:
     max_train = cfg.scalable.get("max_train_samples", None)
     max_val = cfg.scalable.get("max_val_samples", None)
 
-    teacher_root = str(cfg.run.get("teacher_cache_root", cache_root)) if bool(cfg.run.get("use_teacher_shard", False)) else None
-    train_ds = WindowShardDataset(cache_root, split="train", include_ignore=True, max_samples=max_train, teacher_root=teacher_root)
+    teacher_root = (
+        str(cfg.run.get("teacher_cache_root", cache_root))
+        if bool(cfg.run.get("use_teacher_shard", False))
+        else None
+    )
+    train_ds = WindowShardDataset(
+        cache_root,
+        split="train",
+        include_ignore=True,
+        max_samples=max_train,
+        teacher_root=teacher_root,
+    )
     train_loader = DataLoader(
         train_ds,
-        batch_sampler=ChunkAwareBatchSampler(train_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=True),
+        batch_sampler=ChunkAwareBatchSampler(
+            train_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=True
+        ),
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         collate_fn=window_shard_collate,
     )
-    val_ds = WindowShardDataset(cache_root, split="val", include_ignore=True, max_samples=max_val, teacher_root=teacher_root)
+    val_ds = WindowShardDataset(
+        cache_root, split="val", include_ignore=True, max_samples=max_val, teacher_root=teacher_root
+    )
     val_loader = DataLoader(
         val_ds,
-        batch_sampler=ChunkAwareBatchSampler(val_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False),
+        batch_sampler=ChunkAwareBatchSampler(
+            val_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False
+        ),
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         collate_fn=window_shard_collate,
     )
     val_pair_labels = _pair_labels(data_cfg, "val")
-    print(f"[train_cheapcts_shard] train_samples={len(train_ds)} val_samples={len(val_ds)} batch_size={batch_size}")
+    print(
+        f"[train_cheapcts_shard] train_samples={len(train_ds)} val_samples={len(val_ds)} batch_size={batch_size}"
+    )
 
-    student = build_model(str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg).to(device)
+    student = build_model(
+        str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg
+    ).to(device)
     teacher_runner = None
     if not bool(cfg.run.get("use_teacher_shard", False)):
-        teacher = build_model(str(cfg.run.distill_teacher_arch), cfg.run.distill_teacher_model, data_cfg=data_cfg).to(device)
+        teacher = build_model(
+            str(cfg.run.distill_teacher_arch), cfg.run.distill_teacher_model, data_cfg=data_cfg
+        ).to(device)
         load_model_state(teacher, str(cfg.run.distill_teacher_ckpt), device)
         teacher_runner = TeacherRunner(
             teacher=teacher,
             device=device,
-            amp_enabled=bool(cfg.run.get("distill_teacher_amp", True) and cfg.train.get("amp", False)),
+            amp_enabled=bool(
+                cfg.run.get("distill_teacher_amp", True) and cfg.train.get("amp", False)
+            ),
             need_feat=bool(cfg.run.get("distill_need_feat", True)),
         )
 
     student_proj: nn.Module | None = None
     if float(cfg.run.get("distill_beta_feat", 0.0)) > 0:
-        student_proj = nn.Linear(int(cfg.run.get("distill_student_emb_dim", 64)), int(cfg.run.get("distill_teacher_feat_dim", 384))).to(device)
+        student_proj = nn.Linear(
+            int(cfg.run.get("distill_student_emb_dim", 64)),
+            int(cfg.run.get("distill_teacher_feat_dim", 384)),
+        ).to(device)
 
     criterion = BinaryClassificationLoss(train_cfg=cfg.train)
-    params = list(student.parameters()) + ([] if student_proj is None else list(student_proj.parameters()))
-    optimizer = optim.AdamW(params, lr=float(cfg.train.get("lr", 6e-3)), weight_decay=float(cfg.train.get("weight_decay", 0.0)))
+    params = list(student.parameters()) + (
+        [] if student_proj is None else list(student_proj.parameters())
+    )
+    optimizer = optim.AdamW(
+        params,
+        lr=float(cfg.train.get("lr", 6e-3)),
+        weight_decay=float(cfg.train.get("weight_decay", 0.0)),
+    )
     amp_enabled = bool(cfg.train.get("amp", False) and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
@@ -168,10 +207,14 @@ def main(cfg: DictConfig) -> None:
             optimizer.zero_grad(set_to_none=True)
             with torch.no_grad():
                 if bool(cfg.run.get("use_teacher_shard", False)):
-                    teacher_logits = batch["teacher_logit"].to(device, non_blocking=True).view(-1)[valid_mask]
+                    teacher_logits = (
+                        batch["teacher_logit"].to(device, non_blocking=True).view(-1)[valid_mask]
+                    )
                     teacher_feat = None
                     if "teacher_feat" in batch:
-                        teacher_feat = batch["teacher_feat"].to(device, non_blocking=True)[valid_mask]
+                        teacher_feat = batch["teacher_feat"].to(device, non_blocking=True)[
+                            valid_mask
+                        ]
                 else:
                     assert teacher_runner is not None
                     teacher_feat, teacher_logits = teacher_runner(x[valid_mask])
@@ -188,7 +231,9 @@ def main(cfg: DictConfig) -> None:
                 kd = _distill_bce(student_logits[valid_mask], teacher_logits, temperature)
                 feat = torch.zeros((), device=device)
                 if student_proj is not None and teacher_feat is not None:
-                    feat = F.mse_loss(student_proj(student_emb_raw[valid_mask]), teacher_feat.detach())
+                    feat = F.mse_loss(
+                        student_proj(student_emb_raw[valid_mask]), teacher_feat.detach()
+                    )
                 loss = (1.0 - alpha) * sup + alpha * (beta_kd * kd + beta_feat * feat)
 
             scaler.scale(loss).backward()
@@ -264,6 +309,7 @@ def main(cfg: DictConfig) -> None:
         )
         if wandb_run is not None:
             import wandb  # type: ignore
+
             log_dict = {"epoch": epoch + 1, "train/loss": train_loss / max(1, train_seen)}
             for k, v in metrics.items():
                 try:
@@ -273,10 +319,14 @@ def main(cfg: DictConfig) -> None:
             wandb.log(log_dict)
 
     if bool(cfg.run.get("eval_test_after_train", False)):
-        test_ds = WindowShardDataset(cache_root, split="test", include_ignore=True, teacher_root=teacher_root)
+        test_ds = WindowShardDataset(
+            cache_root, split="test", include_ignore=True, teacher_root=teacher_root
+        )
         test_loader = DataLoader(
             test_ds,
-            batch_sampler=ChunkAwareBatchSampler(test_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False),
+            batch_sampler=ChunkAwareBatchSampler(
+                test_ds.cum_sizes, batch_size=batch_size, drop_last=False, shuffle=False
+            ),
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=(num_workers > 0),
@@ -316,11 +366,19 @@ def main(cfg: DictConfig) -> None:
             )
             if wandb_run is not None:
                 import wandb  # type: ignore
-                wandb.log({f"test/{k}": float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))})
+
+                wandb.log(
+                    {
+                        f"test/{k}": float(v)
+                        for k, v in test_metrics.items()
+                        if isinstance(v, (int, float))
+                    }
+                )
 
     if wandb_run is not None:
         try:
             import wandb  # type: ignore
+
             wandb.finish()
         except Exception:
             pass

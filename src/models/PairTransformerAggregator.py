@@ -7,8 +7,8 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
-from src.models.registry import register_model
 from src.models.modules.transformer import TransformerConfig, TransformerEncoder
+from src.models.registry import register_model
 
 
 @register_model("PairTransformerAggregator")
@@ -62,7 +62,6 @@ class PairTransformerAggregator(nn.Module):
         self.rel_pos_type: str = str(p.get("rel_pos_encoding_type", "mlp")).lower()
         rel_pos_hidden_dim: int = int(p.get("rel_pos_hidden_dim", 32))
 
-
         # -------- 2) 输入投影 -------- #
         # x: [B, L, D_in] -> proj -> [B, L, d_model]
         self.input_proj = nn.Linear(self.in_dim, d_model)
@@ -100,7 +99,7 @@ class PairTransformerAggregator(nn.Module):
         )
 
         self.encoder = TransformerEncoder(
-            vocab_size=None,   # 我们直接用 inputs_embeds
+            vocab_size=None,  # 我们直接用 inputs_embeds
             cfg=tcfg,
             tie_embedding=False,
         )
@@ -121,8 +120,6 @@ class PairTransformerAggregator(nn.Module):
             nn.Linear(d_model, 1),
         )
 
-
-
     # === 连续位置 → embedding 的 helper ===
     def _build_rel_pos_emb(self, pos: torch.Tensor, d_model: int) -> torch.Tensor:
         """
@@ -133,15 +130,15 @@ class PairTransformerAggregator(nn.Module):
             return 0.0
 
         if self.rel_pos_type == "mlp":
-            pos_feat = pos.unsqueeze(-1).float()      # [B, L, 1]
-            return self.rel_pos_mlp(pos_feat)         # [B, L, d_model]
+            pos_feat = pos.unsqueeze(-1).float()  # [B, L, 1]
+            return self.rel_pos_mlp(pos_feat)  # [B, L, d_model]
 
         B, L = pos.shape
         device = pos.device
-        pos = pos.float()                             # [B, L]
+        pos = pos.float()  # [B, L]
 
         # 统一扩展到 [B, L, 1]
-        pos_ = pos.unsqueeze(-1)                      # [B, L, 1]
+        pos_ = pos.unsqueeze(-1)  # [B, L, 1]
 
         if self.rel_pos_type == "sinusoidal":
             # 标准 transformer sinusoidal，但把 index 替换成连续 pos_
@@ -169,7 +166,7 @@ class PairTransformerAggregator(nn.Module):
                 torch.arange(0, half_dim, 2, device=device, dtype=torch.float32)
                 * (-torch.log(torch.tensor(10000.0)) / half_dim)
             )
-            theta = pos_ * div_term   # [B, L, half_dim/2]
+            theta = pos_ * div_term  # [B, L, half_dim/2]
             sin = torch.sin(theta)
             cos = torch.cos(theta)
             emb_half = torch.zeros(B, L, half_dim, device=device, dtype=torch.float32)
@@ -183,8 +180,6 @@ class PairTransformerAggregator(nn.Module):
 
         else:
             raise RuntimeError(f"Unknown rel_pos_type={self.rel_pos_type}")
-
-
 
     def forward(
         self,
@@ -209,14 +204,9 @@ class PairTransformerAggregator(nn.Module):
             )
 
         if self.use_rel_pos and pos is None:
-            raise ValueError(
-                "use_rel_pos=True, but forward() is called without pos."
-            )
+            raise ValueError("use_rel_pos=True, but forward() is called without pos.")
         if self.use_rel_pos and pos.shape[:2] != x.shape[:2]:
-            raise ValueError(
-                f"pos shape {pos.shape} is incompatible with x shape {x.shape}."
-            )
-
+            raise ValueError(f"pos shape {pos.shape} is incompatible with x shape {x.shape}.")
 
         if self.use_cls_token:
             # 预留一个位置给 CLS
@@ -226,9 +216,7 @@ class PairTransformerAggregator(nn.Module):
                 )
         else:
             if L > self.max_len:
-                raise ValueError(
-                    f"Sequence length L={L} exceeds max_len={self.max_len}."
-                )
+                raise ValueError(f"Sequence length L={L} exceeds max_len={self.max_len}.")
 
         # -------- 1) 输入投影 [B, L, D_in] -> [B, L, d_model] -------- #
         h = self.input_proj(x)
@@ -237,7 +225,6 @@ class PairTransformerAggregator(nn.Module):
         if self.use_rel_pos:
             rel_pe = self._build_rel_pos_emb(pos, h.size(-1))  # [B, L, d_model]
             h = h + rel_pe
-
 
         # -------- 3) 拼 CLS token（如果启用） -------- #
         if self.use_cls_token:
@@ -259,7 +246,7 @@ class PairTransformerAggregator(nn.Module):
             # 现在 attn_mask 是 [B, T] (bool: True=valid, False=pad)
             # 扩展为 [B, 1, 1, T]，用于对 [B, heads, T, T] 的最后一维做 masking
             if attn_mask.dim() == 2:
-                attn_mask = attn_mask.view(B, 1, 1, T)     # [B, 1, 1, T]
+                attn_mask = attn_mask.view(B, 1, 1, T)  # [B, 1, 1, T]
 
         # -------- 4) 进入 TransformerEncoder -------- #
         # TransformerEncoder 预期输入: [B, T, d_model]

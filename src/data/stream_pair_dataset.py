@@ -29,7 +29,7 @@ class StreamPairDataset:
         self.path = str(data_cfg.get_path(self.split))
         self.split_column = getattr(data_cfg, "split_column", None)
         self.split_map = getattr(data_cfg, "split_map", None)
-        self.max_pairs = (None if max_pairs is None else int(max_pairs))
+        self.max_pairs = None if max_pairs is None else int(max_pairs)
 
     @staticmethod
     def _resolve_columns(header: list[str]) -> dict[str, int]:
@@ -40,7 +40,9 @@ class StreamPairDataset:
                 if n in norm:
                     return norm[n]
             if default is None:
-                raise KeyError(f"Cannot resolve required column from header. tried={names} header={header}")
+                raise KeyError(
+                    f"Cannot resolve required column from header. tried={names} header={header}"
+                )
             return int(default)
 
         return {

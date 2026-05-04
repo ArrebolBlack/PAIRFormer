@@ -57,7 +57,9 @@ class StreamSTSelector(StreamSelector):
 
     def add(self, item: StreamSelectorInput) -> None:
         if item.cheap_emb is None:
-            raise ValueError("StreamSTSelector requires cheap_emb for STSelector-style diversity selection.")
+            raise ValueError(
+                "StreamSTSelector requires cheap_emb for STSelector-style diversity selection."
+            )
         self._xs.append(item.x.detach().cpu())
         self._esa.append(float(item.esa))
         self._pos.append(float(item.pos))

@@ -1,5 +1,6 @@
 # src/models/PairSetTransformerAggregator.py
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
@@ -7,10 +8,8 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
+from src.models.modules.set_transformer import ISAB, PMA, SAB, SetTransformerConfig
 from src.models.registry import register_model
-from src.models.modules.set_transformer import (
-    SetTransformerConfig, SAB, ISAB, PMA
-)
 
 
 @register_model("PairSetTransformerAggregator")
@@ -96,12 +95,16 @@ class PairSetTransformerAggregator(nn.Module):
         )
 
     @staticmethod
-    def _normalize_mask(attn_mask: Optional[torch.Tensor], L: int, device: torch.device) -> torch.Tensor:
+    def _normalize_mask(
+        attn_mask: Optional[torch.Tensor], L: int, device: torch.device
+    ) -> torch.Tensor:
         """
         Return: mask [B, L] bool, True=valid.
         """
         if attn_mask is None:
-            return torch.ones(1, L, device=device, dtype=torch.bool)  # will broadcast later if needed
+            return torch.ones(
+                1, L, device=device, dtype=torch.bool
+            )  # will broadcast later if needed
 
         if attn_mask.dim() == 2:
             # [B, L] with 1/0
@@ -129,7 +132,7 @@ class PairSetTransformerAggregator(nn.Module):
             mask = mask.expand(B, -1)
 
         # 防止“全 padding”导致 attention softmax 全 -inf -> NaN
-        empty = (mask.sum(dim=1) == 0)
+        empty = mask.sum(dim=1) == 0
         if empty.any():
             mask = mask.clone()
             mask[empty, 0] = True
@@ -141,7 +144,7 @@ class PairSetTransformerAggregator(nn.Module):
             x = self.token_norm(x)
 
         # input proj + zero-out pad tokens (important to avoid pad leaking via residuals)
-        h = self.input_proj(x)                      # [B,L,D]
+        h = self.input_proj(x)  # [B,L,D]
         h = h * mask.unsqueeze(-1).float()
 
         # encoder (permutation equivariant)

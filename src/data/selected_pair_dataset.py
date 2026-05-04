@@ -12,7 +12,14 @@ class SelectedPairDataset(torch.utils.data.Dataset):
     Pair-level dataset backed by the new compact selected-pair cache.
     """
 
-    def __init__(self, cache_root: str, split: str, *, cache_type: str = "selected_raw", max_pairs: int | None = None):
+    def __init__(
+        self,
+        cache_root: str,
+        split: str,
+        *,
+        cache_type: str = "selected_raw",
+        max_pairs: int | None = None,
+    ):
         self.reader = SelectedPairCacheReader(cache_root, split=split, cache_type=cache_type)
         self.max_pairs = None if max_pairs is None else int(max_pairs)
 

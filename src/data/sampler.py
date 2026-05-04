@@ -27,7 +27,7 @@ sampler.py
 
 import math
 import random
-from typing import List, Tuple, Iterator
+from typing import Iterator, List, Tuple
 
 from torch.utils.data import Sampler
 
@@ -123,6 +123,7 @@ class ChunkAwareBatchSampler(Sampler[List[int]]):
             else:
                 total_batches += math.ceil(n / self.batch_size)
         return total_batches
+
 
 class PairLevelChunkBatchSampler(Sampler[List[int]]):
     """

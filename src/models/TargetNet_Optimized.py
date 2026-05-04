@@ -27,7 +27,7 @@ TargetNet_Optimized.py
       # with_esa: true/false   # 一般从 DataConfig 里读，这里作为兜底
 """
 
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -37,10 +37,10 @@ from omegaconf import DictConfig
 from src.config.data_config import DataConfig
 from src.models.registry import register_model
 
-
 # ----------------------------- #
 # 基础卷积组件
 # ----------------------------- #
+
 
 def conv_kx1(
     in_channels: int,
@@ -249,6 +249,7 @@ class ResNet_Block(nn.Module):
 # 通道注意力模块（SE / Enhanced SE）
 # ----------------------------- #
 
+
 class SEBlock(nn.Module):
     """
     标准 SE 模块：avg pool → FC 降维/升维 → sigmoid → 通道缩放 + 残差。
@@ -309,7 +310,9 @@ class SEBlockEnhanced(nn.Module):
         elif compression_type == "conv":
             if compression_dim == "spatial":
                 self.compress = nn.Sequential(
-                    nn.Conv1d(channel, channel, kernel_size=3, padding=1, groups=channel, bias=False),
+                    nn.Conv1d(
+                        channel, channel, kernel_size=3, padding=1, groups=channel, bias=False
+                    ),
                     nn.AdaptiveAvgPool1d(1),
                 )
             elif compression_dim == "channel":
@@ -446,6 +449,7 @@ class SEBlockEnhanced(nn.Module):
 # 主模型：TargetNet_Optimized
 # ----------------------------- #
 
+
 @register_model("TargetNet_Optimized")
 class TargetNet_Optimized(nn.Module):
     """
@@ -472,7 +476,7 @@ class TargetNet_Optimized(nn.Module):
         self.skip_connection: bool = bool(p.get("skip_connection", True))
         self.multi_scale: bool = bool(p.get("multi_scale", True))
         self.dropout_rate: float = float(p.get("dropout", 0.3))
-        self.use_bn: bool = bool(p.get("use_bn", True)) 
+        self.use_bn: bool = bool(p.get("use_bn", True))
 
         self.num_channels = num_channels
         self.num_blocks = num_blocks
@@ -512,7 +516,7 @@ class TargetNet_Optimized(nn.Module):
         se_type = p.get("se_type", "basic")
         se_reduction = int(p.get("se_reduction", 16))
 
-        if se_type == "none":                   
+        if se_type == "none":
             self.se = nn.Identity()
         elif se_type == "enhanced":
             self.se = SEBlockEnhanced(

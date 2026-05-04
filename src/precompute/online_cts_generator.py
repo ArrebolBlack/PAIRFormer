@@ -6,7 +6,12 @@ from typing import Iterator
 import torch
 
 from src.config.data_config import DataConfig
-from src.data.encoding import encode_RNA, extended_seed_alignment, extended_seed_alignment_2, reverse
+from src.data.encoding import (
+    encode_RNA,
+    extended_seed_alignment,
+    extended_seed_alignment_2,
+    reverse,
+)
 from src.data.stream_pair_dataset import PairRecord
 
 

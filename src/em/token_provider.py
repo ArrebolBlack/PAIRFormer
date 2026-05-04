@@ -1,9 +1,9 @@
 # src/em/token_provider.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Any, Optional, Literal
 from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Optional
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -12,8 +12,8 @@ from src.data.em_cache import MemmapCacheStore
 from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
 
-
 MissingPolicy = Literal["error", "online_fallback", "zero"]
+
 
 @dataclass
 class TokenAssembleConfig:
@@ -25,6 +25,7 @@ class TokenAssembleConfig:
 
 
 from dataclasses import field
+
 
 @dataclass
 class TokenProviderConfig:
@@ -40,11 +41,11 @@ class TokenProviderConfig:
 
 def _assemble_tokens(
     *,
-    inst_emb: Optional[torch.Tensor],    # [B,K,D] or None
+    inst_emb: Optional[torch.Tensor],  # [B,K,D] or None
     inst_logit: Optional[torch.Tensor],  # [B,K] or None
-    pos: Optional[torch.Tensor],         # [B,K] or [B,K,1]
-    esa: Optional[torch.Tensor],         # [B,K] or [B,K,1]
-    mask: torch.Tensor,                  # [B,K] bool GPU
+    pos: Optional[torch.Tensor],  # [B,K] or [B,K,1]
+    esa: Optional[torch.Tensor],  # [B,K] or [B,K,1]
+    mask: torch.Tensor,  # [B,K] bool GPU
     cfg: TokenAssembleConfig,
 ) -> Optional[torch.Tensor]:
     if inst_emb is None:
@@ -63,7 +64,7 @@ def _assemble_tokens(
         if esa.dim() == 2:
             esa = esa.unsqueeze(-1)
         feats.append(esa)
-    
+
     if cfg.use_pos and pos is not None:
         if pos.dim() == 2:
             pos = pos.unsqueeze(-1)
@@ -92,7 +93,9 @@ def _unpack_inst_read(a: Any, b: Any, ok: Any) -> tuple[torch.Tensor, torch.Tens
     elif ta.dim() == 1 and tb.dim() == 2:
         emb, logit = tb, ta
     else:
-        raise RuntimeError(f"[TokenProvider] Unexpected instance cache shapes: a={tuple(ta.shape)} b={tuple(tb.shape)}")
+        raise RuntimeError(
+            f"[TokenProvider] Unexpected instance cache shapes: a={tuple(ta.shape)} b={tuple(tb.shape)}"
+        )
 
     tok = tok.to(dtype=torch.bool, device="cpu")
     emb = emb.to(device="cpu")
@@ -105,6 +108,7 @@ class TokenProvider:
     统一对外接口：
       build_tokens(batch_cpu, epoch, global_step) -> dict with {tokens, mask, y_pair, pair_id}
     """
+
     def __init__(
         self,
         *,
@@ -140,7 +144,7 @@ class TokenProvider:
         self.device = device
         self.instance_model = instance_model
 
-        self._owns_policy = (policy is None)
+        self._owns_policy = policy is None
         self.policy = policy if policy is not None else UpdatePolicy(self.cfg.policy)
 
         # store identity
@@ -161,7 +165,6 @@ class TokenProvider:
         self.store: Optional[MemmapCacheStore] = None
         self._inst_fmt: Optional[str] = None  # "uid" or "pair"
         self._reopen_instance_store(require_ready=self._require_ready)
-
 
     def _reopen_instance_store(self, *, require_ready: bool) -> None:
         store = MemmapCacheStore(
@@ -200,7 +203,9 @@ class TokenProvider:
 
     def on_cache_refreshed(self, refresh_plan: Dict[str, bool]) -> None:
         # selection/instance 刷新后，instance memmap 很可能被重写/替换：必须 reopen
-        if refresh_plan.get("refresh_instance_cache", False) or refresh_plan.get("refresh_selection_cache", False):
+        if refresh_plan.get("refresh_instance_cache", False) or refresh_plan.get(
+            "refresh_selection_cache", False
+        ):
             self._reopen_instance_store(require_ready=False)
 
     def on_epoch_begin(self, epoch: int) -> None:
@@ -227,8 +232,9 @@ class TokenProvider:
         else:
             return self._build_tokens_online(batch_cpu, train_inst=train_inst)
 
-
-    def _build_tokens_online(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+    def _build_tokens_online(
+        self, batch_cpu: Dict[str, Any], *, train_inst: bool
+    ) -> Dict[str, Any]:
         # instance train/eval 外部控制更清晰：这里不强制切换
         out = build_pair_tokens_on_gpu(
             batch_cpu,
@@ -264,13 +270,17 @@ class TokenProvider:
             "used_cache": False,
         }
 
-    def _build_tokens_cached(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+    def _build_tokens_cached(
+        self, batch_cpu: Dict[str, Any], *, train_inst: bool
+    ) -> Dict[str, Any]:
         if self._inst_fmt == "pair":
             return self._build_tokens_cached_pair(batch_cpu, train_inst=train_inst)
         else:
             return self._build_tokens_cached_uid(batch_cpu, train_inst=train_inst)
 
-    def _build_tokens_cached_pair(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+    def _build_tokens_cached_pair(
+        self, batch_cpu: Dict[str, Any], *, train_inst: bool
+    ) -> Dict[str, Any]:
         """Pair-indexed cached read: direct [B,K,D] lookup by pair_id."""
         assert self.store is not None
 
@@ -314,7 +324,8 @@ class TokenProvider:
         tokens = _assemble_tokens(
             inst_emb=inst_emb,
             inst_logit=inst_logit,
-            pos=pos, esa=esa,
+            pos=pos,
+            esa=esa,
             mask=mask,
             cfg=self.cfg.assemble,
         )
@@ -328,7 +339,9 @@ class TokenProvider:
             "used_cache": True,
         }
 
-    def _build_tokens_cached_uid(self, batch_cpu: Dict[str, Any], *, train_inst: bool) -> Dict[str, Any]:
+    def _build_tokens_cached_uid(
+        self, batch_cpu: Dict[str, Any], *, train_inst: bool
+    ) -> Dict[str, Any]:
         """Legacy UID-indexed cached read."""
         assert self.store is not None
         pair_id = batch_cpu["pair_id"].to(self.device, non_blocking=True)
@@ -346,8 +359,14 @@ class TokenProvider:
         # 拉平、去重读取 cache
         u_flat = sel_uids_cpu[valid].view(-1)
         if u_flat.numel() == 0:
-            return {"pair_id": pair_id, "y_pair": y_pair, "mask": mask, "tokens": None,
-                    "train_instance": False, "used_cache": True}
+            return {
+                "pair_id": pair_id,
+                "y_pair": y_pair,
+                "mask": mask,
+                "tokens": None,
+                "train_instance": False,
+                "used_cache": True,
+            }
 
         u_uniq, inv = torch.unique(u_flat, sorted=True, return_inverse=True)
 
@@ -358,7 +377,9 @@ class TokenProvider:
         if not bool(ok_u.all().item()):
             miss = (~ok_u).nonzero(as_tuple=False).view(-1)
             if self.cfg.cache_missing == "error":
-                raise RuntimeError(f"[TokenProvider] instance_cache miss: {int(miss.numel())} uids (first10={u_uniq[miss[:10]].tolist()})")
+                raise RuntimeError(
+                    f"[TokenProvider] instance_cache miss: {int(miss.numel())} uids (first10={u_uniq[miss[:10]].tolist()})"
+                )
             elif self.cfg.cache_missing == "zero":
                 # 将 miss 置零（emb 已经是 0），logit 对 NaN 替换为 0
                 log_u = torch.nan_to_num(log_u, nan=0.0)
@@ -366,10 +387,13 @@ class TokenProvider:
                 # online_fallback：对 miss 的 uids 在线补算，然后写回 cache（可选）
                 # 这里不在 TokenProvider 内实现补算（需要 cts_ds 取 window），留给上层刷新器；
                 # 先用 zero 占位，保证训练不中断。
-                print(f"[TokenProvider] Warning: instance_cache miss: {int(miss.numel())} uids (first10={u_uniq[miss[:10]].tolist()})")
-                print("[TokenProvider] Warning: cache missing = online_fallback, now zero padding !")
+                print(
+                    f"[TokenProvider] Warning: instance_cache miss: {int(miss.numel())} uids (first10={u_uniq[miss[:10]].tolist()})"
+                )
+                print(
+                    "[TokenProvider] Warning: cache missing = online_fallback, now zero padding !"
+                )
                 log_u = torch.nan_to_num(log_u, nan=0.0)
-
 
         inst_emb_cpu = torch.zeros((B * K, emb_u.shape[1]), dtype=emb_u.dtype, device="cpu")
         inst_logit_cpu = torch.zeros((B * K,), dtype=log_u.dtype, device="cpu")

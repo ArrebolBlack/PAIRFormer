@@ -1,9 +1,11 @@
 # src/selectors/selector_module.py
+from typing import List, Optional, Tuple
+
 import torch
 from torch import nn
-from typing import Optional, Tuple, List
 
 from .st_selector import STSelectorConfig, _get_hash_dims, selector_fn
+
 
 class SelectorModule(nn.Module):
     """
@@ -33,7 +35,9 @@ class SelectorModule(nn.Module):
             f"hash_dedup={cfg.use_hash_dedup}|hash_seed={cfg.hash_seed}|"
             f"quota_t={cfg.quota_top_t}|tau_w={cfg.quota_tau_w}|z={cfg.score_norm_z}"
         )
-        self.register_buffer("_selector_version", torch.tensor([0], dtype=torch.int32), persistent=False)
+        self.register_buffer(
+            "_selector_version", torch.tensor([0], dtype=torch.int32), persistent=False
+        )
         self._selector_version_str = version
 
         # Force-init hash dims once (optional).
@@ -54,11 +58,11 @@ class SelectorModule(nn.Module):
     def forward(
         self,
         *,
-        uids: torch.Tensor,                 # [n]
-        pos: torch.Tensor,                  # [n]
-        cheap_logit: torch.Tensor,          # [n]
+        uids: torch.Tensor,  # [n]
+        pos: torch.Tensor,  # [n]
+        cheap_logit: torch.Tensor,  # [n]
         cheap_emb: Optional[torch.Tensor],  # [n,64]
-        mode: str,                          # "train"|"eval"
+        mode: str,  # "train"|"eval"
         epoch: int,
         pair_id: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -73,7 +77,7 @@ class SelectorModule(nn.Module):
             cheap_logit=cheap_logit,
             cheap_emb=cheap_emb,
             cfg=self.cfg,
-            mode=mode,       # keep explicit so caller controls determinism
+            mode=mode,  # keep explicit so caller controls determinism
             epoch=epoch,
             pair_id=pair_id,
         )
@@ -82,10 +86,10 @@ class SelectorModule(nn.Module):
     def forward_batch(
         self,
         *,
-        uids_list: List[torch.Tensor],          # list of [n_i]
-        pos_list: List[torch.Tensor],           # list of [n_i]
-        logit_list: List[torch.Tensor],         # list of [n_i]
-        emb_list: List[Optional[torch.Tensor]], # list of [n_i,64] or None
+        uids_list: List[torch.Tensor],  # list of [n_i]
+        pos_list: List[torch.Tensor],  # list of [n_i]
+        logit_list: List[torch.Tensor],  # list of [n_i]
+        emb_list: List[Optional[torch.Tensor]],  # list of [n_i,64] or None
         mode: str,
         epoch: int,
         pair_ids: List[int],

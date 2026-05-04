@@ -38,7 +38,7 @@ class EMControllerConfig:
     rebuild_train_loader_after_selection_refresh: bool = True
 
     verbose: bool = True
-    
+
     # ✅ Strategy-A：selection 刷新后强制 instance 刷新（即使 policy 未要求）
     # force_instance_refresh_after_selection_refresh: bool = True
 
@@ -80,14 +80,11 @@ class EMPipelineController:
         self._selection_refresh_fn = selection_refresh_fn
         self._instance_refresh_fn = instance_refresh_fn
 
-
         self.last_refresh_plan: Dict[str, bool] = {
             "refresh_cheap_cache": False,
             "refresh_selection_cache": False,
             "refresh_instance_cache": False,
         }
-
-
 
     def _log(self, msg: str) -> None:
         if self.cfg.verbose and _is_rank0():

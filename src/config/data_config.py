@@ -27,7 +27,7 @@ data_config.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 
 @dataclass
@@ -109,7 +109,6 @@ class DataConfig:
             col_mrna_seq=int(conf.get("col_mrna_seq", 3)),
             col_label=int(conf.get("col_label", 4)),
         )
-
 
     # ---------- 统一接口 ---------- #
     def get_path(self, split: str) -> str:

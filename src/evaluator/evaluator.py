@@ -36,40 +36,32 @@ src/evaluator/evaluator.py
   本模块假设外部已完成 wandb.init()，若未初始化则不会报错，只是静默跳过。
 """
 
-from typing import Dict, Any, Optional, List, Union, Iterable, Tuple
-from pathlib import Path
 import json
 import os
-
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
-from omegaconf import DictConfig
-from omegaconf import OmegaConf
-
-from sklearn.metrics import (
-    roc_curve,
-    precision_recall_curve,
-    classification_report,
-)
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 import pandas as pd
+import seaborn as sns
+import torch
+from omegaconf import DictConfig, OmegaConf
+from sklearn.metrics import classification_report, precision_recall_curve, roc_curve
+from torch.utils.data import DataLoader
+
+from src.trainer.trainer import aggregate_by_set_idx
 
 from .metrics import (
     compute_metrics,
-    sweep_thresholds,
-    find_best_threshold_by_f1,
     compute_pair_ranking_metrics_from_teacher,
-    spearman_global,
+    find_best_threshold_by_f1,
     spearman_by_set,
+    spearman_global,
+    sweep_thresholds,
     topk_overlap_by_set,
 )
-
-import time
-
-from src.trainer.trainer import aggregate_by_set_idx
 
 # --- WandB optional integration ---
 try:
@@ -110,6 +102,7 @@ def _get_cfg_value(cfg: Any, key: str, default: Any) -> Any:
     except Exception:
         return default
 
+
 # ---------------------- #
 # 辅助函数
 # ---------------------- #
@@ -142,6 +135,7 @@ def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
 # ---------------------------------------------------------------------------
 # 1. 纯 numpy 级评估入口：evaluate_predictions
 # ---------------------------------------------------------------------------
+
 
 def evaluate_predictions(
     y_true: np.ndarray,
@@ -247,7 +241,7 @@ def evaluate_predictions(
             y_true=y_true,
             y_pred_raw=y_pred_raw,
             task_cfg=task_cfg_best,
-            return_details=False,   # 这里只要标量 + confusion_matrix
+            return_details=False,  # 这里只要标量 + confusion_matrix
         )
         result["metrics_at_best"] = metrics_at_best
         # ----------------------------------------------------------------------
@@ -293,6 +287,7 @@ def evaluate_predictions(
 # ---------------------------------------------------------------------------
 # 2. 与 Trainer 对接的高层封装：evaluate_with_trainer
 # ---------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def evaluate_with_trainer(
@@ -365,7 +360,6 @@ def evaluate_with_trainer(
     ranking_metrics = None
     ts_metrics = None
 
-
     rank_s = to_np(outputs.get("ranking_student_logits", None))
     rank_t = to_np(outputs.get("ranking_teacher_logits", None))
     rank_g = to_np(outputs.get("ranking_set_idx", None))
@@ -381,13 +375,21 @@ def evaluate_with_trainer(
             compute_overlap = bool(_get_cfg_value(ranking_cfg, "compute_topk_overlap", True))
 
             bucket_cfg = _get_cfg_value(ranking_cfg, "bucket", None)
-            bucket_strategy = _get_cfg_value(bucket_cfg, "strategy", "quantile") if bucket_cfg is not None else "quantile"
-            num_buckets = int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
-            fixed_edges = _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+            bucket_strategy = (
+                _get_cfg_value(bucket_cfg, "strategy", "quantile")
+                if bucket_cfg is not None
+                else "quantile"
+            )
+            num_buckets = (
+                int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
+            )
+            fixed_edges = (
+                _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+            )
 
             ranking_metrics = compute_pair_ranking_metrics_from_teacher(
                 student_logits_window=rank_s,
-                teacher_logits_window=rank_t,     # teacher in [0,1]
+                teacher_logits_window=rank_t,  # teacher in [0,1]
                 set_idx_window=rank_g,
                 ks=ks,
                 relevance_transform="sigmoid",
@@ -396,7 +398,7 @@ def evaluate_with_trainer(
                 bucket_strategy=bucket_strategy if bucket_strategy not in [None, "null"] else None,
                 num_buckets=num_buckets,
                 fixed_edges=fixed_edges,
-                return_details=False,             # 避免 numpy 数组进 json
+                return_details=False,  # 避免 numpy 数组进 json
             )
 
             # ------------------------------------------------------------------
@@ -405,15 +407,20 @@ def evaluate_with_trainer(
             ts_metrics = None
             if (rank_s is not None) and (rank_t is not None) and (rank_g is not None):
                 ts_metrics = {}
-                ts_metrics.update({f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()})
-                ts_metrics.update({f"by_set/{k}": v for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()})
+                ts_metrics.update(
+                    {f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()}
+                )
+                ts_metrics.update(
+                    {
+                        f"by_set/{k}": v
+                        for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()
+                    }
+                )
 
                 ov = topk_overlap_by_set(rank_t, rank_s, rank_g, ks=(64, 128, 256), min_size=20)
                 ts_metrics.update({f"topk/{k}": float(v) for k, v in ov.items()})
 
                 # 挂到 result 里（下面 result 出来后再塞也行；我这里先存在局部变量）
-
-
 
     # 3) 可选：window→set 聚合
     if aggregate_sets and (set_labels is not None) and (set_idx_np is not None):
@@ -455,7 +462,6 @@ def evaluate_with_trainer(
 
     # 可选：在 result 里标记 tag，方便上层使用
     result["tag"] = tag
-
 
     # -------------------------
     # (6) attach & save ranking metrics (distill-only)
@@ -510,8 +516,13 @@ def evaluate_with_trainer(
         use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
         if use_wandb and _WANDB_AVAILABLE and wandb.run is not None:
             prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
-            wandb.log({f"{prefix}/ts/{k}": v for k, v in ts_metrics.items() if isinstance(v, (int, float, np.floating, np.integer))})
-
+            wandb.log(
+                {
+                    f"{prefix}/ts/{k}": v
+                    for k, v in ts_metrics.items()
+                    if isinstance(v, (int, float, np.floating, np.integer))
+                }
+            )
 
     # -------------------------
     # (8) pretty print (safe)
@@ -524,9 +535,9 @@ def evaluate_with_trainer(
         parts.append(f"Spearman(global)={g:.4f} Spearman(set,w)={w:.4f}")
 
     if ranking_metrics is not None:
-        n10   = float(ranking_metrics.get("ndcg@10", float("nan")))
-        ov10  = float(ranking_metrics.get("topk_overlap@10", float("nan")))
-        n128  = float(ranking_metrics.get("ndcg@128", float("nan")))
+        n10 = float(ranking_metrics.get("ndcg@10", float("nan")))
+        ov10 = float(ranking_metrics.get("topk_overlap@10", float("nan")))
+        n128 = float(ranking_metrics.get("ndcg@128", float("nan")))
         ov128 = float(ranking_metrics.get("topk_overlap@128", float("nan")))
         parts.append(
             f"NDCG@10={n10:.4f} TopKOverlap@10={ov10:.4f} | "
@@ -556,16 +567,16 @@ def evaluate_test_abc_once(
     tag_prefix: str,
     set_labels: Optional[List[float]] = None,
     aggregate_sets: bool = True,
-    best_threshold: Optional[float] = None,   # val 上的 best_threshold（可选）
+    best_threshold: Optional[float] = None,  # val 上的 best_threshold（可选）
     fixed_threshold: float = 0.5,
-    enable_A_fixed: bool = False,             # 你现在快速迭代默认关 A/B，仅开 C
+    enable_A_fixed: bool = False,  # 你现在快速迭代默认关 A/B，仅开 C
     enable_B_valbest: bool = False,
     enable_C_sweep: bool = True,
     sweep_num_thresholds: int = 101,
     reduction: str = "max",
     softmax_temp: float = 1.0,
     topk: int = 3,
-    wandb_run: Any = None,                    # 传你 train.py 里的 wandb_run（可 None）
+    wandb_run: Any = None,  # 传你 train.py 里的 wandb_run（可 None）
 ) -> Dict[str, Any]:
     """
     一次 predict，ranking/ts 只算一次；二分类指标按 A/B/C 三种阈值策略分别计算。
@@ -588,7 +599,7 @@ def evaluate_test_abc_once(
     # 统一计时容器（秒）
     timers: Dict[str, float] = {}
     t_all0 = time.perf_counter()
-    
+
     # -------------------------
     # helper: to numpy
     # -------------------------
@@ -642,9 +653,17 @@ def evaluate_test_abc_once(
             compute_overlap = bool(_get_cfg_value(ranking_cfg, "compute_topk_overlap", True))
 
             bucket_cfg = _get_cfg_value(ranking_cfg, "bucket", None)
-            bucket_strategy = _get_cfg_value(bucket_cfg, "strategy", "quantile") if bucket_cfg is not None else "quantile"
-            num_buckets = int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
-            fixed_edges = _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+            bucket_strategy = (
+                _get_cfg_value(bucket_cfg, "strategy", "quantile")
+                if bucket_cfg is not None
+                else "quantile"
+            )
+            num_buckets = (
+                int(_get_cfg_value(bucket_cfg, "num_buckets", 5)) if bucket_cfg is not None else 5
+            )
+            fixed_edges = (
+                _get_cfg_value(bucket_cfg, "fixed_edges", None) if bucket_cfg is not None else None
+            )
 
             ranking_metrics = compute_pair_ranking_metrics_from_teacher(
                 student_logits_window=rank_s,
@@ -662,8 +681,15 @@ def evaluate_test_abc_once(
 
             # teacher-student agreement (Round0)
             ts_metrics = {}
-            ts_metrics.update({f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()})
-            ts_metrics.update({f"by_set/{k}": v for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()})
+            ts_metrics.update(
+                {f"global/{k}": v for k, v in spearman_global(rank_t, rank_s).items()}
+            )
+            ts_metrics.update(
+                {
+                    f"by_set/{k}": v
+                    for k, v in spearman_by_set(rank_t, rank_s, rank_g, min_size=20).items()
+                }
+            )
             ov = topk_overlap_by_set(rank_t, rank_s, rank_g, ks=(64, 128, 256), min_size=20)
             ts_metrics.update({f"topk/{k}": float(v) for k, v in ov.items()})
 
@@ -724,6 +750,7 @@ def evaluate_test_abc_once(
             use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
             if use_wandb and _WANDB_AVAILABLE:
                 import wandb  # type: ignore
+
                 if wandb.run is not None:
                     prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
                     wandb.log({f"{prefix}/{kk}": vv for kk, vv in flat_rank.items()})
@@ -746,10 +773,16 @@ def evaluate_test_abc_once(
             use_wandb = _get_cfg_value(eval_logging_cfg, "use_wandb", False)
             if use_wandb and _WANDB_AVAILABLE:
                 import wandb  # type: ignore
+
                 if wandb.run is not None:
                     prefix = _get_cfg_value(eval_logging_cfg, "wandb_prefix", "eval")
-                    wandb.log({f"{prefix}/ts/{k}": float(v) for k, v in ts_metrics.items()
-                               if isinstance(v, (int, float, np.floating, np.integer))})
+                    wandb.log(
+                        {
+                            f"{prefix}/ts/{k}": float(v)
+                            for k, v in ts_metrics.items()
+                            if isinstance(v, (int, float, np.floating, np.integer))
+                        }
+                    )
 
     # -------------------------
     # helper: pretty print rank/ts (keep old behavior style)
@@ -761,9 +794,9 @@ def evaluate_test_abc_once(
             w = float(ts_metrics.get("by_set/spearman_by_set_weighted", float("nan")))
             parts.append(f"Spearman(global)={g:.4f} Spearman(set,w)={w:.4f}")
         if ranking_metrics is not None:
-            n10   = float(ranking_metrics.get("ndcg@10", float("nan")))
-            ov10  = float(ranking_metrics.get("topk_overlap@10", float("nan")))
-            n128  = float(ranking_metrics.get("ndcg@128", float("nan")))
+            n10 = float(ranking_metrics.get("ndcg@10", float("nan")))
+            ov10 = float(ranking_metrics.get("topk_overlap@10", float("nan")))
+            n128 = float(ranking_metrics.get("ndcg@128", float("nan")))
             ov128 = float(ranking_metrics.get("topk_overlap@128", float("nan")))
             parts.append(
                 f"NDCG@10={n10:.4f} TopKOverlap@10={ov10:.4f} | "
@@ -821,7 +854,9 @@ def evaluate_test_abc_once(
         task_fixed.threshold = float(fixed_threshold)
 
         out_dir_fixed = test_root / "thr0_5"
-        print(f"[Train][Test {split_idx}][{tag_prefix}] Eval with fixed threshold = {fixed_threshold}")
+        print(
+            f"[Train][Test {split_idx}][{tag_prefix}] Eval with fixed threshold = {fixed_threshold}"
+        )
         res_fixed = run_one_eval(
             out_dir=out_dir_fixed,
             task_cfg_local=task_fixed,
@@ -964,9 +999,11 @@ def evaluate_test_abc_once(
         "teacher_student_metrics": ts_metrics,
     }
 
+
 # ---------------------------------------------------------------------------
 # 3. metrics / sweep / 报告 / 图像的保存 & 绘制函数
 # ---------------------------------------------------------------------------
+
 
 def save_metrics(metrics: Dict[str, Any], output_dir: str, filename: str = "metrics.json") -> str:
     """
@@ -1221,6 +1258,7 @@ def save_report(
 # 4. 图像绘制函数：ROC / PR / CM / 概率分布
 # ---------------------------------------------------------------------------
 
+
 def plot_roc_curve(y_true: np.ndarray, y_prob: np.ndarray, save_path: str) -> None:
     """
     绘制 ROC 曲线并保存到指定路径。
@@ -1385,6 +1423,7 @@ def plot_probability_distribution(
 # ---------------------------------------------------------------------------
 # 5. WandB logging 帮助函数
 # ---------------------------------------------------------------------------
+
 
 def log_to_wandb(
     metrics: Dict[str, Any],

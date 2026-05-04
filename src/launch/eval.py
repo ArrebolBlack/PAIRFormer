@@ -41,37 +41,37 @@ eval.py
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import List, Dict, Any, Iterable, Tuple
 import numbers
-import numpy as np
-import torch
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Tuple
 
 import hydra
+import numpy as np
+import torch
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
-from hydra.utils import get_original_cwd  
 
+from src.config.arch_space import ARCH_SPACE
 from src.config.data_config import DataConfig
 from src.data.builder import (
     build_dataset_and_loader,
-    get_set_labels,
     build_pair_level_dataset_and_loader,
+    get_set_labels,
 )
-from src.trainer.trainer import Trainer
-from src.models.registry import build_model
 from src.evaluator.evaluator import evaluate_with_trainer
+from src.models.registry import build_model
+from src.trainer.trainer import Trainer
 from src.utils import set_seeds
 
-
-from src.config.arch_space import ARCH_SPACE
 
 def apply_arch_variant(cfg):
     v = cfg.model.get("arch_variant", None)
     if v is not None:
         arch = ARCH_SPACE[v]
         cfg.model.num_channels = arch["num_channels"]
-        cfg.model.num_blocks   = arch["num_blocks"]
-        cfg.model.multi_scale  = arch["multi_scale"]
+        cfg.model.num_blocks = arch["num_blocks"]
+        cfg.model.multi_scale = arch["multi_scale"]
+
 
 def iter_scalar_metrics(metrics: Dict[str, Any]) -> Iterable[Tuple[str, float]]:
     """
@@ -102,8 +102,6 @@ def to_serializable(obj: Any) -> Any:
     if isinstance(obj, (np.generic,)):
         return obj.item()
     return obj
-
-
 
 
 def setup_wandb(cfg: DictConfig):
@@ -171,7 +169,6 @@ def main(cfg: DictConfig):
         eval_root = run_dir / eval_root
     eval_root.mkdir(parents=True, exist_ok=True)
 
-
     # WandB
     wandb_run = setup_wandb(cfg)
 
@@ -233,8 +230,10 @@ def main(cfg: DictConfig):
             print(f"[Eval] Loaded best_threshold={best_threshold:.4f} from {best_thr_path}")
 
         else:
-            print("[Eval] use_val_best_threshold=True 但找不到 best_threshold_path，"
-                  "将退回到 cfg.task.threshold 配置。")
+            print(
+                "[Eval] use_val_best_threshold=True 但找不到 best_threshold_path，"
+                "将退回到 cfg.task.threshold 配置。"
+            )
             best_threshold = None
 
     # 若需要用 best_threshold 固定评估 test，则克隆一份 task_cfg
@@ -270,7 +269,7 @@ def main(cfg: DictConfig):
             # 使用 pair-level builder 构建 Dataset + DataLoader
             ds, loader = build_pair_level_dataset_and_loader(
                 pair_cfg=pair_cfg,
-                split=str(split_idx),    
+                split=str(split_idx),
                 batch_size=batch_size,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
@@ -333,7 +332,6 @@ def main(cfg: DictConfig):
         if best_thr is not None:
             print(f"  (split {split_idx}) best_threshold = {float(best_thr):.4f}")
 
-
     # 把所有 split 的 metrics 汇总写入一个总表（先做 JSON 可序列化转换）
     summary_path = eval_root / "metrics_summary.json"
     with open(summary_path, "w") as f:
@@ -353,7 +351,6 @@ def main(cfg: DictConfig):
         # 目前 best_threshold 已经保存在各 split 对应的 eval 目录下，有需要再加。
 
         wandb.finish()
-
 
 
 if __name__ == "__main__":

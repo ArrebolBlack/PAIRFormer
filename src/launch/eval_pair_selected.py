@@ -49,7 +49,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
         changed = False
         for pref in ("module.", "model.", "net."):
             if all(isinstance(k, str) and k.startswith(pref) for k in out.keys()):
-                out = {k[len(pref):]: v for k, v in out.items()}
+                out = {k[len(pref) :]: v for k, v in out.items()}
                 changed = True
     return out
 
@@ -67,11 +67,24 @@ def _load_pair_selected_checkpoint(
 
     cand_agg = None
     cand_inst = None
-    for k in ("agg_state_dict", "agg_model_state_dict", "aggregator_state_dict", "agg_model", "aggregator"):
+    for k in (
+        "agg_state_dict",
+        "agg_model_state_dict",
+        "aggregator_state_dict",
+        "agg_model",
+        "aggregator",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_agg = ckpt[k]
             break
-    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict", "instance_model", "inst_model", "cts_model"):
+    for k in (
+        "instance_state_dict",
+        "inst_state_dict",
+        "instance_model_state_dict",
+        "instance_model",
+        "inst_model",
+        "cts_model",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_inst = ckpt[k]
             break
@@ -80,20 +93,30 @@ def _load_pair_selected_checkpoint(
         cand_agg = ckpt["state_dict"]
 
     if cand_agg is None:
-        raise RuntimeError(f"[eval_pair_selected] Cannot locate agg state_dict in ckpt: {ckpt_path}")
+        raise RuntimeError(
+            f"[eval_pair_selected] Cannot locate agg state_dict in ckpt: {ckpt_path}"
+        )
 
     miss_a, unexp_a = agg_model.load_state_dict(_strip_prefix_state_dict(cand_agg), strict=False)
     if miss_a:
         print(f"[eval_pair_selected] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}")
     if unexp_a:
-        print(f"[eval_pair_selected] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}")
+        print(
+            f"[eval_pair_selected] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}"
+        )
 
     if instance_model is not None and cand_inst is not None:
-        miss_i, unexp_i = instance_model.load_state_dict(_strip_prefix_state_dict(cand_inst), strict=False)
+        miss_i, unexp_i = instance_model.load_state_dict(
+            _strip_prefix_state_dict(cand_inst), strict=False
+        )
         if miss_i:
-            print(f"[eval_pair_selected] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}")
+            print(
+                f"[eval_pair_selected] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}"
+            )
         if unexp_i:
-            print(f"[eval_pair_selected] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}")
+            print(
+                f"[eval_pair_selected] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}"
+            )
 
     agg_model.to(device)
     if instance_model is not None:
@@ -106,7 +129,9 @@ def main(cfg: DictConfig) -> None:
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     split = str(cfg.run.get("eval_split", cfg.run.get("val_split", cfg.run.get("split", "val"))))
     cache_type = str(cfg.run.get("cache_type", "selected_raw"))
     cache_root = str(cfg.scalable.cache_root)
@@ -134,11 +159,15 @@ def main(cfg: DictConfig) -> None:
 
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     agg_cfg = cfg.model
-    agg_model = build_model(str(agg_cfg.get("arch", agg_cfg.get("name"))), agg_cfg, data_cfg=data_cfg).to(device)
+    agg_model = build_model(
+        str(agg_cfg.get("arch", agg_cfg.get("name"))), agg_cfg, data_cfg=data_cfg
+    ).to(device)
     instance_model = None
     if cache_type == "selected_raw":
         inst_cfg = cfg.instance_model
-        instance_model = build_model(str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg).to(device)
+        instance_model = build_model(
+            str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg
+        ).to(device)
 
     ckpt_path = _resolve_path(cfg.run.get("checkpoint", None))
     if ckpt_path is None:
@@ -226,7 +255,9 @@ def main(cfg: DictConfig) -> None:
             sweep_num_thresholds=sweep_num_thresholds,
         )
         val_best_threshold = float(val_sweep["sweep_best_threshold"])
-        print(f"[eval_pair_selected] val_best_threshold from split='{val_thr_split}' = {val_best_threshold:.6f}")
+        print(
+            f"[eval_pair_selected] val_best_threshold from split='{val_thr_split}' = {val_best_threshold:.6f}"
+        )
 
     metrics_by_strategy = evaluate_prediction_arrays(
         y_true=pred["labels"],
@@ -243,16 +274,25 @@ def main(cfg: DictConfig) -> None:
     if "thr0_5" in metrics_by_strategy:
         print_scalar_metrics("[eval_pair_selected] metrics@thr0.5:", metrics_by_strategy["thr0_5"])
     if "val_best" in metrics_by_strategy:
-        print_scalar_metrics("[eval_pair_selected] metrics@val_best:", metrics_by_strategy["val_best"])
+        print_scalar_metrics(
+            "[eval_pair_selected] metrics@val_best:", metrics_by_strategy["val_best"]
+        )
     if "sweep" in metrics_by_strategy:
-        print_scalar_metrics("[eval_pair_selected] metrics@sweep_best:", metrics_by_strategy["sweep"])
+        print_scalar_metrics(
+            "[eval_pair_selected] metrics@sweep_best:", metrics_by_strategy["sweep"]
+        )
 
     eval_output = str(cfg.run.get("eval_output", f"eval_pair_selected_{split}_{cache_type}"))
     out_root = Path.cwd() / eval_output
     if out_root.suffix == ".json":
         payload = metrics_by_strategy.get("thr0_5", {})
         with open(out_root, "w") as f:
-            json.dump({k: float(v) for k, v in payload.items() if isinstance(v, (int, float))}, f, indent=2, sort_keys=True)
+            json.dump(
+                {k: float(v) for k, v in payload.items() if isinstance(v, (int, float))},
+                f,
+                indent=2,
+                sort_keys=True,
+            )
         print(f"[eval_pair_selected] wrote metrics to {out_root}")
     else:
         write_eval_strategy_outputs(out_root, metrics_by_strategy)

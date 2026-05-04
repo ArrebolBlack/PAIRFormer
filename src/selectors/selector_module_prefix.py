@@ -1,7 +1,8 @@
 # src/selectors/selector_module_prefix.py
+from typing import List, Optional, Tuple
+
 import torch
 from torch import nn
-from typing import Optional, Tuple, List
 
 from .st_selector_prefix import STSelectorConfig, _get_hash_dims, selector_fn
 
@@ -24,7 +25,9 @@ class SelectorModulePrefix(nn.Module):
             f"hash_dedup={cfg.use_hash_dedup}|hash_seed={cfg.hash_seed}|"
             f"quota_t={cfg.quota_top_t}|tau_w={cfg.quota_tau_w}|z={cfg.score_norm_z}"
         )
-        self.register_buffer("_selector_version", torch.tensor([0], dtype=torch.int32), persistent=False)
+        self.register_buffer(
+            "_selector_version", torch.tensor([0], dtype=torch.int32), persistent=False
+        )
         self._selector_version_str = version
 
         if self.cfg.use_hash_dedup:

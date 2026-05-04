@@ -66,7 +66,9 @@ class PairMaxPoolCache(nn.Module):
         pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if x.dim() != 3:
-            raise ValueError(f"PairMaxPoolCache expects x to be [B, L, D], got shape={tuple(x.shape)}")
+            raise ValueError(
+                f"PairMaxPoolCache expects x to be [B, L, D], got shape={tuple(x.shape)}"
+            )
 
         B, L, D = x.shape
         if self.in_dim > 0 and D != self.in_dim:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import hydra
 import torch
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
-from pathlib import Path
 
 from src.config.data_config import DataConfig
 from src.data.selected_pair_cache import SelectedPairCacheWriter
@@ -48,7 +49,9 @@ def _build_stream_selector(cfg: DictConfig):
     raise ValueError(f"Unknown scalable selector: {selector_name}")
 
 
-def _build_cheap_model(cfg: DictConfig, data_cfg: DataConfig, device: torch.device) -> torch.nn.Module:
+def _build_cheap_model(
+    cfg: DictConfig, data_cfg: DataConfig, device: torch.device
+) -> torch.nn.Module:
     cheap_cfg = cfg.get("cheap_model", None)
     if cheap_cfg is None:
         raise KeyError("Missing cfg.cheap_model for scalable selected-pair cache build.")
@@ -75,7 +78,9 @@ def main(cfg: DictConfig) -> None:
         split=split,
         max_pairs=(None if max_pairs is None else int(max_pairs)),
     )
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
 
     selector = _build_stream_selector(cfg)
 

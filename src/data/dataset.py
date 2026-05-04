@@ -27,10 +27,10 @@ dataset.py
     x, y, set_idx = ds[0]
 """
 
-import os
-import json
-import hashlib
 import gc
+import hashlib
+import json
+import os
 from typing import List
 
 import numpy as np
@@ -89,7 +89,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")
         hash_key = f"{data_file_path}|{alignment}"
         path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
-        
+
         meta_filename = f"cache_{split_idx}_{path_hash}_meta.json"
         meta_filepath = os.path.join(cache_data_path, meta_filename)
 
@@ -132,10 +132,10 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             self.num_pairs = int(obj.get("num_pairs", self.pair_offsets.numel() - 1))
             print(f"Loaded PairIndex: {pair_index_path} (num_pairs={self.num_pairs})")
         else:
-            print(f"[Warn] PairIndex not found: {pair_index_path}. "
-                  f"Stage-1 APIs get_pair_slice() will be unavailable until built.")
-
-    
+            print(
+                f"[Warn] PairIndex not found: {pair_index_path}. "
+                f"Stage-1 APIs get_pair_slice() will be unavailable until built."
+            )
 
     def __len__(self) -> int:
         """
@@ -219,12 +219,12 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             f")"
         )
 
-
-
     def get_pair_slice(self, pair_id: int):
         """O(1) 获取某个 pair 的 CTS uid 区间 [start, end)."""
         if self.pair_offsets is None:
-            raise RuntimeError("PairIndex not loaded. Please rebuild cache to generate pair_index_*.pt.")
+            raise RuntimeError(
+                "PairIndex not loaded. Please rebuild cache to generate pair_index_*.pt."
+            )
         start = int(self.pair_offsets[pair_id].item())
         end = int(self.pair_offsets[pair_id + 1].item())
         return start, end
@@ -243,12 +243,15 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             idx = int(uid)  # 在当前设计中 uid == global idx
             # 强行走 __getitem__ 会丢失新字段；这里直接定位 chunk + local_idx，读 current_chunk
             import bisect
+
             chunk_idx = bisect.bisect_right(self.cum_sizes, idx)
             if self.current_chunk_idx != chunk_idx:
                 if self.current_chunk is not None:
                     del self.current_chunk
                     gc.collect()
-                self.current_chunk = torch.load(self.chunk_files[chunk_idx], map_location="cpu", weights_only=False)
+                self.current_chunk = torch.load(
+                    self.chunk_files[chunk_idx], map_location="cpu", weights_only=False
+                )
                 self.current_chunk_idx = chunk_idx
             local_idx = idx if chunk_idx == 0 else idx - self.cum_sizes[chunk_idx - 1]
             for k in fields:
@@ -271,6 +274,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         if self.pair_offsets is None:
             raise RuntimeError("PairIndex not loaded.")
         import random
+
         rng = random.Random(seed)
         P = self.num_pairs
         for _ in range(num_checks):
@@ -279,15 +283,16 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             if e < s:
                 raise AssertionError(f"Invalid offsets for pid={pid}: {s},{e}")
             # 抽查头尾几个 uid
-            probe = [s, min(s+1, e-1), max(e-1, s)]
+            probe = [s, min(s + 1, e - 1), max(e - 1, s)]
             probe = [u for u in probe if s <= u < e]
             meta = self.get_cts_meta_by_uid(probe, fields=("set_idxs",))
             set_idxs = meta["set_idxs"].view(-1).tolist()
             for v in set_idxs:
                 if int(v) != int(pid):
-                    raise AssertionError(f"Pair slice mismatch: pid={pid}, got set_idx={v}, slice=({s},{e})")
+                    raise AssertionError(
+                        f"Pair slice mismatch: pid={pid}, got set_idx={v}, slice=({s},{e})"
+                    )
         print(f"[OK] validate_pair_offsets passed with {num_checks} checks.")
-
 
     def batch_gather_by_uid(
         self,
@@ -339,7 +344,9 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             if self.current_chunk_idx != cid:
                 if self.current_chunk is not None:
                     del self.current_chunk
-                self.current_chunk = torch.load(self.chunk_files[cid], map_location="cpu", weights_only=False)
+                self.current_chunk = torch.load(
+                    self.chunk_files[cid], map_location="cpu", weights_only=False
+                )
                 self.current_chunk_idx = cid
 
             # compute local indices

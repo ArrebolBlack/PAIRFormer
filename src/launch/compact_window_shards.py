@@ -62,7 +62,9 @@ def main(cfg: DictConfig) -> None:
             with open(Path(shard_path) / "meta.json", "r") as f:
                 pass
         # Scan labels sequentially from dataset readers via direct shard readers.
-        from src.data.window_shard_cache import WindowShardReader  # local import to avoid wider dependency here
+        from src.data.window_shard_cache import (  # local import to avoid wider dependency here
+            WindowShardReader,
+        )
 
         labels_all = []
         for shard_info in tqdm(src_manifest.shards, desc=f"scan_labels_{split}"):
@@ -79,7 +81,9 @@ def main(cfg: DictConfig) -> None:
 
     rng = np.random.default_rng(seed)
     shard_id = 0
-    writer = WindowShardWriter(dst_root, split=split, shard_id=shard_id, max_samples=max_samples_per_shard)
+    writer = WindowShardWriter(
+        dst_root, split=split, shard_id=shard_id, max_samples=max_samples_per_shard
+    )
     shard_infos = []
     kept_samples = 0
 
@@ -103,10 +107,18 @@ def main(cfg: DictConfig) -> None:
             continue
 
         X = torch.from_numpy(np.array(reader.X[keep_idx], copy=True))
-        esa = torch.from_numpy(np.array(reader.esa[keep_idx], copy=True).astype(np.float32, copy=False))
-        pos = torch.from_numpy(np.array(reader.pos[keep_idx], copy=True).astype(np.float32, copy=False))
-        label = torch.from_numpy(np.array(reader.label[keep_idx], copy=True).astype(np.int8, copy=False))
-        pair_id = torch.from_numpy(np.array(reader.pair_id[keep_idx], copy=True).astype(np.int32, copy=False))
+        esa = torch.from_numpy(
+            np.array(reader.esa[keep_idx], copy=True).astype(np.float32, copy=False)
+        )
+        pos = torch.from_numpy(
+            np.array(reader.pos[keep_idx], copy=True).astype(np.float32, copy=False)
+        )
+        label = torch.from_numpy(
+            np.array(reader.label[keep_idx], copy=True).astype(np.int8, copy=False)
+        )
+        pair_id = torch.from_numpy(
+            np.array(reader.pair_id[keep_idx], copy=True).astype(np.int32, copy=False)
+        )
 
         offset = 0
         total = int(X.shape[0])
@@ -115,7 +127,9 @@ def main(cfg: DictConfig) -> None:
             if room <= 0:
                 shard_infos.append(writer.set_ready())
                 shard_id += 1
-                writer = WindowShardWriter(dst_root, split=split, shard_id=shard_id, max_samples=max_samples_per_shard)
+                writer = WindowShardWriter(
+                    dst_root, split=split, shard_id=shard_id, max_samples=max_samples_per_shard
+                )
                 room = int(writer.remaining)
             take = min(room, total - offset)
             writer.write_batch(
@@ -144,7 +158,9 @@ def main(cfg: DictConfig) -> None:
         total_pairs=int(src_manifest.total_pairs),
         shards=shard_infos,
     )
-    print(f"[compact_window_shards] DONE split={split} kept_samples={kept_samples} num_shards={len(shard_infos)}")
+    print(
+        f"[compact_window_shards] DONE split={split} kept_samples={kept_samples} num_shards={len(shard_infos)}"
+    )
 
 
 if __name__ == "__main__":

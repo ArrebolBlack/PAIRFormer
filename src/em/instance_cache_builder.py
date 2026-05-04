@@ -1,9 +1,9 @@
 # src/em/instance_cache_builder.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Iterable, Set
 from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import Iterable, Optional, Set
 
 import numpy as np
 import torch
@@ -21,8 +21,6 @@ class InstanceCacheBuildConfig:
     batch_size: int = 256
 
 
-
-
 def _gather_inputs_by_uid(cts_ds, uids: torch.Tensor) -> torch.Tensor:
     """
     返回 float32 [N,C,L]。
@@ -35,13 +33,15 @@ def _gather_inputs_by_uid(cts_ds, uids: torch.Tensor) -> torch.Tensor:
         out = cts_ds.batch_gather_by_uid(uids, fields=("X",))
         x = out.get("X", None)
         if x is None:
-            raise RuntimeError("[InstanceCacheBuilder] batch_gather_by_uid returned None for field 'X'.")
+            raise RuntimeError(
+                "[InstanceCacheBuilder] batch_gather_by_uid returned None for field 'X'."
+            )
         return x.to(dtype=torch.float32)
 
     # Fallback: slow __getitem__
     xs = []
     for i in uids.tolist():
-        x, y, set_idx, esa, pos = cts_ds[int(i)]   # __getitem__ 返回 tuple
+        x, y, set_idx, esa, pos = cts_ds[int(i)]  # __getitem__ 返回 tuple
         xs.append(x)
     return torch.stack(xs, dim=0).to(dtype=torch.float32)
 
@@ -66,8 +66,10 @@ def build_instance_cache_from_selection(
 
     # --- 必要的前置校验 ---
     if store.sel_meta is None or getattr(store, "_sel_uids", None) is None:
-        raise RuntimeError("[InstanceCacheBuilder] selection cache not opened in store. "
-                           "Call store.create_or_open_selection(..., require_ready=True) first.")
+        raise RuntimeError(
+            "[InstanceCacheBuilder] selection cache not opened in store. "
+            "Call store.create_or_open_selection(..., require_ready=True) first."
+        )
 
     # 1) open/create instance cache（和 selection 版本绑定，便于防止错配）
     store.create_or_open_instance(
@@ -112,7 +114,9 @@ def build_instance_cache_from_selection(
             f"Selection cache likely built against a different dataset/indexing."
         )
 
-    print(f"[InstCache] split={split} unique_selected_uids={uids_all.numel()} / total_cts={total_cts}")
+    print(
+        f"[InstCache] split={split} unique_selected_uids={uids_all.numel()} / total_cts={total_cts}"
+    )
 
     # 3) batch 推理写 cache
     instance_model.eval()
@@ -126,8 +130,8 @@ def build_instance_cache_from_selection(
     )
 
     for i in tqdm(range(0, uids_all.numel(), bs), desc=f"[InstCache][Build:{split}]"):
-        u = uids_all[i:i + bs]  # CPU uids
-        x = _gather_inputs_by_uid(cts_ds, u)      # CPU float32 [N,C,L]
+        u = uids_all[i : i + bs]  # CPU uids
+        x = _gather_inputs_by_uid(cts_ds, u)  # CPU float32 [N,C,L]
 
         # 可选：pin_memory 让 non_blocking 生效（如果你在 CPU->GPU 传输上卡）
         # x = x.pin_memory()

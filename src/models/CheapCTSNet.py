@@ -35,7 +35,9 @@ class CheapCTSNet_TinyConv(nn.Module):
         super().__init__()
         p = model_cfg
 
-        with_esa = bool(data_cfg.with_esa) if data_cfg is not None else bool(p.get("with_esa", True))
+        with_esa = (
+            bool(data_cfg.with_esa) if data_cfg is not None else bool(p.get("with_esa", True))
+        )
         in_channels = 10 if with_esa else 8
 
         emb_dim = int(p.get("emb_dim", 64))
@@ -49,7 +51,9 @@ class CheapCTSNet_TinyConv(nn.Module):
 
         self.meta_mode = str(p.get("meta_mode", "logit_only"))
         if self.meta_mode not in ("none", "logit_only", "emb_and_logit"):
-            raise ValueError(f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}")
+            raise ValueError(
+                f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}"
+            )
 
         self.meta_dropout = float(p.get("meta_dropout", 0.0))
         self.emb_dim = emb_dim
@@ -110,7 +114,7 @@ class CheapCTSNet_TinyConv(nn.Module):
         self,
         x: torch.Tensor,  # [B,C,L] float one-hot
         esa_scores: Optional[torch.Tensor] = None,  # [B]
-        pos: Optional[torch.Tensor] = None,         # [B]
+        pos: Optional[torch.Tensor] = None,  # [B]
         return_normalized_emb: bool = True,
         return_emb_raw: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -152,7 +156,9 @@ class CheapCTSNet_StatsMLP(nn.Module):
         super().__init__()
         p = model_cfg
 
-        with_esa = bool(data_cfg.with_esa) if data_cfg is not None else bool(p.get("with_esa", True))
+        with_esa = (
+            bool(data_cfg.with_esa) if data_cfg is not None else bool(p.get("with_esa", True))
+        )
         in_channels = 10 if with_esa else 8
 
         emb_dim = int(p.get("emb_dim", 64))
@@ -161,7 +167,9 @@ class CheapCTSNet_StatsMLP(nn.Module):
 
         self.meta_mode = str(p.get("meta_mode", "logit_only"))
         if self.meta_mode not in ("none", "logit_only", "emb_and_logit"):
-            raise ValueError(f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}")
+            raise ValueError(
+                f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}"
+            )
 
         self.meta_dropout = float(p.get("meta_dropout", 0.0))
         self.use_diff = use_diff
@@ -177,7 +185,9 @@ class CheapCTSNet_StatsMLP(nn.Module):
             nn.Linear(128, emb_dim),
         )
 
-        logit_in = base_feat + (meta_dim if self.meta_mode in ("logit_only", "emb_and_logit") else 0)
+        logit_in = base_feat + (
+            meta_dim if self.meta_mode in ("logit_only", "emb_and_logit") else 0
+        )
         logit_hidden = int(p.get("logit_hidden_dim", emb_dim))
         if logit_hidden <= 0:
             self.logit_head = nn.Linear(logit_in, 1)

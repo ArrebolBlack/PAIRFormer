@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Literal
 
-
 PolicyMode = Literal["cached", "online", "hybrid"]
 
 
@@ -21,6 +20,7 @@ class UpdatePolicyConfig:
       - refresh_cheap_cache=True 会强制 refresh_selection_cache=True（你要求的同步）。
       - refresh_selection_cache=True 默认会强制 refresh_instance_cache=True（强烈建议，保证 instance cache 覆盖新 selection）。
     """
+
     warmup_epochs: int = 0
 
     # ---------- step-level (instance) ----------
@@ -80,6 +80,7 @@ class UpdatePolicy:
       - step_plan(epoch, global_step) -> dict
       - refresh_plan(epoch) -> dict
     """
+
     def __init__(self, cfg: UpdatePolicyConfig):
         self.cfg = cfg
         self._inst_win = _HybridWindow()
@@ -110,7 +111,7 @@ class UpdatePolicy:
 
         if epoch < int(self.cfg.warmup_epochs):
             return
-        
+
         # 方案：当 update_steps<=0 且 epoch 命中 every_epochs 时，强制整 epoch online
         if self.cfg.instance_mode == "hybrid":
             every_epochs = int(self.cfg.instance_update_every_epochs)
@@ -124,13 +125,11 @@ class UpdatePolicy:
             if every_epochs > 0 and (epoch % every_epochs == 0) and window_steps <= 0:
                 self._cheap_epoch_force_online = True
 
-
     def is_instance_update_epoch(self) -> bool:
         """
         方案A使用：在 on_epoch_begin() 之后调用，判断本 epoch 是否为“整轮 instance-update 窗口”。
         """
         return bool(self._inst_epoch_force_online)
-
 
     def _plan_one(
         self,
@@ -208,9 +207,15 @@ class UpdatePolicy:
                 "refresh_instance_cache": False,
             }
 
-        do_cheap = (int(self.cfg.refresh_cheap_cache_every_epochs) > 0) and (epoch % int(self.cfg.refresh_cheap_cache_every_epochs) == 0)
-        do_sel = (int(self.cfg.refresh_selection_cache_every_epochs) > 0) and (epoch % int(self.cfg.refresh_selection_cache_every_epochs) == 0)
-        do_inst = (int(self.cfg.refresh_instance_cache_every_epochs) > 0) and (epoch % int(self.cfg.refresh_instance_cache_every_epochs) == 0)
+        do_cheap = (int(self.cfg.refresh_cheap_cache_every_epochs) > 0) and (
+            epoch % int(self.cfg.refresh_cheap_cache_every_epochs) == 0
+        )
+        do_sel = (int(self.cfg.refresh_selection_cache_every_epochs) > 0) and (
+            epoch % int(self.cfg.refresh_selection_cache_every_epochs) == 0
+        )
+        do_inst = (int(self.cfg.refresh_instance_cache_every_epochs) > 0) and (
+            epoch % int(self.cfg.refresh_instance_cache_every_epochs) == 0
+        )
 
         # 同步：cheap -> selection
         if do_cheap and bool(self.cfg.refresh_selection_follows_cheap):

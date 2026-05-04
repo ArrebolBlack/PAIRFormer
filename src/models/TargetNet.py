@@ -28,7 +28,7 @@ TargetNet.py
     * with_esa=True : in_channels=10, in_length=50
 """
 
-from typing import Optional, List
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -40,7 +40,9 @@ from src.config.data_config import DataConfig
 from src.models.registry import register_model
 
 
-def conv_kx1(in_channels: int, out_channels: int, kernel_size: int, stride: int = 1) -> nn.Sequential:
+def conv_kx1(
+    in_channels: int, out_channels: int, kernel_size: int, stride: int = 1
+) -> nn.Sequential:
     """
     构造一层「kx1 卷积 + 对称 padding」，无 bias。
     """
@@ -299,5 +301,5 @@ class TargetNet(nn.Module):
         x = self.dropout(self.relu(x))
         x = self.avg_pool(x)
         x = x.reshape(len(x), -1)
-        x = self.linear(x)       # [B, 1]
-        return x.squeeze(-1)     # [B]
+        x = self.linear(x)  # [B, 1]
+        return x.squeeze(-1)  # [B]

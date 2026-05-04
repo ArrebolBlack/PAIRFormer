@@ -5,22 +5,21 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import hydra
 import numpy as np
 import torch
-import hydra
-from omegaconf import DictConfig
 from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
 from tqdm import tqdm
 
 from src.config.data_config import DataConfig
 from src.data.builder import build_dataset_and_loader
 from src.data.cache_identity import dataset_identity
+from src.data.em_cache import MemmapCacheStore
 from src.models.registry import build_model
 from src.utils import set_seeds
 
-from src.data.em_cache import MemmapCacheStore
-
-'''
+"""
 python -m src.launch.build_cheap_cache \
   experiment=CheapCTSNet \
   +cheap_ckpt_path=/data/jiaqi.yin/TargetNet_light_1126/TargetNet_refactored_1126/checkpoints/CheapCTSNet/checkpoints/last.pt \
@@ -28,11 +27,12 @@ python -m src.launch.build_cheap_cache \
   +cheap_cache_overwrite=true \
   run.batch_size=256 \
   run.num_workers=8
-'''
+"""
 
 # -------------------------
 # helpers: path + hashing
 # -------------------------
+
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[str]:
     """
@@ -68,13 +68,14 @@ def _resolve_cache_root_like_train_py(cfg: DictConfig, orig_cwd: Path) -> str:
 def _strip_prefix(k: str) -> str:
     for pref in ("model.", "module.", "net."):
         if k.startswith(pref):
-            return k[len(pref):]
+            return k[len(pref) :]
     return k
 
 
 # -------------------------
 # ckpt loading
 # -------------------------
+
 
 def load_ckpt_into_model(
     model: torch.nn.Module,
@@ -115,15 +116,16 @@ def load_ckpt_into_model(
 # batch extraction (robust)
 # -------------------------
 
+
 def extract_batch(batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     确定版：基于 cts_collate_fn + ChunkedCTSDataset.__getitem__ 的真实输出
     必有键：inputs / esa_scores / pos
     """
     try:
-        x = batch["inputs"]        # [B, C, L], float32
+        x = batch["inputs"]  # [B, C, L], float32
         esa = batch["esa_scores"]  # [B], float32
-        pos = batch["pos"]         # [B], float32
+        pos = batch["pos"]  # [B], float32
     except KeyError as e:
         raise KeyError(f"[CheapCache] batch keys mismatch. got={list(batch.keys())}") from e
 
@@ -146,9 +148,11 @@ def extract_batch_to_device(
         x = x.float()
     return x, esa, pos
 
+
 # -------------------------
 # forward (must return logit+emb)
 # -------------------------
+
 
 def cheap_forward(
     model: torch.nn.Module,
@@ -197,6 +201,7 @@ def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
 # main
 # -------------------------
 
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     orig_cwd = Path(get_original_cwd())
@@ -220,7 +225,9 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------
     # 3) Cheap ckpt：建议命令行传入，避免脚本硬编码你的绝对路径
     # ------------------------------------------------------------
-    cheap_ckpt_default = cfg.get("cheap_ckpt_default", None)  # 可选：你也可以在某个 yaml 里放一个默认
+    cheap_ckpt_default = cfg.get(
+        "cheap_ckpt_default", None
+    )  # 可选：你也可以在某个 yaml 里放一个默认
     cheap_ckpt_path = _resolve_path(cfg.get("cheap_ckpt_path", cheap_ckpt_default), orig_cwd)
     if (not cheap_ckpt_path) or (not os.path.exists(cheap_ckpt_path)):
         raise FileNotFoundError(
@@ -243,7 +250,9 @@ def main(cfg: DictConfig) -> None:
     #    - AMP: cfg.train.amp
     #    也允许脚本级覆盖：+cheap_use_ema=... +cheap_cache_amp=...
     # ------------------------------------------------------------
-    use_ema_shadow_default = bool(getattr(getattr(cfg.train, "ema", {}), "enabled", False)) if "train" in cfg else False
+    use_ema_shadow_default = (
+        bool(getattr(getattr(cfg.train, "ema", {}), "enabled", False)) if "train" in cfg else False
+    )
     amp_default = bool(cfg.train.get("amp", False)) if "train" in cfg else False
 
     use_ema_shadow: bool = bool(cfg.get("cheap_use_ema", use_ema_shadow_default))
@@ -254,14 +263,14 @@ def main(cfg: DictConfig) -> None:
     #    Selection 侧只需要记录 cheap_version_used，然后 assert_version_consistent() 对齐即可
     # ------------------------------------------------------------
     model_name = str(cfg.model.get("arch", cfg.model.get("name")))
-    cheap_version = str(
-        cfg.get("cheap_version", f"{model_name}::{Path(cheap_ckpt_path).name}")
-    )
+    cheap_version = str(cfg.get("cheap_version", f"{model_name}::{Path(cheap_ckpt_path).name}"))
 
     # ------------------------------------------------------------
     # 7) 设备 + seed
     # ------------------------------------------------------------
-    device = torch.device("cuda" if torch.cuda.is_available() and cfg.get("device", "cuda") != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and cfg.get("device", "cuda") != "cpu" else "cpu"
+    )
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
@@ -273,7 +282,9 @@ def main(cfg: DictConfig) -> None:
     # emb_dim：不推断，直接从 cfg.model.emb_dim 读取并 assert
     emb_dim = int(cfg.model.get("emb_dim", 0))
     if emb_dim <= 0:
-        raise ValueError("[CheapCache] cfg.model.emb_dim must be > 0. (No inference is allowed in this script.)")
+        raise ValueError(
+            "[CheapCache] cfg.model.emb_dim must be > 0. (No inference is allowed in this script.)"
+        )
 
     cheap_model = build_model(model_name, cfg.model, data_cfg=data_cfg)
     load_ckpt_into_model(cheap_model, cheap_ckpt_path, device=device, use_ema_shadow=use_ema_shadow)
@@ -282,7 +293,9 @@ def main(cfg: DictConfig) -> None:
     print(f"[CheapCache] em_cache_root={em_cache_root}")
     print(f"[CheapCache] cheap_ckpt_path={cheap_ckpt_path}")
     print(f"[CheapCache] cheap_version={cheap_version}")
-    print(f"[CheapCache] use_ema_shadow={use_ema_shadow} amp={amp_enabled} has_entropy={has_entropy}")
+    print(
+        f"[CheapCache] use_ema_shadow={use_ema_shadow} amp={amp_enabled} has_entropy={has_entropy}"
+    )
     print(f"[CheapCache] splits={splits} overwrite={overwrite} skip_if_ready={skip_if_ready}")
     print(f"[CheapCache] emb_dim(asserted from cfg)={emb_dim}")
 
@@ -310,7 +323,7 @@ def main(cfg: DictConfig) -> None:
 
         # Identity MUST strictly follow window-level dataset semantics (split-local uid space).
         _hash_key_data, dataset_hash_key, path_hash = dataset_identity(data_cfg, str(split_idx))
-  
+
         store = MemmapCacheStore(
             cache_root=str(em_cache_root),
             split=str(split_idx),
@@ -330,7 +343,12 @@ def main(cfg: DictConfig) -> None:
         )
 
         # 如果已经 ready 且不想重复算：直接跳过
-        if (not overwrite) and (store.cheap_meta is not None) and (store.cheap_meta.state == "ready") and skip_if_ready:
+        if (
+            (not overwrite)
+            and (store.cheap_meta is not None)
+            and (store.cheap_meta.state == "ready")
+            and skip_if_ready
+        ):
             # 同时做一个 cheap_version 防误用检查
             if store.cheap_meta.cheap_version != cheap_version:
                 raise RuntimeError(
@@ -343,7 +361,11 @@ def main(cfg: DictConfig) -> None:
             continue
 
         # 如果 cache 已存在但 cheap_version 不一致且 overwrite=False：直接报错，避免 silent 混用
-        if (not overwrite) and (store.cheap_meta is not None) and (store.cheap_meta.cheap_version != cheap_version):
+        if (
+            (not overwrite)
+            and (store.cheap_meta is not None)
+            and (store.cheap_meta.cheap_version != cheap_version)
+        ):
             raise RuntimeError(
                 f"[CheapCache] Existing cache cheap_version != requested:\n"
                 f"  existing={store.cheap_meta.cheap_version}\n"
@@ -369,8 +391,8 @@ def main(cfg: DictConfig) -> None:
                 else:
                     logits, emb = cheap_forward(cheap_model, x, esa, pos)
 
-                logits = logits.detach().float().view(-1)              # [B]
-                emb = emb.detach().float().view(-1, emb_dim)           # [B,D]
+                logits = logits.detach().float().view(-1)  # [B]
+                emb = emb.detach().float().view(-1, emb_dim)  # [B,D]
 
                 B = int(logits.numel())
                 start, end = offset, offset + B
@@ -391,7 +413,9 @@ def main(cfg: DictConfig) -> None:
                 pbar.set_postfix(written=offset, total=total_cts)
 
         if offset != total_cts:
-            raise RuntimeError(f"[CheapCache] written {offset} != total_cts {total_cts} for split={split_idx}")
+            raise RuntimeError(
+                f"[CheapCache] written {offset} != total_cts {total_cts} for split={split_idx}"
+            )
 
         store.flush_cheap()
         store.set_cheap_ready()

@@ -1,12 +1,13 @@
 # src/models/extractors.py
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
 import torch
 import torch.nn.functional as F
 
+from src.models.CheapCTSNet import CheapCTSNet_TinyConv
 from src.models.TargetNet import TargetNet
 from src.models.TargetNet_Optimized import TargetNet_Optimized
 from src.models.TargetNet_transformer import TargetNetTransformer1D
-from src.models.CheapCTSNet import CheapCTSNet_TinyConv
 
 
 def get_embedding_and_logit(
@@ -30,9 +31,9 @@ def get_embedding_and_logit(
         z = model.stage2(z)
         z = model.dropout(model.relu(z))
         z = model.avg_pool(z)
-        z = z.reshape(z.size(0), -1)              # [B, d_emb]
+        z = z.reshape(z.size(0), -1)  # [B, d_emb]
         feat = z
-        logit = model.linear(feat).squeeze(-1)    # [B]
+        logit = model.linear(feat).squeeze(-1)  # [B]
         return feat, logit
 
     if isinstance(model, TargetNet_Optimized):
@@ -43,26 +44,26 @@ def get_embedding_and_logit(
         z = model.se(z)
         z = model.dropout(model.relu(z))
         z = model.adaptive_pool(z)
-        z = z.reshape(z.size(0), -1)              # [B, d_emb]
+        z = z.reshape(z.size(0), -1)  # [B, d_emb]
         feat = z
-        logit = model.linear(feat).squeeze(-1)    # [B]
+        logit = model.linear(feat).squeeze(-1)  # [B]
         return feat, logit
 
     if isinstance(model, TargetNetTransformer1D):
-        z = model.input_proj(x)                   # [B, d_model, L]
-        z = z.transpose(1, 2)                     # [B, L, d_model]
+        z = model.input_proj(x)  # [B, d_model, L]
+        z = z.transpose(1, 2)  # [B, L, d_model]
         h = model.encoder(inputs_embeds=z, attn_mask=None)  # [B, L, d_model]
-        h = h.mean(dim=1)                         # [B, d_model]
-        h = model.post_norm(h)                    # [B, d_model]
+        h = h.mean(dim=1)  # [B, d_model]
+        h = model.post_norm(h)  # [B, d_model]
         feat = h
-        logit = model.classifier(h).squeeze(-1)   # [B]
+        logit = model.classifier(h).squeeze(-1)  # [B]
         return feat, logit
 
     if isinstance(model, CheapCTSNet_TinyConv):
         # 复刻 forward 的 content path
         z = model.conv1(x)
         z = model.conv2(z)
-        z = model.pool(z).squeeze(-1)   # [B, c2]
+        z = model.pool(z).squeeze(-1)  # [B, c2]
         z = model.dropout(z)
         z_content = z
 
@@ -80,7 +81,7 @@ def get_embedding_and_logit(
 
         # emb_raw path
         emb_in = z_content if not need_meta_emb else torch.cat([z_content, meta], dim=-1)
-        emb_raw = model.emb_head(emb_in)          # [B, emb_dim]
+        emb_raw = model.emb_head(emb_in)  # [B, emb_dim]
         feat = F.normalize(emb_raw, p=2, dim=-1)  # 与 forward 默认 return_normalized_emb=True 一致
 
         # logit path

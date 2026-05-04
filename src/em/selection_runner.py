@@ -1,12 +1,12 @@
 # src/em/selection_runner.py
 from __future__ import annotations
 
-from typing import Optional
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 from src.config.data_config import DataConfig
-from src.em.selector_runner import SelectionCacheRunner, SelectionCacheBuildConfig
+from src.em.selector_runner import SelectionCacheBuildConfig, SelectionCacheRunner
 from src.selectors.selector_module import SelectorModule
 
 
@@ -23,7 +23,6 @@ def run_selection_cache(
     skip_if_ready: bool = False,
     sel_version: Optional[str] = None,
     pair_batch_size: int = 64,
-
     candidate_pool_size=None,
     candidate_pool_mode="topn",
     candidate_pool_topn_ratio: float = 1.0,

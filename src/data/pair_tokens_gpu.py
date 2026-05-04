@@ -1,7 +1,8 @@
 # src/data/pair_tokens_gpu.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
+
 from contextlib import nullcontext
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -37,8 +38,13 @@ def build_pair_tokens_on_gpu(
     if X_cpu is None:
         X_cpu = batch_cpu.get("inputs", None)  # 兼容
     if X_cpu is None:
-        return {"pair_id": pair_id, "y_pair": y_pair, "mask": mask,
-                "inst_emb": None, "inst_logit": None}
+        return {
+            "pair_id": pair_id,
+            "y_pair": y_pair,
+            "mask": mask,
+            "inst_emb": None,
+            "inst_logit": None,
+        }
 
     # move to GPU
     X = X_cpu.to(device, non_blocking=True)  # uint8 [B,K,C,L]
@@ -50,8 +56,11 @@ def build_pair_tokens_on_gpu(
     valid = torch.nonzero(mask_flat, as_tuple=False).view(-1)
     if valid.numel() == 0:
         return {
-            "pair_id": pair_id, "y_pair": y_pair, "mask": mask,
-            "inst_emb": None, "inst_logit": None
+            "pair_id": pair_id,
+            "y_pair": y_pair,
+            "mask": mask,
+            "inst_emb": None,
+            "inst_logit": None,
         }
 
     X_valid = X_flat.index_select(0, valid).to(dtype=torch.float32)
@@ -87,7 +96,6 @@ def build_pair_tokens_on_gpu(
                 esa_scores=esa_valid,
                 pos=pos_valid,
             )
-
 
     if feat_valid is None or logit_valid is None:
         raise RuntimeError("[build_pair_tokens_on_gpu] extractor returned None.")

@@ -1,12 +1,11 @@
 # src/data/pair_level_dataset.py
-import json
 import bisect
 import gc
-import numpy as np
-
-from typing import Dict, List, Tuple, Sequence, Optional
+import json
 import os
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -48,9 +47,11 @@ class PairLevelDataset(Dataset):
         max_cts_per_pair: int = 512,
         selection_mode: str = "topk_logit",
         pos_in_token: bool = True,
-        order_mode: str = "original",    # "score" 或 "original"
+        order_mode: str = "original",  # "score" 或 "original"
         random_order_seed: int = 12345,
-        random_select_seed: Optional[int] = None,  # 若为 None，则保持 legacy random 行为（非确定性）
+        random_select_seed: Optional[
+            int
+        ] = None,  # 若为 None，则保持 legacy random 行为（非确定性）
     ):
         super().__init__()
 
@@ -85,7 +86,7 @@ class PairLevelDataset(Dataset):
         self.total_pairs = self.cum_sizes[-1] if self.cum_sizes else 0
 
         self.current_chunk_idx = -1
-        self.current_chunk = None   # 当前 shard 的 dict[pid] -> entry
+        self.current_chunk = None  # 当前 shard 的 dict[pid] -> entry
         self.current_pair_ids = None  # 当前 shard 的 pid 排好序的 list[int]
 
         if self.total_pairs == 0:
@@ -113,9 +114,9 @@ class PairLevelDataset(Dataset):
         self.has_cached_pos = isinstance(raw_pos, torch.Tensor)
 
         if self.pos_in_token:
-            self.token_dim = self.emb_dim + 3   # emb + logit + esa + pos
+            self.token_dim = self.emb_dim + 3  # emb + logit + esa + pos
         else:
-            self.token_dim = self.emb_dim + 2   # emb + logit + esa
+            self.token_dim = self.emb_dim + 2  # emb + logit + esa
 
         # 释放探测用的 shard
         del first_chunk
@@ -191,7 +192,9 @@ class PairLevelDataset(Dataset):
             else:
                 # 仅当显式给出 random_select_seed 时才启用确定性随机（不影响旧默认）
                 if pair_id is None:
-                    raise ValueError("[PairLevelDataset] random_select_seed is set but pair_id is None.")
+                    raise ValueError(
+                        "[PairLevelDataset] random_select_seed is set but pair_id is None."
+                    )
                 g = torch.Generator()
                 g.manual_seed(self.random_select_seed + int(pair_id))
                 perm = torch.randperm(N, generator=g)
@@ -201,7 +204,6 @@ class PairLevelDataset(Dataset):
             f"[PairLevelDataset] Unknown selection_mode='{mode}'. "
             f"支持: topk_logit, topk_abs_logit, topk_esa, all_truncate, random."
         )
-    
 
     def _get_entry_by_index_chunked(self, idx: int) -> Tuple[int, Dict[str, torch.Tensor]]:
         """
@@ -224,9 +226,7 @@ class PairLevelDataset(Dataset):
             shard_path = self.chunk_files[chunk_idx]
             chunk = torch.load(shard_path, map_location="cpu", weights_only=False)
             if not isinstance(chunk, dict) or len(chunk) == 0:
-                raise ValueError(
-                    f"[PairLevelDataset] Shard {shard_path} is empty or not dict."
-                )
+                raise ValueError(f"[PairLevelDataset] Shard {shard_path} is empty or not dict.")
             self.current_chunk = chunk
             self.current_pair_ids = sorted(chunk.keys())
             self.current_chunk_idx = chunk_idx
@@ -258,10 +258,10 @@ class PairLevelDataset(Dataset):
         """
         pair_id, entry = self._get_entry_by_index_chunked(idx)
 
-        emb = entry["embeddings"]          # [N_i, d_emb]
+        emb = entry["embeddings"]  # [N_i, d_emb]
         logits = entry["logits"].view(-1)  # [N_i]
-        esa = entry["esa"].view(-1)        # [N_i]
-        raw_pos = entry.get("pos", None)   # 可能是 None 或 Tensor
+        esa = entry["esa"].view(-1)  # [N_i]
+        raw_pos = entry.get("pos", None)  # 可能是 None 或 Tensor
         label_val = float(entry["label"])  # scalar
 
         N = emb.shape[0]
@@ -289,9 +289,8 @@ class PairLevelDataset(Dataset):
         # idx_keep = self._select_indices(logits, esa, pair_id=pair_id)  # [M]
         idx_keep = self._select_indices(logits, esa, pos_full=pos_full, pair_id=pair_id)
 
-
         if self.order_mode == "original":
-            pos_sub = pos_full[idx_keep]              # [M]
+            pos_sub = pos_full[idx_keep]  # [M]
             sort_pos, sort_idx = torch.sort(pos_sub)  # 升序排序
             idx_keep = idx_keep[sort_idx]
             pos_sel = sort_pos
@@ -313,26 +312,22 @@ class PairLevelDataset(Dataset):
             idx_keep = idx_keep[local]
             pos_sel = pos_full[idx_keep]
 
-
         else:
             raise ValueError(
                 f"[PairLevelDataset] Unknown order_mode='{self.order_mode}'. "
                 f"支持: 'score', 'original', 'random', 'score_logit'."
             )
 
-
-        emb = emb[idx_keep]                          # [M, d_emb]
+        emb = emb[idx_keep]  # [M, d_emb]
         logits_sel = logits[idx_keep].unsqueeze(-1)  # [M, 1]
-        esa_sel = esa[idx_keep].unsqueeze(-1)        # [M, 1]
+        esa_sel = esa[idx_keep].unsqueeze(-1)  # [M, 1]
 
         if self.pos_in_token:
             tokens = torch.cat(
                 [emb, logits_sel, esa_sel, pos_sel.unsqueeze(-1)], dim=-1
-            )   # [M, d_emb+3]
+            )  # [M, d_emb+3]
         else:
-            tokens = torch.cat(
-                [emb, logits_sel, esa_sel], dim=-1
-            )   # [M, d_emb+2]
+            tokens = torch.cat([emb, logits_sel, esa_sel], dim=-1)  # [M, d_emb+2]
 
         length = int(tokens.size(0))
         label = torch.tensor(label_val, dtype=torch.float32)
@@ -343,6 +338,7 @@ class PairLevelDataset(Dataset):
 # ----------------------- #
 # Collate function
 # ----------------------- #
+
 
 def pair_level_collate_fn(
     batch: Sequence[Tuple[torch.Tensor, torch.Tensor, int, int, torch.Tensor]]
@@ -390,15 +386,14 @@ def pair_level_collate_fn(
 
     batch_dict = {
         # === 给 PairTransformerAggregator 用的字段 ===
-        "tokens": tokens_padded,      # [B, K, D]
-        "mask": mask,                 # [B, K]  True = valid
-        "pos": pos_padded,            # [B, K]
-        "lengths": lengths,           # [B]
-        "pair_ids": pair_ids,         # [B]  仅用于分析 / debug
-
+        "tokens": tokens_padded,  # [B, K, D]
+        "mask": mask,  # [B, K]  True = valid
+        "pos": pos_padded,  # [B, K]
+        "lengths": lengths,  # [B]
+        "pair_ids": pair_ids,  # [B]  仅用于分析 / debug
         # === 给通用 Trainer._unpack_batch 兼容的 alias ===
-        "inputs": tokens_padded,      # [B, K, D]  -> x
-        "labels": labels,             # [B]        -> y
+        "inputs": tokens_padded,  # [B, K, D]  -> x
+        "labels": labels,  # [B]        -> y
         # Stage-2 目前不需要 set-level MIL，先不传 set_idx
         # 若以后想在 pair 之上再做一层 bag，可以加上：
         # "set_idx": pair_ids,

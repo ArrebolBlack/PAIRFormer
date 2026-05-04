@@ -28,11 +28,11 @@ class WindowShardDataset(torch.utils.data.Dataset):
         self.shard_sizes: List[int] = [int(x["num_samples"]) for x in self.manifest.shards]
         self.cum_sizes: List[int] = np.cumsum(self.shard_sizes).tolist() if self.shard_sizes else []
         self.total_size = int(self.cum_sizes[-1]) if self.cum_sizes else 0
-        self.max_samples = (None if max_samples is None else int(max_samples))
+        self.max_samples = None if max_samples is None else int(max_samples)
 
         self.current_reader: Optional[WindowShardReader] = None
         self.current_shard_idx: int = -1
-        self.teacher_root = (None if teacher_root is None else str(teacher_root))
+        self.teacher_root = None if teacher_root is None else str(teacher_root)
         self.teacher_reader: Optional[TeacherShardReader] = None
         self.teacher_paths: Optional[List[str]] = None
         if self.teacher_root is not None:

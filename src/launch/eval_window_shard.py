@@ -27,7 +27,9 @@ def _pair_labels(data_cfg: DataConfig, split: str) -> List[float]:
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     set_seeds(int(cfg.get("seed", 2020)))
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     split = str(cfg.run.get("eval_split", "test"))
     cache_root = str(cfg.scalable.cache_root)
     ckpt_path = Path(str(cfg.run.get("checkpoint")))
@@ -46,7 +48,9 @@ def main(cfg: DictConfig) -> None:
     )
     pair_labels = _pair_labels(data_cfg, split)
 
-    model = build_model(str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg).to(device)
+    model = build_model(
+        str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg
+    ).to(device)
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["state_dict"], strict=False)
     model.eval()

@@ -8,7 +8,11 @@ import numpy as np
 from omegaconf import DictConfig
 
 from src.data.teacher_shard_cache import TeacherShardReader, load_teacher_shard_manifest
-from src.data.window_shard_cache import WindowShardWriter, load_window_shard_manifest, write_window_shard_manifest
+from src.data.window_shard_cache import (
+    WindowShardWriter,
+    load_window_shard_manifest,
+    write_window_shard_manifest,
+)
 from src.data.window_shard_dataset import WindowShardDataset
 from src.utils import set_seeds
 
@@ -70,6 +74,7 @@ def main(cfg: DictConfig) -> None:
                 new_labels[i] = 1 if i in keep else -1
 
         import torch
+
         writer.write_batch(
             X=torch.stack(xs, dim=0),
             esa=torch.tensor(esas, dtype=torch.float32),

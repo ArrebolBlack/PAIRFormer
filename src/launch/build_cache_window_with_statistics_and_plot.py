@@ -1,21 +1,22 @@
 # src/launch/build_cache_window_with_statistics_and_plot.py
 from __future__ import annotations
 
-import os
-import json
 import gc
 import hashlib
+import json
+import os
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import Any, Dict, List, Tuple
 
-import numpy as np
-import torch
 import hydra
-from omegaconf import DictConfig
-from hydra.utils import get_original_cwd
 
 # headless-safe matplotlib
 import matplotlib
+import numpy as np
+import torch
+from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -150,7 +151,7 @@ def _summarize_counts(counts: np.ndarray) -> Dict[str, Any]:
     p05, p25, p50, p75, p95, p99 = np.percentile(counts, [5, 25, 50, 75, 95, 99])
 
     mean = float(counts.mean())
-    var = float(counts.var(ddof=0))   # population variance
+    var = float(counts.var(ddof=0))  # population variance
     std = float(counts.std(ddof=0))
 
     return {
@@ -172,7 +173,21 @@ def _summarize_counts(counts: np.ndarray) -> Dict[str, Any]:
 
 def _print_stats(split: str, stats: Dict[str, Any], source: str):
     print(f"\n[PairStats] split='{split}' (source={source})")
-    for k in ["n_pairs", "sum_cts", "mean", "var", "std", "min", "max", "p05", "p25", "p50", "p75", "p95", "p99"]:
+    for k in [
+        "n_pairs",
+        "sum_cts",
+        "mean",
+        "var",
+        "std",
+        "min",
+        "max",
+        "p05",
+        "p25",
+        "p50",
+        "p75",
+        "p95",
+        "p99",
+    ]:
         print(f"  - {k}: {stats.get(k)}")
 
 
@@ -181,7 +196,9 @@ def _print_stats(split: str, stats: Dict[str, Any], source: str):
 # ----------------------------
 def _build_one_split(cfg: DictConfig, data_cfg: DataConfig, split: str, cache_root: str):
     batch_size = int(cfg.run.get("batch_size", 1024))
-    num_workers = int(cfg.run.get("num_workers", 0))     # 构建 cache 时建议先用 0，避免额外 DataLoader worker 干扰
+    num_workers = int(
+        cfg.run.get("num_workers", 0)
+    )  # 构建 cache 时建议先用 0，避免额外 DataLoader worker 干扰
     pin_memory = bool(cfg.run.get("pin_memory", True))
 
     ds, ld = build_dataset_and_loader(
@@ -245,7 +262,9 @@ def _pick_three_splits(splits: List[str]) -> List[str]:
     return picked[:3]
 
 
-def plot_three_splits(pair_stats_dir: str, splits: List[str], save_name: str = "num_cts_per_pair_dist.png"):
+def plot_three_splits(
+    pair_stats_dir: str, splits: List[str], save_name: str = "num_cts_per_pair_dist.png"
+):
     pair_stats_dir = Path(pair_stats_dir)
     plot_splits = _pick_three_splits(list(splits))
 

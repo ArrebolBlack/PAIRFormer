@@ -121,10 +121,14 @@ def main(cfg: DictConfig) -> None:
         f_sel_len = _create_zeroed_mmap(cache_dir / "sel_len.i16.mmap", dtype=np.int16, shape=(P,))
         f_esa = _create_zeroed_mmap(cache_dir / "esa.f16.mmap", dtype=np.float16, shape=(P, K))
         f_pos = _create_zeroed_mmap(cache_dir / "pos.f16.mmap", dtype=np.float16, shape=(P, K))
-        f_emb = _create_sparse_mmap(cache_dir / "inst_emb.f16.mmap", dtype=np.float16, shape=(P, K, D))
+        f_emb = _create_sparse_mmap(
+            cache_dir / "inst_emb.f16.mmap", dtype=np.float16, shape=(P, K, D)
+        )
         f_logit: np.memmap | None = None
         if has_inst_logit:
-            f_logit = _create_sparse_mmap(cache_dir / "inst_logit.f16.mmap", dtype=np.float16, shape=(P, K))
+            f_logit = _create_sparse_mmap(
+                cache_dir / "inst_logit.f16.mmap", dtype=np.float16, shape=(P, K)
+            )
         merged_count = 0
     else:
         print("[merge_inst_shards] Appending to existing output...")
@@ -132,10 +136,14 @@ def main(cfg: DictConfig) -> None:
         f_sel_len = np.memmap(cache_dir / "sel_len.i16.mmap", mode="r+", dtype=np.int16, shape=(P,))
         f_esa = np.memmap(cache_dir / "esa.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K))
         f_pos = np.memmap(cache_dir / "pos.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K))
-        f_emb = np.memmap(cache_dir / "inst_emb.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K, D))
+        f_emb = np.memmap(
+            cache_dir / "inst_emb.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K, D)
+        )
         f_logit: np.memmap | None = None
         if has_inst_logit:
-            f_logit = np.memmap(cache_dir / "inst_logit.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K))
+            f_logit = np.memmap(
+                cache_dir / "inst_logit.f16.mmap", mode="r+", dtype=np.float16, shape=(P, K)
+            )
         progress_path = cache_dir / "merge_progress.json"
         if progress_path.exists():
             with open(progress_path) as f:
@@ -149,16 +157,30 @@ def main(cfg: DictConfig) -> None:
         start = int(meta["start_idx"])
         end = int(meta["end_idx"])
         shard_size = int(meta["shard_size"])
-        print(f"[merge_inst_shards] Merging rows [{start}, {end}) size={shard_size} from {shard_dir}")
+        print(
+            f"[merge_inst_shards] Merging rows [{start}, {end}) size={shard_size} from {shard_dir}"
+        )
 
-        s_label = np.memmap(shard_dir / "label.f32.mmap", mode="r", dtype=np.float32, shape=(shard_size,))
-        s_sel_len = np.memmap(shard_dir / "sel_len.i16.mmap", mode="r", dtype=np.int16, shape=(shard_size,))
-        s_esa = np.memmap(shard_dir / "esa.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K))
-        s_pos = np.memmap(shard_dir / "pos.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K))
-        s_emb = np.memmap(shard_dir / "inst_emb.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K, D))
+        s_label = np.memmap(
+            shard_dir / "label.f32.mmap", mode="r", dtype=np.float32, shape=(shard_size,)
+        )
+        s_sel_len = np.memmap(
+            shard_dir / "sel_len.i16.mmap", mode="r", dtype=np.int16, shape=(shard_size,)
+        )
+        s_esa = np.memmap(
+            shard_dir / "esa.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K)
+        )
+        s_pos = np.memmap(
+            shard_dir / "pos.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K)
+        )
+        s_emb = np.memmap(
+            shard_dir / "inst_emb.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K, D)
+        )
         s_logit: np.memmap | None = None
         if has_inst_logit:
-            s_logit = np.memmap(shard_dir / "inst_logit.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K))
+            s_logit = np.memmap(
+                shard_dir / "inst_logit.f16.mmap", mode="r", dtype=np.float16, shape=(shard_size, K)
+            )
 
         # Small arrays: one-shot
         f_label[start:end] = s_label[:]
@@ -172,9 +194,9 @@ def main(cfg: DictConfig) -> None:
         for ci in range(n_chunks):
             cs = ci * chunk_rows
             ce = min(cs + chunk_rows, shard_size)
-            f_emb[start + cs:start + ce] = s_emb[cs:ce]
+            f_emb[start + cs : start + ce] = s_emb[cs:ce]
             if f_logit is not None and s_logit is not None:
-                f_logit[start + cs:start + ce] = s_logit[cs:ce]
+                f_logit[start + cs : start + ce] = s_logit[cs:ce]
             if (ci + 1) % 10 == 0 or ci == n_chunks - 1:
                 f_emb.flush()
                 if f_logit is not None:
@@ -186,7 +208,9 @@ def main(cfg: DictConfig) -> None:
         f_pos.flush()
 
         merged_count += 1
-        print(f"[merge_inst_shards] Merged {merged_count}/{total_shards}, elapsed={time.time() - t0:.1f}s")
+        print(
+            f"[merge_inst_shards] Merged {merged_count}/{total_shards}, elapsed={time.time() - t0:.1f}s"
+        )
 
         del s_label, s_sel_len, s_esa, s_pos, s_emb, s_logit
         shutil.rmtree(str(shard_dir), ignore_errors=True)
@@ -220,7 +244,9 @@ def main(cfg: DictConfig) -> None:
         print(f"[merge_inst_shards] ALL DONE total={num_pairs} elapsed={time.time() - t0:.1f}s")
         print(f"[merge_inst_shards] Next: copy to VepFS with +copy_to_vepfs=...")
     else:
-        print(f"[merge_inst_shards] Partial: {merged_count}/{total_shards}. Run again for remaining shards.")
+        print(
+            f"[merge_inst_shards] Partial: {merged_count}/{total_shards}. Run again for remaining shards."
+        )
 
 
 def _do_copy_to_vepfs(cfg: DictConfig) -> None:

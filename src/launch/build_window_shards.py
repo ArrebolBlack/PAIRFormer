@@ -17,7 +17,9 @@ def main(cfg: DictConfig) -> None:
     split = str(cfg.run.get("split", "train"))
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     max_pairs = cfg.scalable.get("max_pairs", None)
-    pair_ds = StreamPairDataset(data_cfg, split, max_pairs=(None if max_pairs is None else int(max_pairs)))
+    pair_ds = StreamPairDataset(
+        data_cfg, split, max_pairs=(None if max_pairs is None else int(max_pairs))
+    )
 
     shard_cfg = WindowShardBuildConfig(
         esa_min_score=float(cfg.scalable.get("esa_min_score", 6.0)),

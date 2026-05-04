@@ -65,15 +65,15 @@ builder.py
 
 from __future__ import annotations
 
-from typing import Tuple, List
+from typing import List, Tuple
 
 from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
 from src.data.cache import get_or_build_blocks, iter_rows_for_split
+from src.data.collate import cts_collate_fn
 from src.data.dataset import ChunkedCTSDataset
 from src.data.sampler import ChunkAwareBatchSampler
-from src.data.collate import cts_collate_fn
 
 
 def get_set_labels(data_cfg: DataConfig, split_idx: str) -> List[float]:
@@ -181,9 +181,9 @@ def build_dataset_and_loader(
         drop_last=drop_last,
         shuffle=shuffle,
     )
-        
-    prefetch_factor = 2 
-    persistent_workers = (num_workers > 0)
+
+    prefetch_factor = 2
+    persistent_workers = num_workers > 0
 
     if num_workers == 0:
         prefetch_factor = None
@@ -203,9 +203,9 @@ def build_dataset_and_loader(
     return dataset, loader
 
 
-
 from src.data.pair_level_dataset import PairLevelDataset, pair_level_collate_fn
 from src.data.sampler import PairLevelChunkBatchSampler
+
 
 def build_pair_level_dataset_and_loader(
     pair_cfg,

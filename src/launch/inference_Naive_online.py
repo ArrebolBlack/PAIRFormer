@@ -2,23 +2,25 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
+import dataclasses
+import hashlib
+import json
+import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-
-import dataclasses
-import json
-import os
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -30,11 +32,11 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
-from src.data.dataset import ChunkedCTSDataset
 from src.data.builder import get_or_build_blocks
-from src.models.registry import build_model
-from src.models.extractors import get_embedding_and_logit
-
+from src.data.cache_identity import dataset_identity
+from src.data.dataset import ChunkedCTSDataset
+from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
+from src.em.token_provider import TokenAssembleConfig, _assemble_tokens
 from src.launch.bench_utils import (
     BenchConfig,
     append_records_to_csv,
@@ -45,10 +47,8 @@ from src.launch.bench_utils import (
     select_pair_ids_subset,
     summarize_repeats_to_records,
 )
-
-from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
-from src.em.token_provider import TokenAssembleConfig, _assemble_tokens
-from src.data.cache_identity import dataset_identity
+from src.models.extractors import get_embedding_and_logit
+from src.models.registry import build_model
 
 
 # -----------------------------------------------------------------------------
@@ -84,7 +84,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
         kk = k
         for pref in ("model.", "module.", "net."):
             if kk.startswith(pref):
-                kk = kk[len(pref):]
+                kk = kk[len(pref) :]
         cleaned[kk] = v
     return cleaned
 
@@ -184,12 +184,25 @@ def _load_em_checkpoint_into_models(
     cand_agg = None
     cand_inst = None
 
-    for k in ("agg_state_dict", "agg_model_state_dict", "aggregator_state_dict", "agg_model", "aggregator"):
+    for k in (
+        "agg_state_dict",
+        "agg_model_state_dict",
+        "aggregator_state_dict",
+        "agg_model",
+        "aggregator",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_agg = ckpt[k]
             break
 
-    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict", "instance_model", "inst_model", "cts_model"):
+    for k in (
+        "instance_state_dict",
+        "inst_state_dict",
+        "instance_model_state_dict",
+        "instance_model",
+        "inst_model",
+        "cts_model",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_inst = ckpt[k]
             break
@@ -246,13 +259,21 @@ def _load_em_checkpoint_into_models(
     miss_i, unexp_i = instance_model.load_state_dict(cand_inst, strict=False)
 
     if miss_a:
-        print(f"[inference_Naive_online] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}")
+        print(
+            f"[inference_Naive_online] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}"
+        )
     if unexp_a:
-        print(f"[inference_Naive_online] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}")
+        print(
+            f"[inference_Naive_online] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}"
+        )
     if miss_i:
-        print(f"[inference_Naive_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}")
+        print(
+            f"[inference_Naive_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}"
+        )
     if unexp_i:
-        print(f"[inference_Naive_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}")
+        print(
+            f"[inference_Naive_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}"
+        )
 
     agg_model.to(device)
     instance_model.to(device)
@@ -292,7 +313,9 @@ class PairIndexAdapter:
     def get_pair_slice(self, pair_id: int) -> Tuple[int, int]:
         pi = self.pair_index
         if pair_id < 0 or pair_id >= self._num_pairs:
-            raise IndexError(f"[inference_Naive_online] pair_id out of range: {pair_id} / {self._num_pairs}")
+            raise IndexError(
+                f"[inference_Naive_online] pair_id out of range: {pair_id} / {self._num_pairs}"
+            )
 
         if hasattr(pi, "pair_offsets") and getattr(pi, "pair_offsets") is not None:
             off = getattr(pi, "pair_offsets")
@@ -325,7 +348,9 @@ class PairIndexAdapter:
             ends = getattr(pi, "pair_ends")
             return int(starts[pair_id]), int(ends[pair_id])
 
-        raise RuntimeError("Cannot resolve pair slice from PairIndex; adapt PairIndexAdapter.get_pair_slice().")
+        raise RuntimeError(
+            "Cannot resolve pair slice from PairIndex; adapt PairIndexAdapter.get_pair_slice()."
+        )
 
     def get_n_full(self, pair_id: int) -> int:
         s, e = self.get_pair_slice(pair_id)
@@ -431,7 +456,9 @@ class NaiveOnlineForward:
             t = t.reshape(-1)
         return t
 
-    def _batch_gather_all(self, uids_all: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _batch_gather_all(
+        self, uids_all: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         uids_all = uids_all.to(dtype=torch.long, device="cpu")
 
         if hasattr(self.cts_ds, "batch_gather_by_uid"):
@@ -440,7 +467,9 @@ class NaiveOnlineForward:
                 fields=("X", "pos", "esa_scores"),
             )
             if not isinstance(out, Mapping):
-                raise RuntimeError("[inference_Naive_online] batch_gather_by_uid must return a Mapping")
+                raise RuntimeError(
+                    "[inference_Naive_online] batch_gather_by_uid must return a Mapping"
+                )
 
             X = out["X"]
             pos = out.get("pos", out.get("positions", None))
@@ -457,7 +486,9 @@ class NaiveOnlineForward:
             esa = self._normalize_gather_1d(esa).to(dtype=torch.float32, device="cpu").contiguous()
 
             if X.dim() != 3:
-                raise RuntimeError(f"[inference_Naive_online] Expect X_flat [M,C,L], got {tuple(X.shape)}")
+                raise RuntimeError(
+                    f"[inference_Naive_online] Expect X_flat [M,C,L], got {tuple(X.shape)}"
+                )
             return X, esa, pos
 
         # fallback: per-uid loop (slow)
@@ -472,10 +503,14 @@ class NaiveOnlineForward:
                 pos = float(sample[4]) if len(sample) > 4 else 0.0
             elif isinstance(sample, Mapping):
                 x = sample.get("X", sample.get("inputs", sample.get("x")))
-                esa = float(sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0))))
+                esa = float(
+                    sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0)))
+                )
                 pos = float(sample.get("pos", 0.0))
             else:
-                raise RuntimeError(f"[inference_Naive_online] unsupported sample type: {type(sample)}")
+                raise RuntimeError(
+                    f"[inference_Naive_online] unsupported sample type: {type(sample)}"
+                )
 
             x = x if torch.is_tensor(x) else torch.as_tensor(x)
             x = x.to(dtype=torch.uint8, device="cpu").contiguous()
@@ -516,7 +551,9 @@ class NaiveOnlineForward:
                 esa = esa_flat[s:e].to(self.device, non_blocking=False)
                 pos = pos_flat[s:e].to(self.device, non_blocking=False)
 
-                feat, logit = get_embedding_and_logit(self.modules.instance_model, X, esa_scores=esa, pos=pos)
+                feat, logit = get_embedding_and_logit(
+                    self.modules.instance_model, X, esa_scores=esa, pos=pos
+                )
 
                 # robust fallback
                 if feat is None or logit is None:
@@ -528,7 +565,9 @@ class NaiveOnlineForward:
 
                     if isinstance(out, Mapping):
                         feat = out.get("feat", out.get("emb", out.get("h", None)))
-                        logit = out.get("logit", out.get("logits", out.get("score", out.get("scores", None))))
+                        logit = out.get(
+                            "logit", out.get("logits", out.get("score", out.get("scores", None)))
+                        )
                     elif isinstance(out, (tuple, list)) and len(out) >= 2:
                         a, b = out[0], out[1]
                         if torch.is_tensor(a) and torch.is_tensor(b):
@@ -541,7 +580,9 @@ class NaiveOnlineForward:
                         feat = None
 
                 if logit is None:
-                    raise RuntimeError("[inference_Naive_online] instance_model produced no logit; adapt _expensive_scan_all.")
+                    raise RuntimeError(
+                        "[inference_Naive_online] instance_model produced no logit; adapt _expensive_scan_all."
+                    )
                 if feat is None:
                     raise RuntimeError(
                         "[inference_Naive_online] instance_model produced no embedding (feat). "
@@ -571,9 +612,9 @@ class NaiveOnlineForward:
         ends_uid: List[int],
         offsets_n: List[Tuple[int, int]],
         scan_logit: torch.Tensor,  # [M] CPU
-        scan_emb: torch.Tensor,    # [M,D] CPU
-        pos_flat: torch.Tensor,    # [M] CPU
-        esa_flat: torch.Tensor,    # [M] CPU
+        scan_emb: torch.Tensor,  # [M,D] CPU
+        pos_flat: torch.Tensor,  # [M] CPU
+        esa_flat: torch.Tensor,  # [M] CPU
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         B = len(pair_ids)
         K = self.K
@@ -627,7 +668,8 @@ class NaiveOnlineForward:
         mask = torch.zeros((B, K), dtype=torch.bool, device="cpu")
 
         for b in range(B):
-            s_uid = int(starts_uid[b]); e_uid = int(ends_uid[b])
+            s_uid = int(starts_uid[b])
+            e_uid = int(ends_uid[b])
             s_seg, e_seg = offsets_n[b]
             if e_seg <= s_seg:
                 continue
@@ -648,8 +690,8 @@ class NaiveOnlineForward:
                     break
 
             if kept:
-                sel_flat_idx[b, :len(kept)] = torch.tensor(kept, dtype=torch.long)
-                mask[b, :len(kept)] = True
+                sel_flat_idx[b, : len(kept)] = torch.tensor(kept, dtype=torch.long)
+                mask[b, : len(kept)] = True
 
         return sel_flat_idx, mask
 
@@ -658,11 +700,11 @@ class NaiveOnlineForward:
         *,
         pair_ids: List[int],
         sel_flat_idx: torch.Tensor,  # [B,K] CPU
-        mask: torch.Tensor,          # [B,K] CPU bool
-        scan_logit: torch.Tensor,    # [M] CPU
-        scan_emb: torch.Tensor,      # [M,D] CPU
-        pos_flat: torch.Tensor,      # [M] CPU
-        esa_flat: torch.Tensor,      # [M] CPU
+        mask: torch.Tensor,  # [B,K] CPU bool
+        scan_logit: torch.Tensor,  # [M] CPU
+        scan_emb: torch.Tensor,  # [M,D] CPU
+        pos_flat: torch.Tensor,  # [M] CPU
+        esa_flat: torch.Tensor,  # [M] CPU
     ) -> Dict[str, Any]:
         B = len(pair_ids)
         K = self.K
@@ -734,7 +776,11 @@ class NaiveOnlineForward:
                 uids_chunks.append(u)
                 offsets_n.append((cur, cur + ln))
                 cur += ln
-            uids_all = torch.cat(uids_chunks, dim=0) if uids_chunks else torch.empty((0,), dtype=torch.long)
+            uids_all = (
+                torch.cat(uids_chunks, dim=0)
+                if uids_chunks
+                else torch.empty((0,), dtype=torch.long)
+            )
 
             if uids_all.numel() == 0:
                 return torch.zeros((), device=self.device)
@@ -814,8 +860,16 @@ class NaiveOnlineForward:
             with self._profile("F_assemble_tokens", timer):
                 token_in_dtype = self.amp_dtype if self.amp else torch.float32
 
-                inst_emb = packed["inst_emb_cpu"].to(self.device, non_blocking=False).to(dtype=token_in_dtype)
-                inst_logit = packed["inst_logit_cpu"].to(self.device, non_blocking=False).to(dtype=torch.float32)
+                inst_emb = (
+                    packed["inst_emb_cpu"]
+                    .to(self.device, non_blocking=False)
+                    .to(dtype=token_in_dtype)
+                )
+                inst_logit = (
+                    packed["inst_logit_cpu"]
+                    .to(self.device, non_blocking=False)
+                    .to(dtype=torch.float32)
+                )
                 attn_mask = packed["mask"].to(self.device, non_blocking=False)
 
                 pos = packed.get("pos_cpu", None)
@@ -964,7 +1018,13 @@ def main(cfg: DictConfig) -> None:
     pi = PairIndexAdapter(pair_index_raw)
 
     # subset pair ids (keep stable across K runs)
-    subset_path = Path(str(run_cfg.get("bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json"))))
+    subset_path = Path(
+        str(
+            run_cfg.get(
+                "bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json")
+            )
+        )
+    )
     if not subset_path.is_absolute():
         subset_path = run_dir / subset_path
 
@@ -1014,13 +1074,17 @@ def main(cfg: DictConfig) -> None:
 
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model")
     if inst_cfg is None:
-        raise KeyError("[inference_Naive_online] missing instance model config: cfg.instance_model / cfg.cts_model")
+        raise KeyError(
+            "[inference_Naive_online] missing instance model config: cfg.instance_model / cfg.cts_model"
+        )
     inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
     instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device).eval()
 
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model")
     if agg_cfg is None:
-        raise KeyError("[inference_Naive_online] missing aggregator config: cfg.model (or cfg.agg_model)")
+        raise KeyError(
+            "[inference_Naive_online] missing aggregator config: cfg.model (or cfg.agg_model)"
+        )
     agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
     agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device).eval()
 
@@ -1028,7 +1092,9 @@ def main(cfg: DictConfig) -> None:
     em_ckpt = _resolve_required_ckpt_path(ckpt_path_cfg, run_dir=run_dir, orig_cwd=orig_cwd)
     if not em_ckpt.exists():
         raise FileNotFoundError(f"[inference_Naive_online] EM checkpoint not found: {em_ckpt}")
-    _load_em_checkpoint_into_models(em_ckpt, agg_model=agg_model, instance_model=instance_model, device=device)
+    _load_em_checkpoint_into_models(
+        em_ckpt, agg_model=agg_model, instance_model=instance_model, device=device
+    )
     agg_model.eval()
     instance_model.eval()
 
@@ -1038,7 +1104,9 @@ def main(cfg: DictConfig) -> None:
         raise KeyError("[inference_Naive_online] Missing selector config: cfg.em.selector_module")
     selector_module = instantiate(sel_mod_node)
     sel_hash = _stable_cfg_hash(OmegaConf.to_container(sel_mod_node, resolve=True))
-    print(f"[inference_Naive_online] selector={selector_module.__class__.__name__} sel_hash={sel_hash}")
+    print(
+        f"[inference_Naive_online] selector={selector_module.__class__.__name__} sel_hash={sel_hash}"
+    )
 
     # assemble cfg
     tp_node = cfg.get("token_provider", None)
@@ -1096,7 +1164,9 @@ def main(cfg: DictConfig) -> None:
             prof = forward_fn.profile_summary_ms(reset=True)
             profile_repeats.append(prof)
             print(f"[inference_Naive_online] profile(ms/call) repeat={r}: {prof}")
-            print(f"[inference_Naive_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}")
+            print(
+                f"[inference_Naive_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}"
+            )
 
     records = summarize_repeats_to_records(
         pipeline="Naive_online",

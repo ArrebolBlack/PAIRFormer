@@ -13,7 +13,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 
-
 # =============================================================================
 # DDP Initialization and Teardown
 # =============================================================================
@@ -46,7 +45,9 @@ def setup_ddp() -> Tuple[int, int, int]:
             # Verify device assignment after init
             actual_dev = torch.cuda.current_device()
             if actual_dev != local_rank:
-                print(f"[WARN] Rank {dist.get_rank()}: set_device({local_rank}) but current_device={actual_dev}, forcing again")
+                print(
+                    f"[WARN] Rank {dist.get_rank()}: set_device({local_rank}) but current_device={actual_dev}, forcing again"
+                )
                 torch.cuda.set_device(local_rank)
         else:
             return 0, 0, 1
@@ -146,7 +147,7 @@ def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
         return [tensor]
 
     # NCCL only supports CUDA tensors
-    was_cpu = (tensor.device.type == "cpu")
+    was_cpu = tensor.device.type == "cpu"
     if was_cpu and dist.get_backend() == "nccl":
         cuda_dev = torch.device(f"cuda:{get_local_rank()}")
         tensor = tensor.to(cuda_dev, non_blocking=True)
@@ -159,8 +160,9 @@ def gather_tensors(tensor: torch.Tensor) -> List[torch.Tensor]:
 
     # Pad tensor to max_size if needed
     if tensor.shape[0] < max_size:
-        pad = torch.zeros(max_size - tensor.shape[0], *tensor.shape[1:],
-                          dtype=tensor.dtype, device=tensor.device)
+        pad = torch.zeros(
+            max_size - tensor.shape[0], *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device
+        )
         tensor = torch.cat([tensor, pad], dim=0)
 
     gather_list = [torch.zeros_like(tensor) for _ in range(world_size)]

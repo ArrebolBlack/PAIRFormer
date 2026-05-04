@@ -5,10 +5,10 @@ import os
 from pathlib import Path
 from typing import List
 
-import torch
 import hydra
-from omegaconf import DictConfig
+import torch
 from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
 from src.data.builder import build_dataset_and_loader
@@ -39,7 +39,9 @@ def _resolve_cache_root(cfg: DictConfig) -> str:
 
 def _build_one_split(cfg: DictConfig, data_cfg: DataConfig, split: str, cache_root: str):
     batch_size = int(cfg.run.get("batch_size", 1024))
-    num_workers = int(cfg.run.get("num_workers", 0))     # 构建 cache 时建议先用 0，避免额外 DataLoader worker 干扰
+    num_workers = int(
+        cfg.run.get("num_workers", 0)
+    )  # 构建 cache 时建议先用 0，避免额外 DataLoader worker 干扰
     pin_memory = bool(cfg.run.get("pin_memory", True))
 
     ds, ld = build_dataset_and_loader(

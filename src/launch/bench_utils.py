@@ -6,17 +6,17 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass, asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, Mapping
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 
-
 # -----------------------------
 # Basic utilities
 # -----------------------------
+
 
 def set_seeds(seed: int) -> None:
     random.seed(seed)
@@ -46,12 +46,13 @@ def now_iso() -> str:
 
 
 def to_gb(num_bytes: int) -> float:
-    return float(num_bytes) / (1024.0 ** 3)
+    return float(num_bytes) / (1024.0**3)
 
 
 # -----------------------------
 # Timing (segment + total)
 # -----------------------------
+
 
 class SegmentTimer:
     """
@@ -68,6 +69,7 @@ class SegmentTimer:
       total = timer.total_time()
       seg = timer.segments()
     """
+
     def __init__(self, *, sync_cuda: bool = True) -> None:
         self.sync_cuda = sync_cuda and torch.cuda.is_available()
         self._acc: Dict[str, float] = {}
@@ -90,7 +92,9 @@ class SegmentTimer:
             raise RuntimeError(f"SegmentTimer.stop({name}) called without start")
         last_name, t0 = self._stack.pop()
         if last_name != name:
-            raise RuntimeError(f"SegmentTimer segment mismatch: stop({name}) but last start was {last_name}")
+            raise RuntimeError(
+                f"SegmentTimer segment mismatch: stop({name}) but last start was {last_name}"
+            )
         dt = time.perf_counter() - t0
         self._acc[name] = self._acc.get(name, 0.0) + dt
 
@@ -122,6 +126,7 @@ class _SegmentCtx:
 # -----------------------------
 # Subset selection
 # -----------------------------
+
 
 def _read_jsonl_or_json(path: Path) -> Any:
     s = path.read_text(encoding="utf-8").strip()
@@ -251,7 +256,9 @@ def select_pair_ids_subset(
         )
 
     if num_pairs_subset > num_pairs_total:
-        raise RuntimeError(f"num_pairs_subset={num_pairs_subset} > available pairs={num_pairs_total}")
+        raise RuntimeError(
+            f"num_pairs_subset={num_pairs_subset} > available pairs={num_pairs_total}"
+        )
 
     all_ids: Sequence[int] = list(range(num_pairs_total))
     rng = np.random.RandomState(int(seed))
@@ -259,13 +266,18 @@ def select_pair_ids_subset(
     subset = [int(all_ids[i]) for i in perm[:num_pairs_subset]]
 
     if out_path_p is not None:
-        _write_json(out_path_p, {"seed": int(seed), "num_pairs_subset": int(num_pairs_subset), "pair_ids": subset})
+        _write_json(
+            out_path_p,
+            {"seed": int(seed), "num_pairs_subset": int(num_pairs_subset), "pair_ids": subset},
+        )
 
     return subset
+
 
 # -----------------------------
 # Batch size accounting
 # -----------------------------
+
 
 def infer_num_pairs_in_batch(batch: Any) -> int:
     """
@@ -317,6 +329,7 @@ def infer_num_pairs_in_batch(batch: Any) -> int:
 # -----------------------------
 # Benchmark output schema
 # -----------------------------
+
 
 @dataclass
 class BenchRecord:
@@ -387,6 +400,7 @@ def append_records_to_csv(path: Union[str, Path], records: List[BenchRecord]) ->
 # Core benchmark loop
 # -----------------------------
 
+
 @dataclass
 class BenchConfig:
     seed: int = 2020
@@ -420,7 +434,9 @@ def _mean_std(xs: Sequence[float]) -> Tuple[float, float]:
     return float(arr.mean()), float(arr.std(ddof=0))
 
 
-def _merge_segment_stats(seg_list: List[Dict[str, float]]) -> Tuple[Dict[str, float], Dict[str, float]]:
+def _merge_segment_stats(
+    seg_list: List[Dict[str, float]]
+) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
     seg_list: list of dict(name -> seconds) per iter
     Returns mean/std dicts over iters for each key (missing treated as 0).
@@ -435,8 +451,6 @@ def _merge_segment_stats(seg_list: List[Dict[str, float]]) -> Tuple[Dict[str, fl
     mean = {k: _mean_std(v)[0] for k, v in mat.items()}
     std = {k: _mean_std(v)[1] for k, v in mat.items()}
     return mean, std
-
-
 
 
 def _infinite_loader(loader: Iterable[Any]) -> Iterator[Any]:
@@ -458,7 +472,7 @@ def run_benchmark_once(
     Also records 't_next_batch' in segment dict.
     """
     device = bench_cfg.device
-    use_cuda = (device.startswith("cuda") and torch.cuda.is_available())
+    use_cuda = device.startswith("cuda") and torch.cuda.is_available()
     sync_cuda = bench_cfg.sync_cuda and use_cuda
 
     amp_enabled = bool(bench_cfg.amp and use_cuda)

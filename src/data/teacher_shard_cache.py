@@ -32,7 +32,16 @@ class TeacherShardManifest:
 
 
 class TeacherShardWriter:
-    def __init__(self, root: str | Path, *, split: str, shard_id: int, num_samples: int, emb_dim: int, has_feat: bool):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        split: str,
+        shard_id: int,
+        num_samples: int,
+        emb_dim: int,
+        has_feat: bool,
+    ):
         self.root = Path(root)
         self.split = str(split)
         self.shard_id = int(shard_id)
@@ -41,10 +50,20 @@ class TeacherShardWriter:
         self.has_feat = bool(has_feat)
         self.shard_dir = self.root / "teacher_shards" / self.split / f"shard_{self.shard_id:05d}"
         self.shard_dir.mkdir(parents=True, exist_ok=True)
-        self.logit = np.memmap(self.shard_dir / "teacher_logit.f16.mmap", mode="w+", dtype=np.float16, shape=(self.num_samples,))
+        self.logit = np.memmap(
+            self.shard_dir / "teacher_logit.f16.mmap",
+            mode="w+",
+            dtype=np.float16,
+            shape=(self.num_samples,),
+        )
         self.feat = None
         if self.has_feat:
-            self.feat = np.memmap(self.shard_dir / "teacher_feat.f16.mmap", mode="w+", dtype=np.float16, shape=(self.num_samples, self.emb_dim))
+            self.feat = np.memmap(
+                self.shard_dir / "teacher_feat.f16.mmap",
+                mode="w+",
+                dtype=np.float16,
+                shape=(self.num_samples, self.emb_dim),
+            )
         self.meta = TeacherShardMeta(
             state="building",
             split=self.split,
@@ -59,7 +78,9 @@ class TeacherShardWriter:
         with open(self.shard_dir / "meta.json", "w") as f:
             json.dump(asdict(self.meta), f, indent=2, sort_keys=True)
 
-    def write_batch(self, start: int, *, logit: torch.Tensor, feat: torch.Tensor | None = None) -> None:
+    def write_batch(
+        self, start: int, *, logit: torch.Tensor, feat: torch.Tensor | None = None
+    ) -> None:
         s = int(start)
         e = s + int(logit.shape[0])
         self.logit[s:e] = logit.detach().cpu().numpy().astype(np.float16, copy=False)
@@ -72,7 +93,11 @@ class TeacherShardWriter:
             self.feat.flush()
         self.meta.state = "ready"
         self._write_meta()
-        return {"shard_id": self.shard_id, "path": str(self.shard_dir), "num_samples": self.num_samples}
+        return {
+            "shard_id": self.shard_id,
+            "path": str(self.shard_dir),
+            "num_samples": self.num_samples,
+        }
 
 
 def write_teacher_shard_manifest(
@@ -110,10 +135,17 @@ class TeacherShardReader:
         with open(self.shard_dir / "meta.json", "r") as f:
             self.meta = TeacherShardMeta(**json.load(f))
         n = int(self.meta.num_samples)
-        self.logit = np.memmap(self.shard_dir / "teacher_logit.f16.mmap", mode="r", dtype=np.float16, shape=(n,))
+        self.logit = np.memmap(
+            self.shard_dir / "teacher_logit.f16.mmap", mode="r", dtype=np.float16, shape=(n,)
+        )
         self.feat = None
         if bool(self.meta.has_feat):
-            self.feat = np.memmap(self.shard_dir / "teacher_feat.f16.mmap", mode="r", dtype=np.float16, shape=(n, int(self.meta.emb_dim)))
+            self.feat = np.memmap(
+                self.shard_dir / "teacher_feat.f16.mmap",
+                mode="r",
+                dtype=np.float16,
+                shape=(n, int(self.meta.emb_dim)),
+            )
 
     def read(self, idx: int) -> Dict[str, torch.Tensor | None]:
         i = int(idx)
@@ -122,7 +154,9 @@ class TeacherShardReader:
             "teacher_feat": None,
         }
         if self.feat is not None:
-            out["teacher_feat"] = torch.from_numpy(np.array(self.feat[i], dtype=np.float32, copy=True))
+            out["teacher_feat"] = torch.from_numpy(
+                np.array(self.feat[i], dtype=np.float32, copy=True)
+            )
         return out
 
 

@@ -3,7 +3,9 @@
 Builds a k-NN graph over CTS tokens, applies multi-head graph attention
 layers, then global attention pooling + classifier.
 """
+
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
@@ -11,12 +13,8 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
+from src.models.modules.gnn_layers import GATBlock, GlobalAttentionPooling, build_knn_graph
 from src.models.registry import register_model
-from src.models.modules.gnn_layers import (
-    build_knn_graph,
-    GATBlock,
-    GlobalAttentionPooling,
-)
 
 
 @register_model("PairGNNAggregator")
@@ -44,10 +42,12 @@ class PairGNNAggregator(nn.Module):
 
         self.input_proj = nn.Linear(self.in_dim, d_model)
 
-        self.encoder = nn.ModuleList([
-            GATBlock(d_model, n_heads, dim_ff, dropout, ff_activation)
-            for _ in range(self.n_layers)
-        ])
+        self.encoder = nn.ModuleList(
+            [
+                GATBlock(d_model, n_heads, dim_ff, dropout, ff_activation)
+                for _ in range(self.n_layers)
+            ]
+        )
 
         self.pool = GlobalAttentionPooling(d_model)
         self.norm = nn.LayerNorm(d_model)

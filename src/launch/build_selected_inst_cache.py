@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import time
+from pathlib import Path
 
 import hydra
 import torch
@@ -10,7 +10,10 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Subset
 
 from src.config.data_config import DataConfig
-from src.data.selected_pair_cache import SelectedInstPairCacheWriter, SelectedInstPairCacheShardWriter
+from src.data.selected_pair_cache import (
+    SelectedInstPairCacheShardWriter,
+    SelectedInstPairCacheWriter,
+)
 from src.data.selected_pair_collate import selected_pair_collate
 from src.data.selected_pair_dataset import SelectedPairDataset
 from src.em.cheap_runner import load_ckpt_into_model
@@ -55,7 +58,9 @@ def main(cfg: DictConfig) -> None:
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     split = str(cfg.run.get("split", "train"))
     cache_root = str(cfg.scalable.cache_root)
     max_pairs = cfg.scalable.get("max_pairs", None)
@@ -101,7 +106,9 @@ def main(cfg: DictConfig) -> None:
     kmax = int(src_ds.reader.meta.kmax)
     data_cfg = DataConfig.from_omegaconf(cfg.data)
     inst_cfg = cfg.instance_model
-    instance_model = build_model(str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg).to(device)
+    instance_model = build_model(
+        str(inst_cfg.get("arch", inst_cfg.get("name"))), inst_cfg, data_cfg=data_cfg
+    ).to(device)
     inst_ckpt = _resolve_ckpt(cfg.get("instance_ckpt_path", None))
     if inst_ckpt is None or (not inst_ckpt.exists()):
         raise FileNotFoundError(f"Missing instance_ckpt_path for selected_inst build: {inst_ckpt}")
@@ -166,7 +173,9 @@ def main(cfg: DictConfig) -> None:
                     esa_scores=esa.view(B * K).index_select(0, valid).float(),
                     pos=pos.view(B * K).index_select(0, valid).float(),
                 )
-                feat_flat = torch.zeros((B * K, feat_valid.shape[1]), device=device, dtype=feat_valid.dtype)
+                feat_flat = torch.zeros(
+                    (B * K, feat_valid.shape[1]), device=device, dtype=feat_valid.dtype
+                )
                 feat_flat.index_copy_(0, valid, feat_valid)
                 logit_flat = torch.zeros((B * K,), device=device, dtype=logit_valid.dtype)
                 logit_flat.index_copy_(0, valid, logit_valid)
@@ -185,7 +194,9 @@ def main(cfg: DictConfig) -> None:
                 writer.write_pair(
                     int(pair_id[i].item()),
                     inst_emb=feat_batch[i],
-                    inst_logit=(logit_batch[i] if bool(cfg.run.get("has_inst_logit", True)) else None),
+                    inst_logit=(
+                        logit_batch[i] if bool(cfg.run.get("has_inst_logit", True)) else None
+                    ),
                     esa=esa_cpu[i],
                     pos=pos_cpu[i],
                     label=float(y_pair[i].item()),

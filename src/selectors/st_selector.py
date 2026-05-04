@@ -1,13 +1,12 @@
 # src/selectors/st_selector.py
 from __future__ import annotations
 
+import heapq
+import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Literal
+from typing import Dict, List, Literal, Optional, Tuple
 
 import numpy as np
-
-import math
-import heapq
 import torch
 
 Mode = Literal["train", "eval"]
@@ -16,6 +15,7 @@ Mode = Literal["train", "eval"]
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
+
 
 @dataclass
 class STSelectorConfig:
@@ -69,6 +69,7 @@ class STSelectorConfig:
       - z-score normalization is optional but recommended
 
     """
+
     # Output budget upper bound (also used as K)
     kmax: int = 512
 
@@ -101,9 +102,14 @@ class STSelectorConfig:
 # Deterministic exploration helpers
 # -----------------------------------------------------------------------------
 
+
 def _deterministic_seed(base_seed: int, epoch: int, pair_id: int) -> int:
     # stable mix, avoid python hash randomization
-    x = (base_seed & 0xFFFFFFFF) ^ ((epoch & 0xFFFFFFFF) * 1000003) ^ ((pair_id & 0xFFFFFFFF) * 9176)
+    x = (
+        (base_seed & 0xFFFFFFFF)
+        ^ ((epoch & 0xFFFFFFFF) * 1000003)
+        ^ ((pair_id & 0xFFFFFFFF) * 9176)
+    )
     return int(x & 0x7FFFFFFF)
 
 
@@ -112,13 +118,16 @@ def _add_gaussian_exploration(score_cpu: torch.Tensor, sigma: float, seed: int) 
         return score_cpu
     g = torch.Generator(device="cpu")
     g.manual_seed(int(seed))
-    noise = torch.randn(score_cpu.numel(), generator=g, device="cpu", dtype=score_cpu.dtype) * float(sigma)
+    noise = torch.randn(
+        score_cpu.numel(), generator=g, device="cpu", dtype=score_cpu.dtype
+    ) * float(sigma)
     return score_cpu + noise
 
 
 # -----------------------------------------------------------------------------
 # Fixed tables from spec (derived by L tier)
 # -----------------------------------------------------------------------------
+
 
 def _compute_L(K: int) -> int:
     # L = min(max(8*K, 1024), 4096)
@@ -175,7 +184,9 @@ def _get_hash_dims(seed: int, bits: int) -> torch.Tensor:
     return dims
 
 
-def _axis_simhash_keys(emb_cpu: torch.Tensor, idx: torch.Tensor, bits: int, seed: int) -> torch.Tensor:
+def _axis_simhash_keys(
+    emb_cpu: torch.Tensor, idx: torch.Tensor, bits: int, seed: int
+) -> torch.Tensor:
     """
     Compute Axis-SimHash keys for selected indices.
 
@@ -187,12 +198,14 @@ def _axis_simhash_keys(emb_cpu: torch.Tensor, idx: torch.Tensor, bits: int, seed
     # [m, bits] boolean -> int64
     # We only need sign; dtype can be float16/32.
     e = emb_cpu.index_select(0, idx).to(device="cpu")
-    bits_bool = (e.index_select(1, dims) > 0)
+    bits_bool = e.index_select(1, dims) > 0
     bits_i64 = bits_bool.to(dtype=torch.int64)
 
     # pack bits: key = sum(bits_i64[:,t] << t)
     # Use a precomputed power-of-two vector to avoid Python loops
-    pow2 = (torch.ones((bits,), dtype=torch.int64, device="cpu") << torch.arange(bits, dtype=torch.int64, device="cpu"))
+    pow2 = torch.ones((bits,), dtype=torch.int64, device="cpu") << torch.arange(
+        bits, dtype=torch.int64, device="cpu"
+    )
     key = (bits_i64 * pow2.view(1, -1)).sum(dim=1)  # [m]
     return key
 
@@ -201,18 +214,19 @@ def _axis_simhash_keys(emb_cpu: torch.Tensor, idx: torch.Tensor, bits: int, seed
 # Step B: pos bins + per-bin top-m heaps (O(n log m))
 # -----------------------------------------------------------------------------
 
-'''
+"""
 selector优化2：把Step B 里excluded_set 的 Python set membership 换成 bool mask
 
 if i in excluded_set: continue
 这是每个 token 都做一次 Python set 查询，对吞吐很伤（尤其 n 很大时）。
 替换成 numpy bool mask 能大幅减少 Python 层开销。
-'''
+"""
+
 
 def _build_candidates_by_pos_bins(
     *,
-    score_np,              # numpy float32, shape [n]
-    pos_np,                # numpy float32, shape [n]
+    score_np,  # numpy float32, shape [n]
+    pos_np,  # numpy float32, shape [n]
     # excluded_set: set,     # indices in [0..n-1] to exclude (S1)
     excluded_mask: Optional[np.ndarray],  # shape [n], dtype bool
     B: int,
@@ -264,11 +278,12 @@ def _build_candidates_by_pos_bins(
 # Step C: per-bin hash dedup (within <= m list)
 # -----------------------------------------------------------------------------
 
+
 def _dedup_per_bin_by_hash(
     *,
     heaps: List[List[Tuple[float, int]]],  # per-bin heaps (score, idx)
-    score_cpu: torch.Tensor,               # [n] float32 on CPU
-    emb_cpu: Optional[torch.Tensor],       # [n,64] on CPU
+    score_cpu: torch.Tensor,  # [n] float32 on CPU
+    emb_cpu: Optional[torch.Tensor],  # [n,64] on CPU
     bits: int,
     cap_c: int,
     hash_seed: int,
@@ -288,7 +303,7 @@ def _dedup_per_bin_by_hash(
     cand_score_bins: List[List[float]] = [[] for _ in range(B)]
 
     # If dedup requested but emb missing: fallback to "no dedup" (still stable)
-    do_hash = (emb_cpu is not None)
+    do_hash = emb_cpu is not None
 
     for b in range(B):
         items = heaps[b]
@@ -305,7 +320,9 @@ def _dedup_per_bin_by_hash(
             cand_score_bins[b] = [float(score_cpu[int(x)].item()) for x in cand_idx_bins[b]]
             continue
 
-        keys = _axis_simhash_keys(emb_cpu=emb_cpu, idx=idx_list, bits=bits, seed=hash_seed)  # [m] int64
+        keys = _axis_simhash_keys(
+            emb_cpu=emb_cpu, idx=idx_list, bits=bits, seed=hash_seed
+        )  # [m] int64
 
         counts: Dict[int, int] = {}
         kept: List[int] = []
@@ -331,10 +348,11 @@ def _dedup_per_bin_by_hash(
 # Step D: balanced quota allocation
 # -----------------------------------------------------------------------------
 
+
 def _balanced_quota_select(
     *,
-    cand_idx_bins: List[List[int]],       # per-bin indices sorted by score desc
-    cand_score_bins: List[List[float]],   # per-bin scores aligned
+    cand_idx_bins: List[List[int]],  # per-bin indices sorted by score desc
+    cand_score_bins: List[List[float]],  # per-bin scores aligned
     K2: int,
     score_norm_z: bool,
     score_norm_eps: float,
@@ -372,7 +390,7 @@ def _balanced_quota_select(
         denom = std + float(score_norm_eps)
         # map each score -> z
         # keep in python list for convenience (sizes <= 4096)
-        all_z = [ (s - mean) / denom for s in all_score ]
+        all_z = [(s - mean) / denom for s in all_score]
     else:
         # fallback: use raw score as "z"
         all_z = list(all_score)
@@ -466,10 +484,12 @@ def _balanced_quota_select(
         need = K2 - len(S2)
         S2_set = set(S2)
         # remaining candidates = all candidates - S2
-        rem = [(cand_score_bins[b][j], cand_idx_bins[b][j])
-               for b in B_plus
-               for j in range(a[b])
-               if cand_idx_bins[b][j] not in S2_set]
+        rem = [
+            (cand_score_bins[b][j], cand_idx_bins[b][j])
+            for b in B_plus
+            for j in range(a[b])
+            if cand_idx_bins[b][j] not in S2_set
+        ]
         rem.sort(key=lambda x: x[0], reverse=True)
         for _, ii in rem[:need]:
             S2.append(int(ii))
@@ -484,14 +504,15 @@ def _balanced_quota_select(
 # Public API: selector_fn
 # -----------------------------------------------------------------------------
 
+
 def selector_fn(
     *,
-    uids: torch.Tensor,                 # [n] CTS uid (global id)
-    pos: torch.Tensor,                  # [n] in [0,1]
-    cheap_logit: torch.Tensor,          # [n]
+    uids: torch.Tensor,  # [n] CTS uid (global id)
+    pos: torch.Tensor,  # [n] in [0,1]
+    cheap_logit: torch.Tensor,  # [n]
     cheap_emb: Optional[torch.Tensor],  # [n,64] used ONLY for hash dedup
     cfg: STSelectorConfig,
-    mode: Mode,                         # "train"|"eval"
+    mode: Mode,  # "train"|"eval"
     epoch: int,
     pair_id: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -559,14 +580,16 @@ def selector_fn(
     excluded_mask = None
     if K1 > 0:
         # topk on CPU
-        top1_val, top1_idx = torch.topk(score, k=K1, largest=True, sorted=False)  # indices in [0..n-1]
+        top1_val, top1_idx = torch.topk(
+            score, k=K1, largest=True, sorted=False
+        )  # indices in [0..n-1]
         # Keep S1 order stable by score desc (optional but makes debugging easier)
         s1_order = torch.argsort(top1_val, descending=True)
         S1_idx = top1_idx.index_select(0, s1_order).to(dtype=torch.long)
         # S1_set = set(int(i) for i in S1_idx.tolist())
         excluded_mask = np.zeros((n,), dtype=np.bool_)
         excluded_mask[S1_idx.cpu().numpy()] = True
-    
+
     else:
         S1_idx = torch.empty((0,), dtype=torch.long, device="cpu")
         # S1_set = set()
@@ -601,7 +624,9 @@ def selector_fn(
     # Step C: per-bin Axis-SimHash dedup -> C'
     # --------------------
     if cfg.use_hash_dedup and emb_cpu is None:
-        raise RuntimeError("[STSelector] use_hash_dedup=True but cheap_emb is None. Cannot run emb-diversity ablation.")
+        raise RuntimeError(
+            "[STSelector] use_hash_dedup=True but cheap_emb is None. Cannot run emb-diversity ablation."
+        )
 
     if cfg.use_hash_dedup:
         bits, cap_c = _hash_params_from_L(L)

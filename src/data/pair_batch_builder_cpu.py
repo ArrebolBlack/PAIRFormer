@@ -72,7 +72,9 @@ class PairBatchBuilderCPU:
 
         sel_meta_path = self.em_cache_root / "em_cache" / self.split / "selection" / "meta.json"
         if not sel_meta_path.exists():
-            raise FileNotFoundError(f"[PairBatchBuilderCPU] selection meta not found: {sel_meta_path}")
+            raise FileNotFoundError(
+                f"[PairBatchBuilderCPU] selection meta not found: {sel_meta_path}"
+            )
 
         with open(sel_meta_path, "r") as f:
             sel_meta = json.load(f)
@@ -81,15 +83,21 @@ class PairBatchBuilderCPU:
 
         # state 必须 ready
         if sel_meta.get("state") != "ready":
-            raise RuntimeError(f"[PairBatchBuilderCPU] selection cache not ready: state={sel_meta.get('state')}")
+            raise RuntimeError(
+                f"[PairBatchBuilderCPU] selection cache not ready: state={sel_meta.get('state')}"
+            )
 
         # identity 强校验：如果你提供了 expected，就必须一致
-        if self.expected_path_hash is not None and str(sel_meta.get("path_hash")) != str(self.expected_path_hash):
+        if self.expected_path_hash is not None and str(sel_meta.get("path_hash")) != str(
+            self.expected_path_hash
+        ):
             raise RuntimeError(
                 f"[PairBatchBuilderCPU] selection path_hash mismatch: meta={sel_meta.get('path_hash')} "
                 f"expected={self.expected_path_hash}"
             )
-        if self.expected_dataset_hash_key is not None and str(sel_meta.get("dataset_hash_key")) != str(self.expected_dataset_hash_key):
+        if self.expected_dataset_hash_key is not None and str(
+            sel_meta.get("dataset_hash_key")
+        ) != str(self.expected_dataset_hash_key):
             raise RuntimeError(
                 f"[PairBatchBuilderCPU] selection dataset_hash_key mismatch: meta={sel_meta.get('dataset_hash_key')} "
                 f"expected={self.expected_dataset_hash_key}"
@@ -103,8 +111,16 @@ class PairBatchBuilderCPU:
             )
 
         # 关键：用 expected identity 初始化 store（没提供 expected 时再退回 meta）
-        path_hash = self.expected_path_hash if self.expected_path_hash is not None else str(sel_meta["path_hash"])
-        dataset_hash_key = self.expected_dataset_hash_key if self.expected_dataset_hash_key is not None else str(sel_meta["dataset_hash_key"])
+        path_hash = (
+            self.expected_path_hash
+            if self.expected_path_hash is not None
+            else str(sel_meta["path_hash"])
+        )
+        dataset_hash_key = (
+            self.expected_dataset_hash_key
+            if self.expected_dataset_hash_key is not None
+            else str(sel_meta["dataset_hash_key"])
+        )
 
         store = MemmapCacheStore(
             cache_root=str(self.em_cache_root),
@@ -118,10 +134,9 @@ class PairBatchBuilderCPU:
             sel_version=str(sel_meta["sel_version"]),
             cheap_version_used=str(sel_meta["cheap_version_used"]),
             overwrite=False,
-            require_ready=True,  
+            require_ready=True,
         )
         self._store = store
-
 
     @torch.no_grad()
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -131,7 +146,9 @@ class PairBatchBuilderCPU:
         assert self._sel_kmax is not None
         K = int(self.cfg.kmax)
         if K > self._sel_kmax:
-            raise ValueError(f"[PairBatchBuilderCPU] requested K={K} > selection_cache.kmax={self._sel_kmax}")
+            raise ValueError(
+                f"[PairBatchBuilderCPU] requested K={K} > selection_cache.kmax={self._sel_kmax}"
+            )
 
         # 0) pair_ids
         pair_ids = torch.tensor([int(b["pair_id"]) for b in batch], dtype=torch.long, device="cpu")
@@ -154,15 +171,14 @@ class PairBatchBuilderCPU:
         y_pair = torch.zeros((B,), dtype=torch.float32, device="cpu")
         valid_start = start_uids_t >= 0
 
-
-        '''
+        """
         这里观察dump_cts_embedding.py得，原来老pipeline的处理是直接跳过这种空pair
         于是修改DynamicPairDataset初始化时过滤空pair
         所以如果还遇到，就直接raise error
 
         但是这样做不是很符合语义，没扫出CTS就应该判负
         DynamicPairDataset保留2版，这里也保留2版，可以自行调整
-        '''
+        """
         # # 约定：空 pair 作为合法样本，y_pair=0（y_pair 已经默认是 0）
         # # 同时必须强制该样本没有任何有效 token，避免后续 gather 误读 uid
         # empty = ~valid_start  # 空 pair：没有任何 CTS
@@ -179,9 +195,10 @@ class PairBatchBuilderCPU:
         # 检测到空pair（不含CTS）报错
         if not valid_start.all():
             bad = (~valid_start).nonzero(as_tuple=False).view(-1)[:10].tolist()
-            raise RuntimeError(f"[PairBatchBuilderCPU] found empty pairs (no CTS). idx(first10)={bad}")
+            raise RuntimeError(
+                f"[PairBatchBuilderCPU] found empty pairs (no CTS). idx(first10)={bad}"
+            )
             # print(f"[PairBatchBuilderCPU] Warning: found empty pairs (no CTS). idx(first10)={bad}")
-
 
         if valid_start.any():
             meta_y = self.cts_ds.batch_gather_by_uid(start_uids_t[valid_start], fields=("labels",))
@@ -216,7 +233,7 @@ class PairBatchBuilderCPU:
 
         # x_flat = meta.get("inputs", None)
         x_flat = meta.get("X", None)
-        
+
         if x_flat is None:
             raise RuntimeError("[PairBatchBuilderCPU] missing 'X' in CTS dataset chunks.")
 
@@ -234,7 +251,7 @@ class PairBatchBuilderCPU:
             "y_pair": y_pair,
             "mask": mask,
             "sel_uids": sel_uids,  # cached/hybrid 必需
-            "X": X_pad,            # 对外：instance 输入叫 X
+            "X": X_pad,  # 对外：instance 输入叫 X
         }
 
         # 可选字段保持不变（供 token 拼接）
@@ -251,7 +268,6 @@ class PairBatchBuilderCPU:
             out["esa_scores"] = esa_pad
 
         return out
-
 
     def invalidate(self) -> None:
         self._store = None

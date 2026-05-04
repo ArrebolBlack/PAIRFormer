@@ -1,35 +1,41 @@
 # src/trainer/trainer_em.py
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-import math
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import DictConfig
 from torch import optim
 from tqdm import tqdm
 
-from src.em.token_provider import TokenProvider
 from src.em.controller import EMPipelineController
-
-from omegaconf import DictConfig
+from src.em.token_provider import TokenProvider
 from src.evaluator.metrics import compute_metrics
-
-import time
-from src.utils.efficiency import EffMeter
-
 from src.trainer.loss import BinaryClassificationLoss
 
 # DDP imports
-from src.utils.ddp import is_ddp, is_rank0, get_rank, get_world_size, all_reduce_dict, save_on_rank0, print_on_rank0
-import torch.distributed as dist
+from src.utils.ddp import (
+    all_reduce_dict,
+    get_rank,
+    get_world_size,
+    is_ddp,
+    is_rank0,
+    print_on_rank0,
+    save_on_rank0,
+)
+from src.utils.efficiency import EffMeter
 
 # ----------------------- #
 # Training state
 # ----------------------- #
+
 
 @dataclass
 class TrainState:
@@ -41,6 +47,7 @@ class TrainState:
 # ----------------------- #
 # EMA
 # ----------------------- #
+
 
 class EMAHelper:
     def __init__(self, model: nn.Module, decay: float = 0.999):
@@ -91,6 +98,7 @@ class _EMASwapContext:
 class _nullcontext:
     def __enter__(self):
         return self
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         return False
 
@@ -98,6 +106,7 @@ class _nullcontext:
 # ----------------------- #
 # TrainerEMConfig
 # ----------------------- #
+
 
 @dataclass
 class TrainerEMConfig:
@@ -161,6 +170,7 @@ class TrainerEMConfig:
 # TrainerEM
 # ----------------------- #
 
+
 class TrainerEM:
     """
     EM Trainer:
@@ -199,7 +209,8 @@ class TrainerEM:
                 ddp_kwargs["device_ids"] = [local_rank]
                 ddp_kwargs["output_device"] = local_rank
             self.agg_model_ddp = nn.parallel.DistributedDataParallel(
-                self.agg_model, **ddp_kwargs,
+                self.agg_model,
+                **ddp_kwargs,
             )
         else:
             self.agg_model_ddp = self.agg_model
@@ -224,14 +235,20 @@ class TrainerEM:
 
         # Two optimizers
         self.opt_agg = optim.AdamW(
-            self.agg_model.parameters(), lr=cfg.lr_agg,
-            weight_decay=cfg.wd_agg, betas=self.cfg.betas,
-            eps=self.cfg.eps, amsgrad=self.cfg.amsgrad,
+            self.agg_model.parameters(),
+            lr=cfg.lr_agg,
+            weight_decay=cfg.wd_agg,
+            betas=self.cfg.betas,
+            eps=self.cfg.eps,
+            amsgrad=self.cfg.amsgrad,
         )
         self.opt_inst = optim.AdamW(
-            self.instance_model.parameters(), lr=cfg.lr_inst,
-            weight_decay=cfg.wd_inst, betas=self.cfg.betas,
-            eps=self.cfg.eps, amsgrad=self.cfg.amsgrad,
+            self.instance_model.parameters(),
+            lr=cfg.lr_inst,
+            weight_decay=cfg.wd_inst,
+            betas=self.cfg.betas,
+            eps=self.cfg.eps,
+            amsgrad=self.cfg.amsgrad,
         )
 
         # Two schedulers
@@ -241,7 +258,7 @@ class TrainerEM:
         # AMP
         amp_enabled = bool(cfg.use_amp and device.type == "cuda")
         self.amp_enabled = amp_enabled
-        self.scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
         # state
         self.state = TrainState(
@@ -262,7 +279,7 @@ class TrainerEM:
 
     def set_train_plan_override(self, plan: Optional[Dict[str, bool]]) -> None:
         """Force train-time token plan for the whole epoch."""
-        self._train_plan_override = (None if plan is None else dict(plan))
+        self._train_plan_override = None if plan is None else dict(plan)
 
     def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         self.crit.set_sample_weight(None)
@@ -275,7 +292,9 @@ class TrainerEM:
     # logging
     # ----------------------- #
 
-    def _log_metrics(self, metrics: Dict[str, float], stage: str, step: Optional[int] = None) -> None:
+    def _log_metrics(
+        self, metrics: Dict[str, float], stage: str, step: Optional[int] = None
+    ) -> None:
         if self.logger is None:
             return
         if step is None:
@@ -315,12 +334,15 @@ class TrainerEM:
         if name == "plateau":
             mode = "max" if bool(self.cfg.greater_is_better) else "min"
             return optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode=mode,
+                optimizer,
+                mode=mode,
                 factor=float(self.cfg.scheduler_factor),
                 patience=int(self.cfg.scheduler_patience),
             )
         if name == "cosine":
-            return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(self.cfg.scheduler_t_max))
+            return optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=int(self.cfg.scheduler_t_max)
+            )
         if name == "step":
             return optim.lr_scheduler.StepLR(
                 optimizer,
@@ -333,17 +355,24 @@ class TrainerEM:
     # token build
     # ----------------------- #
 
-    def _build_tokens_train(self, batch_cpu: Dict[str, Any], *, epoch: int, global_step: int) -> Dict[str, Any]:
+    def _build_tokens_train(
+        self, batch_cpu: Dict[str, Any], *, epoch: int, global_step: int
+    ) -> Dict[str, Any]:
         plan = self._train_plan_override
         if plan is None:
             plan = self.token_provider.policy.step_plan(epoch, global_step)
         plan = dict(plan)
 
-        train_inst = bool(plan.get("train_instance", False)) and (not bool(plan.get("use_instance_cache", True)))
+        train_inst = bool(plan.get("train_instance", False)) and (
+            not bool(plan.get("use_instance_cache", True))
+        )
         self.instance_model.train(train_inst)
 
         return self.token_provider.build_tokens(
-            batch_cpu, epoch=epoch, global_step=global_step, plan=plan,
+            batch_cpu,
+            epoch=epoch,
+            global_step=global_step,
+            plan=plan,
         )
 
     @torch.inference_mode()
@@ -360,7 +389,9 @@ class TrainerEM:
         plan = {"train_instance": False, "train_cheap": False}
         if use_instance_cache is not None:
             plan["use_instance_cache"] = bool(use_instance_cache)
-        return tp.build_tokens(batch_cpu, epoch=epoch, global_step=self.state.global_step, plan=plan)
+        return tp.build_tokens(
+            batch_cpu, epoch=epoch, global_step=self.state.global_step, plan=plan
+        )
 
     def set_instance_trainable(self, trainable: bool) -> None:
         self.instance_model.requires_grad_(bool(trainable))
@@ -420,7 +451,9 @@ class TrainerEM:
                 agg_accum_has_grad = False
                 inst_accum_has_grad = False
 
-            out = self._build_tokens_train(batch_cpu, epoch=self.state.epoch, global_step=self.state.global_step)
+            out = self._build_tokens_train(
+                batch_cpu, epoch=self.state.epoch, global_step=self.state.global_step
+            )
 
             tokens = out["tokens"]
             mask = out["mask"]
@@ -519,7 +552,11 @@ class TrainerEM:
         use_ema: bool = True,
         use_instance_cache: Optional[bool] = None,
     ) -> Dict[str, float]:
-        ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
+        ctx = (
+            self.ema.swap_parameters(self.agg_model)
+            if (use_ema and self.ema is not None)
+            else _nullcontext()
+        )
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
@@ -530,7 +567,9 @@ class TrainerEM:
             total_loss, total_seen = 0.0, 0
             all_logits, all_labels = [], []
 
-            for batch_cpu in tqdm(loader, desc=f"Valid epoch {self.state.epoch}", disable=not is_rank0()):
+            for batch_cpu in tqdm(
+                loader, desc=f"Valid epoch {self.state.epoch}", disable=not is_rank0()
+            ):
                 out = self._build_tokens_eval(
                     batch_cpu,
                     epoch=self.state.epoch,
@@ -573,6 +612,7 @@ class TrainerEM:
 
                 if is_ddp():
                     from src.utils.ddp import gather_tensors
+
                     gathered_logits = gather_tensors(local_logits)
                     gathered_labels = gather_tensors(local_labels)
                     # Concatenate all ranks
@@ -599,7 +639,9 @@ class TrainerEM:
                 else:
                     logits_np = local_logits.numpy()
                     labels_np = local_labels.numpy()
-                    cm = compute_metrics(y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg)
+                    cm = compute_metrics(
+                        y_true=labels_np, y_pred_raw=logits_np, task_cfg=self.task_cfg
+                    )
                     for k, v in cm.items():
                         try:
                             metrics[k] = float(v)
@@ -669,7 +711,9 @@ class TrainerEM:
                 "global_step": self.state.global_step,
                 "best_metric": self.state.best_metric,
             },
-            "ema_shadow": None if self.ema is None else {k: v.cpu() for k, v in self.ema.shadow.items()},
+            "ema_shadow": (
+                None if self.ema is None else {k: v.cpu() for k, v in self.ema.shadow.items()}
+            ),
             "cfg": self.cfg.__dict__,
         }
         torch.save(ckpt, path)
@@ -681,7 +725,7 @@ class TrainerEM:
         def strip_ddp_prefix(k: str) -> str:
             for prefix in ("module.",):
                 if k.startswith(prefix):
-                    return k[len(prefix):]
+                    return k[len(prefix) :]
             return k
 
         agg_sd = ckpt.get("agg_state_dict", ckpt)
@@ -718,8 +762,14 @@ class TrainerEM:
                 self.ema.shadow[k] = v.to(self.device)
 
     @torch.no_grad()
-    def predict(self, loader: Any, use_ema: bool = True, use_instance_cache: Optional[bool] = None) -> Dict[str, Any]:
-        ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
+    def predict(
+        self, loader: Any, use_ema: bool = True, use_instance_cache: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        ctx = (
+            self.ema.swap_parameters(self.agg_model)
+            if (use_ema and self.ema is not None)
+            else _nullcontext()
+        )
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
@@ -728,7 +778,9 @@ class TrainerEM:
             all_pair_id = []
 
             for batch_cpu in tqdm(loader, desc="Predict", disable=not is_rank0()):
-                out = self._build_tokens_eval(batch_cpu, epoch=self.state.epoch, use_instance_cache=use_instance_cache)
+                out = self._build_tokens_eval(
+                    batch_cpu, epoch=self.state.epoch, use_instance_cache=use_instance_cache
+                )
 
                 tokens = out.get("tokens", None)
                 y = out.get("y_pair", None)
@@ -752,8 +804,16 @@ class TrainerEM:
                     all_pair_id.append(pid.detach().cpu())
 
             out_dict: Dict[str, Any] = {
-                "logits": torch.cat(all_logits).numpy() if len(all_logits) > 0 else np.zeros((0,), dtype=np.float32),
-                "labels": torch.cat(all_labels).numpy() if len(all_labels) > 0 else np.zeros((0,), dtype=np.float32),
+                "logits": (
+                    torch.cat(all_logits).numpy()
+                    if len(all_logits) > 0
+                    else np.zeros((0,), dtype=np.float32)
+                ),
+                "labels": (
+                    torch.cat(all_labels).numpy()
+                    if len(all_labels) > 0
+                    else np.zeros((0,), dtype=np.float32)
+                ),
             }
             if len(all_pair_id) > 0:
                 out_dict["pair_id"] = torch.cat(all_pair_id).numpy()
@@ -770,14 +830,18 @@ class TrainerEM:
         plan_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """End-to-end inference throughput benchmark."""
-        device_is_cuda = (self.device.type == "cuda")
+        device_is_cuda = self.device.type == "cuda"
         if device_is_cuda:
             torch.cuda.reset_peak_memory_stats(self.device)
 
         meter = EffMeter(device=self.device, enabled=True)
         meter.reset_epoch()
 
-        ctx = self.ema.swap_parameters(self.agg_model) if (use_ema and self.ema is not None) else _nullcontext()
+        ctx = (
+            self.ema.swap_parameters(self.agg_model)
+            if (use_ema and self.ema is not None)
+            else _nullcontext()
+        )
         with ctx:
             self.agg_model.eval()
             self.instance_model.eval()
@@ -801,8 +865,10 @@ class TrainerEM:
                     break
 
                 out = (self.token_provider_val or self.token_provider).build_tokens(
-                    batch_cpu, epoch=int(self.state.epoch),
-                    global_step=int(self.state.global_step), plan=base_plan,
+                    batch_cpu,
+                    epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step),
+                    plan=base_plan,
                 )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
@@ -833,8 +899,10 @@ class TrainerEM:
                     break
 
                 out = (self.token_provider_val or self.token_provider).build_tokens(
-                    batch_cpu, epoch=int(self.state.epoch),
-                    global_step=int(self.state.global_step), plan=base_plan,
+                    batch_cpu,
+                    epoch=int(self.state.epoch),
+                    global_step=int(self.state.global_step),
+                    plan=base_plan,
                 )
                 tokens = out.get("tokens", None)
                 mask = out.get("mask", None)
@@ -858,7 +926,7 @@ class TrainerEM:
 
             peak_vram_gb = 0.0
             if device_is_cuda:
-                peak_vram_gb = float(torch.cuda.max_memory_allocated(self.device) / (1024 ** 3))
+                peak_vram_gb = float(torch.cuda.max_memory_allocated(self.device) / (1024**3))
 
             pairs_per_s = float(total_pairs / elapsed)
 

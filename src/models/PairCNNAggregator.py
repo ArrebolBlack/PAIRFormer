@@ -3,7 +3,9 @@
 Sorts tokens by inst_logit (descending), applies dilated Conv1d residual
 blocks, then masked global average pooling + classifier.
 """
+
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
@@ -43,14 +45,17 @@ class PairCNNAggregator(nn.Module):
         # Dilated Conv1d residual blocks
         self.conv_blocks = nn.ModuleList()
         for i in range(self.n_layers):
-            dilation = 2 ** i
+            dilation = 2**i
             padding = dilation * (kernel_size - 1) // 2
-            block = nn.ModuleDict({
-                "conv": nn.Conv1d(d_model, d_model, kernel_size,
-                                  padding=padding, dilation=dilation),
-                "bn": nn.BatchNorm1d(d_model),
-                "drop": nn.Dropout(dropout),
-            })
+            block = nn.ModuleDict(
+                {
+                    "conv": nn.Conv1d(
+                        d_model, d_model, kernel_size, padding=padding, dilation=dilation
+                    ),
+                    "bn": nn.BatchNorm1d(d_model),
+                    "drop": nn.Dropout(dropout),
+                }
+            )
             self.conv_blocks.append(block)
 
         self.norm = nn.LayerNorm(d_model)
@@ -112,7 +117,7 @@ class PairCNNAggregator(nn.Module):
             h_t = block["bn"](h_t)
             h_t = F.gelu(h_t)
             h_t = block["drop"](h_t)
-            h = (residual + h_t.transpose(1, 2))
+            h = residual + h_t.transpose(1, 2)
             h = h * mask.unsqueeze(-1).float()
 
         # Masked global average pooling

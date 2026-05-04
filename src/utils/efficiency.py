@@ -1,6 +1,6 @@
 # src/utils/efficiency.py
-from dataclasses import dataclass, asdict
 import os
+from dataclasses import asdict, dataclass
 
 try:
     import psutil
@@ -11,15 +11,15 @@ import torch
 
 
 def _bytes_to_gb(x: float) -> float:
-    return float(x) / (1024 ** 3)
+    return float(x) / (1024**3)
 
 
 @dataclass
 class EffStats:
     epoch_wall_s: float = 0.0
-    data_fetch_s: float = 0.0     # CPU: time waiting for next(loader)
-    h2d_s: float = 0.0            # GPU: measured by CUDA events (H2D copies)
-    compute_s: float = 0.0        # GPU: measured by CUDA events (fwd/bwd/step)
+    data_fetch_s: float = 0.0  # CPU: time waiting for next(loader)
+    h2d_s: float = 0.0  # GPU: measured by CUDA events (H2D copies)
+    compute_s: float = 0.0  # GPU: measured by CUDA events (fwd/bwd/step)
     peak_vram_gb: float = 0.0
     peak_cpu_rss_gb: float = 0.0
 
@@ -43,7 +43,7 @@ class EffMeter:
         self.stats = EffStats()
         self._proc = psutil.Process(os.getpid()) if psutil is not None else None
 
-        self._h2d_events = []      # list[(start_event, end_event)]
+        self._h2d_events = []  # list[(start_event, end_event)]
         self._compute_events = []  # list[(start_event, end_event)]
 
     def reset_epoch(self):

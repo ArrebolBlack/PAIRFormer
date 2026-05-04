@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from multiprocessing import get_context
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
-import time
 
 import torch
 
@@ -121,7 +121,9 @@ class PairStreamBuilderParallel:
         # Detect if selector needs cheap_emb by creating a probe
         try:
             probe = selector_factory()
-            self._need_cheap_emb = getattr(probe.cfg, 'keep_cheap_emb', False) if hasattr(probe, 'cfg') else False
+            self._need_cheap_emb = (
+                getattr(probe.cfg, "keep_cheap_emb", False) if hasattr(probe, "cfg") else False
+            )
         except Exception:
             pass
 
@@ -192,7 +194,11 @@ class PairStreamBuilderParallel:
 
         # --- Phase 1: score all candidates with cheap model ---
         all_logit = torch.empty(n, dtype=torch.float32)
-        all_feat = torch.empty(n, self.cheap_emb_dim, dtype=torch.float32) if self._need_cheap_emb else None
+        all_feat = (
+            torch.empty(n, self.cheap_emb_dim, dtype=torch.float32)
+            if self._need_cheap_emb
+            else None
+        )
         offset = 0
         while offset < n:
             end = min(n, offset + int(self.cfg.cheap_batch_size))

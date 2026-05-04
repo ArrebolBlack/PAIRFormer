@@ -27,13 +27,12 @@ registry.py
     hidden_dim = int(p.get("hidden_dim", 256))
 """
 
-from typing import Dict, Type, Optional
+from typing import Dict, Optional, Type
 
 from omegaconf import DictConfig
 from torch import nn
 
 from src.config.data_config import DataConfig  # 仅作类型提示
-
 
 # 全局模型注册表：键为 arch 名（字符串），值为模型类（nn.Module 子类）
 _MODEL_REGISTRY: Dict[str, Type[nn.Module]] = {}
@@ -62,6 +61,7 @@ def register_model(name: str):
                 super().__init__()
                 ...
     """
+
     def wrapper(cls: Type[nn.Module]) -> Type[nn.Module]:
         if not issubclass(cls, nn.Module):
             raise TypeError(f"@register_model('{name}') 只能用于 nn.Module 子类，当前: {cls}")
@@ -105,19 +105,13 @@ def build_model(
     arch = model_cfg.get("arch", name)
     if arch not in _MODEL_REGISTRY:
         avail = ", ".join(sorted(_MODEL_REGISTRY.keys()))
-        raise ValueError(
-            f"Unknown model arch '{arch}'. "
-            f"Available models: [{avail}]"
-        )
+        raise ValueError(f"Unknown model arch '{arch}'. " f"Available models: [{avail}]")
 
     cls = _MODEL_REGISTRY[arch]
     model = cls(model_cfg, data_cfg)
 
     if not isinstance(model, nn.Module):
-        raise TypeError(
-            f"Model '{arch}' constructor must return nn.Module, "
-            f"got {type(model)}"
-        )
+        raise TypeError(f"Model '{arch}' constructor must return nn.Module, " f"got {type(model)}")
     return model
 
 

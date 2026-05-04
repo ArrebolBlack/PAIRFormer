@@ -43,11 +43,11 @@ class MyTransformer1D(nn.Module):
         p = model_cfg
 
         # 超参数（都有默认值，方便调参）
-        d_model  = int(p.get("d_model", 256))
+        d_model = int(p.get("d_model", 256))
         n_layers = int(p.get("n_layers", 4))
-        n_heads  = int(p.get("n_heads", 8))
-        dim_ff   = int(p.get("dim_ff", 1024))
-        dropout  = float(p.get("dropout", 0.1))
+        n_heads = int(p.get("n_heads", 8))
+        dim_ff = int(p.get("dim_ff", 1024))
+        dropout = float(p.get("dropout", 0.1))
 
         # ---------- 根据 data_cfg 推断输入通道数和序列长度 ----------
         if data_cfg is not None:
@@ -80,7 +80,7 @@ class MyTransformer1D(nn.Module):
             activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        
+
         # ✅ 新增：在 pooling 后做 LayerNorm，稳定表示
         self.post_norm = nn.LayerNorm(d_model)
 

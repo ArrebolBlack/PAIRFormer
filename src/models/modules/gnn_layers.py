@@ -8,16 +8,17 @@ Provides:
 - SoftMoEFFN: Soft Mixture-of-Experts feed-forward
 - GlobalAttentionPooling: learnable attention-weighted readout
 """
+
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Graph construction
 # ---------------------------------------------------------------------------
+
 
 def build_knn_graph(
     h: torch.Tensor,
@@ -83,6 +84,7 @@ def build_knn_graph(
 # Segmented softmax
 # ---------------------------------------------------------------------------
 
+
 def segmented_softmax(
     logits: torch.Tensor,
     batch_vec: torch.Tensor,
@@ -100,10 +102,12 @@ def segmented_softmax(
         logits = logits.unsqueeze(-1)
 
     # Numerical stability: max per segment
-    logits_max = torch.full((num_segments, logits.size(-1)), float("-inf"),
-                            device=logits.device, dtype=logits.dtype)
-    logits_max.scatter_reduce_(0, batch_vec.unsqueeze(1).expand_as(logits),
-                              logits, reduce="amax", include_self=True)
+    logits_max = torch.full(
+        (num_segments, logits.size(-1)), float("-inf"), device=logits.device, dtype=logits.dtype
+    )
+    logits_max.scatter_reduce_(
+        0, batch_vec.unsqueeze(1).expand_as(logits), logits, reduce="amax", include_self=True
+    )
     stable = logits - logits_max[batch_vec]
 
     exp_vals = torch.exp(stable)
@@ -117,6 +121,7 @@ def segmented_softmax(
 # ---------------------------------------------------------------------------
 # GAT Layer
 # ---------------------------------------------------------------------------
+
 
 class GATLayer(nn.Module):
     """Multi-head Graph Attention layer (pure PyTorch)."""
@@ -169,10 +174,8 @@ class GATLayer(nn.Module):
         e = self.leaky_relu(attn_src[src] + attn_dst[dst])  # [E, H]
 
         # Softmax per destination node
-        e_max = torch.full((N, self.n_heads), float("-inf"),
-                           device=h.device, dtype=h.dtype)
-        e_max.scatter_reduce_(0, dst.unsqueeze(1).expand_as(e), e,
-                              reduce="amax", include_self=True)
+        e_max = torch.full((N, self.n_heads), float("-inf"), device=h.device, dtype=h.dtype)
+        e_max.scatter_reduce_(0, dst.unsqueeze(1).expand_as(e), e, reduce="amax", include_self=True)
         e_stable = e - e_max[dst]
         e_exp = torch.exp(e_stable)
         e_sum = torch.zeros(N, self.n_heads, device=h.device, dtype=h.dtype)
@@ -183,9 +186,7 @@ class GATLayer(nn.Module):
         # Weighted aggregation
         msg = h_proj[src] * alpha.unsqueeze(-1)  # [E, H, Dh]
         out = torch.zeros(N, self.n_heads, self.d_head, device=h.device, dtype=h.dtype)
-        out.scatter_add_(0,
-                         dst.unsqueeze(1).unsqueeze(2).expand_as(msg),
-                         msg)
+        out.scatter_add_(0, dst.unsqueeze(1).unsqueeze(2).expand_as(msg), msg)
 
         return self.W_out(out.view(N, -1))
 
@@ -194,11 +195,11 @@ class GATLayer(nn.Module):
 # FFN variants
 # ---------------------------------------------------------------------------
 
+
 class RowwiseFF(nn.Module):
     """Standard position-wise feed-forward."""
 
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1,
-                 activation: str = "gelu"):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1, activation: str = "gelu"):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_ff)
         self.fc2 = nn.Linear(d_ff, d_model)
@@ -212,21 +213,29 @@ class RowwiseFF(nn.Module):
 class SoftMoEFFN(nn.Module):
     """Soft Mixture-of-Experts FFN — all experts contribute with soft weights."""
 
-    def __init__(self, d_model: int, d_ff: int, num_experts: int = 4,
-                 dropout: float = 0.1, activation: str = "gelu"):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        num_experts: int = 4,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+    ):
         super().__init__()
         self.num_experts = num_experts
         self.router = nn.Linear(d_model, num_experts, bias=False)
         act_fn = nn.GELU if activation == "gelu" else nn.ReLU
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, d_ff),
-                act_fn(),
-                nn.Dropout(dropout),
-                nn.Linear(d_ff, d_model),
-            )
-            for _ in range(num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(d_model, d_ff),
+                    act_fn(),
+                    nn.Dropout(dropout),
+                    nn.Linear(d_ff, d_model),
+                )
+                for _ in range(num_experts)
+            ]
+        )
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -240,12 +249,19 @@ class SoftMoEFFN(nn.Module):
 # GAT Block
 # ---------------------------------------------------------------------------
 
+
 class GATBlock(nn.Module):
     """Full GAT block: LN -> GAT -> Res -> LN -> FFN -> Res -> Mask."""
 
-    def __init__(self, d_model: int, n_heads: int, d_ff: int,
-                 dropout: float = 0.1, ff_activation: str = "gelu",
-                 num_experts: int = 0):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        dropout: float = 0.1,
+        ff_activation: str = "gelu",
+        num_experts: int = 0,
+    ):
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model)
         self.gat = GATLayer(d_model, n_heads, dropout)
@@ -280,6 +296,7 @@ class GATBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # Global Attention Pooling
 # ---------------------------------------------------------------------------
+
 
 class GlobalAttentionPooling(nn.Module):
     """Learnable attention-weighted graph readout."""

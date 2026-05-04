@@ -9,15 +9,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from src.config.data_config import DataConfig
+from src.data.collate import cts_collate_fn
 from src.data.dataset import ChunkedCTSDataset
 from src.data.em_cache import MemmapCacheStore
 from src.models.extractors import get_embedding_and_logit
-
-from src.data.collate import cts_collate_fn
 
 
 def _load_json(p: Union[str, Path]) -> Dict[str, Any]:
@@ -25,7 +24,9 @@ def _load_json(p: Union[str, Path]) -> Dict[str, Any]:
         return json.load(f)
 
 
-def _open_selection_uids_mmap(em_cache_root: Union[str, Path], split: str, sel_meta: Dict[str, Any]) -> np.memmap:
+def _open_selection_uids_mmap(
+    em_cache_root: Union[str, Path], split: str, sel_meta: Dict[str, Any]
+) -> np.memmap:
     root = Path(str(em_cache_root))
     sel_dir = root / "em_cache" / split / "selection"
     uids_path = sel_dir / "sel_uids.i32.mmap"
@@ -34,7 +35,9 @@ def _open_selection_uids_mmap(em_cache_root: Union[str, Path], split: str, sel_m
     return np.memmap(uids_path, mode="r", dtype=np.int32, shape=(num_pairs, kmax))
 
 
-def _open_selection_len_mmap(em_cache_root: Union[str, Path], split: str, sel_meta: Dict[str, Any]) -> np.memmap:
+def _open_selection_len_mmap(
+    em_cache_root: Union[str, Path], split: str, sel_meta: Dict[str, Any]
+) -> np.memmap:
     root = Path(str(em_cache_root))
     sel_dir = root / "em_cache" / split / "selection"
     len_path = sel_dir / "sel_len.i16.mmap"
@@ -138,9 +141,13 @@ class InstanceCacheRunner:
         cheap_meta = _load_json(cheap_meta_path)
 
         if sel_meta.get("state", "") != "ready":
-            raise RuntimeError(f"[InstanceRunner] selection not ready: split={split} state={sel_meta.get('state')}")
+            raise RuntimeError(
+                f"[InstanceRunner] selection not ready: split={split} state={sel_meta.get('state')}"
+            )
         if cheap_meta.get("state", "") != "ready":
-            raise RuntimeError(f"[InstanceRunner] cheap not ready: split={split} state={cheap_meta.get('state')}")
+            raise RuntimeError(
+                f"[InstanceRunner] cheap not ready: split={split} state={cheap_meta.get('state')}"
+            )
 
         if str(sel_meta.get("cheap_version_used", "")) != str(cheap_meta.get("cheap_version", "")):
             raise RuntimeError(
@@ -148,7 +155,9 @@ class InstanceCacheRunner:
                 f"but cheap meta is {cheap_meta.get('cheap_version')} (split={split})"
             )
 
-        if sel_expected_version is not None and str(sel_meta.get("sel_version", "")) != str(sel_expected_version):
+        if sel_expected_version is not None and str(sel_meta.get("sel_version", "")) != str(
+            sel_expected_version
+        ):
             raise RuntimeError(
                 f"[InstanceRunner] sel_version mismatch: expected={sel_expected_version} got={sel_meta.get('sel_version')} (split={split})"
             )
@@ -165,8 +174,10 @@ class InstanceCacheRunner:
         pair_end = ((rank + 1) * num_pairs) // world_size
         shard_size = pair_end - pair_start
 
-        print(f"[InstanceRunner:{split}] rank={rank}/{world_size} num_pairs={num_pairs} kmax={kmax} "
-              f"pair_shard=[{pair_start},{pair_end}) ({shard_size}) inst_version={inst_version}")
+        print(
+            f"[InstanceRunner:{split}] rank={rank}/{world_size} num_pairs={num_pairs} kmax={kmax} "
+            f"pair_shard=[{pair_start},{pair_end}) ({shard_size}) inst_version={inst_version}"
+        )
 
         # Open instance cache store (pair-indexed)
         store = MemmapCacheStore(
@@ -236,7 +247,7 @@ class InstanceCacheRunner:
 
             # Read selection for this chunk of pairs
             sel_u = np.asarray(sel_uids_mmap[chunk_start:chunk_end])  # [C, K]
-            sel_l = np.asarray(sel_len_mmap[chunk_start:chunk_end])   # [C]
+            sel_l = np.asarray(sel_len_mmap[chunk_start:chunk_end])  # [C]
 
             # Gather all valid UIDs
             all_uids = []
@@ -303,8 +314,8 @@ class InstanceCacheRunner:
             for i in range(C):
                 n = uid_counts[i]
                 if n > 0:
-                    emb_chunk[i, :n] = feat_cpu[offset:offset + n].to(torch.float16)
-                    logit_chunk[i, :n] = logit_cpu[offset:offset + n].to(torch.float16)
+                    emb_chunk[i, :n] = feat_cpu[offset : offset + n].to(torch.float16)
+                    logit_chunk[i, :n] = logit_cpu[offset : offset + n].to(torch.float16)
                 offset += n
 
             # Write to store
@@ -331,8 +342,10 @@ class InstanceCacheRunner:
             store.set_instance_ready()
 
         dt = __import__("time").time() - t0
-        print(f"[InstanceRunner:{split}] rank={rank} DONE pairs={written_pairs}/{shard_size} "
-              f"cts={written_cts} time={dt:.1f}s")
+        print(
+            f"[InstanceRunner:{split}] rank={rank} DONE pairs={written_pairs}/{shard_size} "
+            f"cts={written_cts} time={dt:.1f}s"
+        )
 
 
 def run_instance_cache(

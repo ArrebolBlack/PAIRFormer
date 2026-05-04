@@ -2,59 +2,66 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
+import hashlib
 import json
+import numbers
 import os
-from pathlib import Path
-from typing import Any, Dict, Optional, Iterable, Tuple
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import hydra
+import numpy as np
 import torch
 import torch.nn as nn
-from hydra.utils import get_original_cwd
+from hydra.utils import get_original_cwd, instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler
-import hashlib
 
 from src.config.data_config import DataConfig
+from src.data.builder import get_or_build_blocks
 from src.data.dataset import ChunkedCTSDataset
-from src.data.pair_dataset_dynamic import DynamicPairDataset
 from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
-from src.models.registry import build_model
+from src.data.pair_dataset_dynamic import DynamicPairDataset
+from src.em.cheap_runner import CheapCacheBuildConfig, CheapCacheRunner
+from src.em.controller import EMControllerConfig, EMPipelineController
+from src.em.instance_runner import run_instance_cache
+from src.em.selection_runner import run_selection_cache
 from src.em.token_provider import TokenProvider, TokenProviderConfig
-from src.em.controller import EMPipelineController, EMControllerConfig
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
-
+from src.evaluator.evaluator import evaluate_with_trainer
+from src.launch.train import iter_scalar_metrics, setup_wandb
+from src.models.registry import build_model
 from src.trainer.trainer_em import TrainerEM, TrainerEMConfig
 from src.utils import set_seeds
-from hydra.utils import instantiate
-
-from src.em.cheap_runner import CheapCacheRunner, CheapCacheBuildConfig
-from src.em.selection_runner import run_selection_cache
-from src.em.instance_runner import run_instance_cache
-
-import numbers
-import numpy as np
-from src.evaluator.evaluator import evaluate_with_trainer
-from src.data.builder import get_or_build_blocks
-from src.launch.train import iter_scalar_metrics, setup_wandb
 
 # DDP imports
 from src.utils.ddp import (
-    setup_ddp, cleanup_ddp, is_ddp, is_rank0, get_rank, get_world_size,
-    print_on_rank0, barrier,
+    barrier,
+    cleanup_ddp,
+    get_rank,
+    get_world_size,
+    is_ddp,
+    is_rank0,
+    print_on_rank0,
+    setup_ddp,
 )
 from src.utils.ddp_sampler import (
-    get_ddp_sampler, set_epoch_for_sampler, disable_persistent_workers_if_ddp,
+    disable_persistent_workers_if_ddp,
+    get_ddp_sampler,
+    set_epoch_for_sampler,
 )
 
 
@@ -104,7 +111,9 @@ def main(cfg: DictConfig) -> None:
     # ---- DDP setup ----
     rank, local_rank, world_size = setup_ddp()
     if world_size > 1:
-        print_on_rank0(f"[train_em] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}")
+        print_on_rank0(
+            f"[train_em] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}"
+        )
         device = torch.device(f"cuda:{local_rank}")
         set_seeds(seed + rank)  # offset seed per rank for DDP
     else:
@@ -144,13 +153,16 @@ def main(cfg: DictConfig) -> None:
     train_instance_mode = run_cfg.get("train_instance_mode", "cached")
     val_instance_mode = run_cfg.get("val_instance_mode", "cached")
 
-    train_use_inst_cache_default = (train_instance_mode == "cached")
-    val_use_inst_cache_default = (val_instance_mode == "cached")
+    train_use_inst_cache_default = train_instance_mode == "cached"
+    val_use_inst_cache_default = val_instance_mode == "cached"
 
     force_overwrite_bootstrap = bool(run_cfg.get("force_overwrite_bootstrap", True))
 
     refresh_instance_after_update = bool(
-        run_cfg.get("refresh_instance_after_update", (train_use_inst_cache_default or val_use_inst_cache_default))
+        run_cfg.get(
+            "refresh_instance_after_update",
+            (train_use_inst_cache_default or val_use_inst_cache_default),
+        )
     )
 
     print_on_rank0(
@@ -217,13 +229,17 @@ def main(cfg: DictConfig) -> None:
         for k, v in sd.items():
             for pref in ("model.", "module.", "net."):
                 if k.startswith(pref):
-                    k = k[len(pref):]
+                    k = k[len(pref) :]
             cleaned[k] = v
         missing, unexpected = instance_model.load_state_dict(cleaned, strict=False)
         if missing:
-            print(f"[train_em] WARN instance missing keys: {len(missing)} (first10): {missing[:10]}")
+            print(
+                f"[train_em] WARN instance missing keys: {len(missing)} (first10): {missing[:10]}"
+            )
         if unexpected:
-            print(f"[train_em] WARN instance unexpected keys: {len(unexpected)} (first10): {unexpected[:10]}")
+            print(
+                f"[train_em] WARN instance unexpected keys: {len(unexpected)} (first10): {unexpected[:10]}"
+            )
         instance_model.to(device)
 
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
@@ -246,11 +262,13 @@ def main(cfg: DictConfig) -> None:
     pol_cfg_dict = OmegaConf.to_container(policy_node, resolve=True)
 
     policy_train = UpdatePolicy(UpdatePolicyConfig(**pol_cfg_dict))
-    policy_eval = UpdatePolicy(UpdatePolicyConfig(
-        warmup_epochs=0,
-        instance_mode=("cached" if val_use_inst_cache_default else "online"),
-        cheap_mode="cached",
-    ))
+    policy_eval = UpdatePolicy(
+        UpdatePolicyConfig(
+            warmup_epochs=0,
+            instance_mode=("cached" if val_use_inst_cache_default else "online"),
+            cheap_mode="cached",
+        )
+    )
 
     ctrl_node = em_node.get("controller", None)
     if ctrl_node is None:
@@ -289,7 +307,7 @@ def main(cfg: DictConfig) -> None:
             for k, v in sd.items():
                 for pref in ("model.", "module.", "net."):
                     if k.startswith(pref):
-                        k = k[len(pref):]
+                        k = k[len(pref) :]
                 cleaned[k] = v
             cheap_model.load_state_dict(cleaned, strict=False)
             cheap_model.to(device)
@@ -362,9 +380,8 @@ def main(cfg: DictConfig) -> None:
 
     selector_module = instantiate(sel_mod_node)
 
-    sel_version_cfg = (
-        _oc_select(cfg, "em.sel_version", default=None)
-        or _oc_select(cfg, "sel_version", default=None)
+    sel_version_cfg = _oc_select(cfg, "em.sel_version", default=None) or _oc_select(
+        cfg, "sel_version", default=None
     )
     sel_mod_container = OmegaConf.to_container(sel_mod_node, resolve=True)
     sel_hash = _stable_cfg_hash(sel_mod_container)
@@ -382,7 +399,9 @@ def main(cfg: DictConfig) -> None:
     else:
         sel_kmax = int(kmax)
 
-    print_on_rank0(f"[train_em] selector: {selector_module.__class__.__name__} sel_version={sel_version} sel_kmax={sel_kmax}")
+    print_on_rank0(
+        f"[train_em] selector: {selector_module.__class__.__name__} sel_version={sel_version} sel_kmax={sel_kmax}"
+    )
 
     def selection_refresh_fn(
         epoch: int,
@@ -490,8 +509,12 @@ def main(cfg: DictConfig) -> None:
     bootstrap_node = em_node.get("bootstrap", {})
     bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
 
-    bootstrap_overwrite_all = True if force_overwrite_bootstrap else bool(bootstrap_node.get("overwrite_all", True))
-    bootstrap_skip_if_ready = False if bootstrap_overwrite_all else bool(bootstrap_node.get("skip_if_ready", True))
+    bootstrap_overwrite_all = (
+        True if force_overwrite_bootstrap else bool(bootstrap_node.get("overwrite_all", True))
+    )
+    bootstrap_skip_if_ready = (
+        False if bootstrap_overwrite_all else bool(bootstrap_node.get("skip_if_ready", True))
+    )
     bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
     bootstrap_skip_instance = bool(bootstrap_node.get("skip_instance_cache", False))
 
@@ -527,11 +550,23 @@ def main(cfg: DictConfig) -> None:
         # DDP: only rank 0 builds caches
         if is_rank0():
             if need_cheap:
-                cheap_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready)
+                cheap_refresh_fn(
+                    bootstrap_epoch0,
+                    overwrite=bootstrap_overwrite_all,
+                    skip_if_ready=bootstrap_skip_if_ready,
+                )
             if need_sel:
-                selection_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready)
+                selection_refresh_fn(
+                    bootstrap_epoch0,
+                    overwrite=bootstrap_overwrite_all,
+                    skip_if_ready=bootstrap_skip_if_ready,
+                )
             if need_inst:
-                instance_refresh_fn(bootstrap_epoch0, overwrite=bootstrap_overwrite_all, skip_if_ready=bootstrap_skip_if_ready)
+                instance_refresh_fn(
+                    bootstrap_epoch0,
+                    overwrite=bootstrap_overwrite_all,
+                    skip_if_ready=bootstrap_skip_if_ready,
+                )
 
         # DDP: all ranks wait for cache building to complete
         barrier()
@@ -553,7 +588,9 @@ def main(cfg: DictConfig) -> None:
 
     val_meta = read_split_meta(split_val)
     if val_meta is None:
-        print_on_rank0(f"[train_em] WARN val meta not found for split={split_val}, fallback to train meta.")
+        print_on_rank0(
+            f"[train_em] WARN val meta not found for split={split_val}, fallback to train meta."
+        )
         sel_meta_val, cheap_meta_val = sel_meta_train, cheap_meta_train
     else:
         sel_meta_val, cheap_meta_val = val_meta
@@ -635,9 +672,13 @@ def main(cfg: DictConfig) -> None:
         if hasattr(tp, "dataset_hash_key"):
             tp.dataset_hash_key = str(meta["dataset_hash_key"])
         if hasattr(tp, "sel_version_used"):
-            tp.sel_version_used = str(meta.get("sel_version", getattr(tp, "sel_version_used", "sel_v0")))
+            tp.sel_version_used = str(
+                meta.get("sel_version", getattr(tp, "sel_version_used", "sel_v0"))
+            )
         if hasattr(tp, "cheap_version_used"):
-            tp.cheap_version_used = str(meta.get("cheap_version_used", getattr(tp, "cheap_version_used", "cheap_v0")))
+            tp.cheap_version_used = str(
+                meta.get("cheap_version_used", getattr(tp, "cheap_version_used", "cheap_v0"))
+            )
 
     def _notify_token_providers_cache_refreshed(plan: Dict[str, bool]) -> None:
         for tp in [token_provider_train, token_provider_val]:
@@ -691,7 +732,9 @@ def main(cfg: DictConfig) -> None:
                 d = json.load(f)
             got = int(d.get("total_cts", -1))
             if got != expected:
-                raise RuntimeError(f"[train_em] total_cts mismatch for split={split_name}: dataset={expected} vs cheap_meta={got}")
+                raise RuntimeError(
+                    f"[train_em] total_cts mismatch for split={split_name}: dataset={expected} vs cheap_meta={got}"
+                )
 
     _assert_total_cts_matches_cheap(split_train, total_cts_train)
     _assert_total_cts_matches_cheap(split_val, total_cts_val)
@@ -712,7 +755,9 @@ def main(cfg: DictConfig) -> None:
     )
 
     sel_version_train = str(sel_meta_train.get("sel_version", "sel_v0"))
-    cheap_version_used_train = str(sel_meta_train.get("cheap_version_used", cheap_meta_train.get("cheap_version", "cheap_v0")))
+    cheap_version_used_train = str(
+        sel_meta_train.get("cheap_version_used", cheap_meta_train.get("cheap_version", "cheap_v0"))
+    )
     sel_version_val = str(sel_meta_val.get("sel_version", sel_version_train))
     cheap_version_used_val = str(sel_meta_val.get("cheap_version_used", cheap_version_used_train))
 
@@ -766,7 +811,9 @@ def main(cfg: DictConfig) -> None:
         ds = _get_cts_ds(split)
         total_cts_local = int(len(ds))
         sel_version_used = str(sel_meta.get("sel_version", sel_version_train))
-        cheap_version_used = str(sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version)))
+        cheap_version_used = str(
+            sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version))
+        )
 
         return TokenProvider(
             cfg=token_provider_cfg,
@@ -908,11 +955,13 @@ def main(cfg: DictConfig) -> None:
         # Decide instance-update epoch
         do_inst_epoch = False
         if inst_every > 0 and epoch >= warmup_epochs:
-            do_inst_epoch = (((epoch - warmup_epochs) % inst_every) == 0)
+            do_inst_epoch = ((epoch - warmup_epochs) % inst_every) == 0
 
         trainer.set_instance_trainable(do_inst_epoch)
         if do_inst_epoch:
-            print_on_rank0(f"[TrainEM][epoch={epoch}] Instance-update epoch: UNFREEZE instance_model.")
+            print_on_rank0(
+                f"[TrainEM][epoch={epoch}] Instance-update epoch: UNFREEZE instance_model."
+            )
         else:
             print_on_rank0(f"[TrainEM][epoch={epoch}] Agg-only epoch: FREEZE instance_model.")
 
@@ -920,7 +969,9 @@ def main(cfg: DictConfig) -> None:
         if do_inst_epoch:
             trainer.set_train_plan_override({"train_instance": True, "use_instance_cache": False})
         else:
-            trainer.set_train_plan_override({"train_instance": False, "use_instance_cache": train_use_inst_cache_default})
+            trainer.set_train_plan_override(
+                {"train_instance": False, "use_instance_cache": train_use_inst_cache_default}
+            )
 
         # E-step + rebuild train loader
         new_loader = ctrl.maybe_refresh_and_rebuild(epoch=epoch)
@@ -950,11 +1001,20 @@ def main(cfg: DictConfig) -> None:
         if (split_val != split_train) and val_use_inst_cache_default:
             post_update_splits.append(split_val)
 
-        if do_inst_epoch and did_train_inst and refresh_instance_after_update and len(post_update_splits) > 0:
-            print_on_rank0(f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for splits={post_update_splits} after instance update...")
+        if (
+            do_inst_epoch
+            and did_train_inst
+            and refresh_instance_after_update
+            and len(post_update_splits) > 0
+        ):
+            print_on_rank0(
+                f"[TrainEM][epoch={epoch}] Refreshing INSTANCE cache for splits={post_update_splits} after instance update..."
+            )
             # DDP: only rank 0 refreshes caches
             if is_rank0():
-                instance_refresh_fn(epoch, overwrite=True, skip_if_ready=False, splits=post_update_splits)
+                instance_refresh_fn(
+                    epoch, overwrite=True, skip_if_ready=False, splits=post_update_splits
+                )
             barrier()
             _notify_token_providers_cache_refreshed({"refresh_instance_cache": True})
 
@@ -1050,12 +1110,18 @@ def main(cfg: DictConfig) -> None:
 
         def _refresh_em_caches_for_split(split: str, epoch_for_build: int) -> None:
             cheap_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
-            selection_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
-            instance_refresh_fn(epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split])
+            selection_refresh_fn(
+                epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split]
+            )
+            instance_refresh_fn(
+                epoch_for_build, overwrite=True, skip_if_ready=False, splits=[split]
+            )
 
         def run_test_eval_for_current_trainer(tag_prefix: str) -> None:
             for split_idx in test_splits:
-                print_on_rank0(f"[TrainEM][{tag_prefix}] Building test loader for split='{split_idx}'")
+                print_on_rank0(
+                    f"[TrainEM][{tag_prefix}] Building test loader for split='{split_idx}'"
+                )
 
                 _refresh_em_caches_for_split(split_idx, epoch_for_build=int(trainer.state.epoch))
 
@@ -1071,7 +1137,9 @@ def main(cfg: DictConfig) -> None:
                 out_dir_fixed = test_root / "thr0_5"
                 out_dir_fixed.mkdir(parents=True, exist_ok=True)
 
-                print_on_rank0(f"[TrainEM][Test {split_idx}][{tag_prefix}] Eval fixed threshold=0.5")
+                print_on_rank0(
+                    f"[TrainEM][Test {split_idx}][{tag_prefix}] Eval fixed threshold=0.5"
+                )
                 with _swap_token_provider_val(trainer, tp_test):
                     res_fixed = evaluate_with_trainer(
                         trainer=trainer,
@@ -1084,8 +1152,12 @@ def main(cfg: DictConfig) -> None:
                         tag=f"{split_idx}_{tag_prefix}_thr0.5",
                         do_threshold_sweep=False,
                         sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        reduction=run_cfg.get(
+                            "test_reduction", run_cfg.get("eval_reduction", "max")
+                        ),
+                        softmax_temp=float(
+                            run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))
+                        ),
                         topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                     )
 
@@ -1112,8 +1184,14 @@ def main(cfg: DictConfig) -> None:
                             tag=f"{split_idx}_{tag_prefix}_valbest",
                             do_threshold_sweep=False,
                             sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                            reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                            softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                            reduction=run_cfg.get(
+                                "test_reduction", run_cfg.get("eval_reduction", "max")
+                            ),
+                            softmax_temp=float(
+                                run_cfg.get(
+                                    "test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0)
+                                )
+                            ),
                             topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                         )
 
@@ -1134,8 +1212,12 @@ def main(cfg: DictConfig) -> None:
                         tag=f"{split_idx}_{tag_prefix}_sweep",
                         do_threshold_sweep=True,
                         sweep_num_thresholds=int(cfg.eval.sweep_num_thresholds),
-                        reduction=run_cfg.get("test_reduction", run_cfg.get("eval_reduction", "max")),
-                        softmax_temp=float(run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))),
+                        reduction=run_cfg.get(
+                            "test_reduction", run_cfg.get("eval_reduction", "max")
+                        ),
+                        softmax_temp=float(
+                            run_cfg.get("test_softmax_temp", run_cfg.get("eval_softmax_temp", 1.0))
+                        ),
                         topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                     )
 
@@ -1146,7 +1228,9 @@ def main(cfg: DictConfig) -> None:
                 for k, v in iter_scalar_metrics(metrics_fixed):
                     print_on_rank0(f"  {k}: {v:.4f}")
 
-                metrics_valbest = res_valbest.get("metrics", {}) if res_valbest is not None else None
+                metrics_valbest = (
+                    res_valbest.get("metrics", {}) if res_valbest is not None else None
+                )
                 if metrics_valbest is not None:
                     print_on_rank0(
                         f"\n[Test {split_idx}][{tag_prefix}] "
@@ -1166,7 +1250,9 @@ def main(cfg: DictConfig) -> None:
                     print_on_rank0(f"  {k}: {v:.4f}")
 
                 if best_thr_test is not None:
-                    print_on_rank0(f"[Test {split_idx}][{tag_prefix}] Best threshold on test = {float(best_thr_test):.4f}")
+                    print_on_rank0(
+                        f"[Test {split_idx}][{tag_prefix}] Best threshold on test = {float(best_thr_test):.4f}"
+                    )
 
                 if wandb_run is not None:
                     prefix = f"test/{split_idx}/{tag_prefix}"
@@ -1179,7 +1265,9 @@ def main(cfg: DictConfig) -> None:
                         wandb_run.summary[f"{prefix}_sweep/{k}"] = v
                     if best_thr_test is not None:
                         try:
-                            wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(best_thr_test)
+                            wandb_run.summary[f"{prefix}_sweep/best_threshold"] = float(
+                                best_thr_test
+                            )
                         except Exception:
                             pass
 
@@ -1194,12 +1282,15 @@ def main(cfg: DictConfig) -> None:
                 print_on_rank0("[TrainEM] Evaluating on test set with BEST checkpoint...")
                 run_test_eval_for_current_trainer(tag_prefix="best")
             else:
-                print_on_rank0(f"\n[TrainEM] Skipped eval_test_with_best: best checkpoint not found at {best_ckpt_path}")
+                print_on_rank0(
+                    f"\n[TrainEM] Skipped eval_test_with_best: best checkpoint not found at {best_ckpt_path}"
+                )
 
     # wandb finish
     if wandb_run is not None:
         try:
             import wandb
+
             wandb.finish()
         except Exception:
             pass

@@ -46,22 +46,23 @@ cache.py
 """
 
 
-'''
+"""
 block = 逻辑切块（按行分配到不同 worker 的那一块）
 shard = 物理分片（一个 block 里的一个实际 .pt 文件，有限制 BLOCK_SIZE
-'''
-import os
+"""
+import hashlib
 import json
 import math
-import hashlib
+import os
 from multiprocessing import Pool, cpu_count
-from typing import List, Tuple, Any, Dict, Optional, Iterator
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
 
-from .encoding import reverse, extended_seed_alignment, extended_seed_alignment_2, encode_RNA
 from src.config.data_config import DataConfig
+
+from .encoding import encode_RNA, extended_seed_alignment, extended_seed_alignment_2, reverse
 
 # ------------------ 全局常量 ------------------
 
@@ -380,6 +381,7 @@ def process_and_save_block(task) -> Optional[Tuple[List[Dict[str, Any]], int]]:
 
 # ------------------ 主控：并行构建 cache + meta ------------------
 
+
 def iter_rows_for_split(
     data_cfg: DataConfig,
     split_idx: str,
@@ -425,7 +427,7 @@ def iter_rows_for_split(
             # ✅ 这一行属于当前 split，赋一个连续的 set_idx
             yield local_idx, raw_line
             local_idx += 1
-            
+
 
 def build_and_cache_dataset_parallel(
     data_cfg: DataConfig,
@@ -483,7 +485,7 @@ def build_and_cache_dataset_parallel(
     if not filtered_lines_with_indices:
         print(f"No lines to process for split '{split_idx}' in {data_file_path}")
         return []
-    
+
     # 2) 将所有行划分为若干 task
     num_tasks = max(1, num_workers * 4)
     chunk_size = math.ceil(len(filtered_lines_with_indices) / num_tasks)
@@ -519,21 +521,19 @@ def build_and_cache_dataset_parallel(
             desc=f"Building {split_idx} blocks",
         ):
             if result:
-                shards, _ , pair_counts= result
+                shards, _, pair_counts = result
                 block_metadata.extend(shards)
                 for pid, c in pair_counts.items():
                     pair_counts_all[pid] += int(c)
-
 
     # 4) 写入 meta.json
     if block_metadata:
         # 先按 block_idx，再按 shard_idx 排序（严格顺序）
         block_metadata.sort(key=lambda x: (x["block_idx"], x["shard_idx"]))
-        alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")   # ✅ 新增
+        alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")  # ✅ 新增
         hash_key = f"{data_file_path}|{alignment}"
         path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
         # path_hash = hashlib.md5(data_file_path.encode("utf-8")).hexdigest()[:8]
-
 
         # pair counts 新增
         uid = 0
@@ -547,14 +547,14 @@ def build_and_cache_dataset_parallel(
         s = 0
         for i in range(num_pairs):
             s += int(pair_counts_all[i])
-            pair_offsets[i+1] = s
+            pair_offsets[i + 1] = s
 
         if pair_offsets[-1] != total_cts:
             raise RuntimeError(
                 f"PairIndex inconsistent: sum(pair_counts)={pair_offsets[-1]} != total_cts(from blocks)={total_cts}. "
                 f"Check ordering / filtering consistency."
             )
-        
+
         pair_index_obj = {
             "pair_counts": torch.tensor(pair_counts_all, dtype=torch.int32),
             "pair_offsets": torch.tensor(pair_offsets, dtype=torch.int64),
@@ -618,7 +618,7 @@ def get_or_build_blocks(
     """
     os.makedirs(cache_data_path, exist_ok=True)
     data_file_path = str(data_cfg.get_path(split_idx))
-    alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")   # ✅ 新增
+    alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")  # ✅ 新增
     hash_key = f"{data_file_path}|{alignment}"
     path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
     # path_hash = hashlib.md5(data_file_path.encode("utf-8")).hexdigest()[:8]

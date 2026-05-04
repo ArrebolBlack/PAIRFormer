@@ -121,7 +121,7 @@ from Bio.Align import PairwiseAligner
 from Bio.Align.substitution_matrices import Array
 
 # 定义字母表
-alphabet = 'ACGU'
+alphabet = "ACGU"
 
 # 创建一个二维 Array 对象
 score_matrix_2 = Array(alphabet, dims=2, dtype=float)
@@ -129,7 +129,7 @@ score_matrix_2 = Array(alphabet, dims=2, dtype=float)
 # 填充评分矩阵：Watson-Crick 和 wobble 配对得 1 分，其他得 0 分
 for i, c1 in enumerate(alphabet):
     for j, c2 in enumerate(alphabet):
-        if (c1, c2) in [('A', 'U'), ('U', 'A'), ('G', 'C'), ('C', 'G'), ('G', 'U'), ('U', 'G')]:
+        if (c1, c2) in [("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"), ("G", "U"), ("U", "G")]:
             score_matrix[i, j] = 1.0
         else:
             score_matrix[i, j] = 0.0
@@ -178,7 +178,9 @@ def extended_seed_alignment_2(mi_seq: str, cts_r_seq: str, seed_start=1, seed_en
     cts_r_esa_str = ""
     mi_idx = 0
     cts_idx = 0
-    for (mi_start, mi_end), (cts_start, cts_end) in zip(best_alignment.aligned[0], best_alignment.aligned[1]):
+    for (mi_start, mi_end), (cts_start, cts_end) in zip(
+        best_alignment.aligned[0], best_alignment.aligned[1]
+    ):
         # 填充匹配或错配的部分
         for _ in range(mi_start - mi_idx):
             mi_esa_str += "-"
@@ -203,9 +205,7 @@ def extended_seed_alignment_2(mi_seq: str, cts_r_seq: str, seed_start=1, seed_en
 
     # print(f"mi_esa: {mi_esa_str}")  # 调试输出
     # print(f"cts_r_esa: {cts_r_esa_str}")  # 调试输出
-    return mi_esa_str, cts_r_esa_str, best_alignment.score # esa_score = best_alignment.score
-
-
+    return mi_esa_str, cts_r_esa_str, best_alignment.score  # esa_score = best_alignment.score
 
 
 # ------------------ One-hot 编码 ------------------

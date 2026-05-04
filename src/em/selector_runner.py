@@ -37,9 +37,9 @@ class SelectionCacheBuildConfig:
     pair_batch_size: int = 256  # write_selection in batch; 1 => per-pair
     progress_bar: bool = True
 
-    candidate_pool_size: Optional[int] = None   # n_pool, None=disable
-    candidate_pool_mode: str = "topn"           # "topn" or "topn_plus_rand"
-    candidate_pool_topn_ratio: float = 1.0     # "topn" or "topn_plus_rand"
+    candidate_pool_size: Optional[int] = None  # n_pool, None=disable
+    candidate_pool_mode: str = "topn"  # "topn" or "topn_plus_rand"
+    candidate_pool_topn_ratio: float = 1.0  # "topn" or "topn_plus_rand"
     candidate_pool_seed: int = 2020
     candidate_pool_allow_below_kmax: bool = False  # allow n_pool < kmax for Robustness exp
 
@@ -51,7 +51,9 @@ class SelectionCacheBuildConfig:
         if self.splits is None:
             self.splits = ["train", "val"]
         # Sanitize: Hydra may pass string "None" instead of Python None
-        if self.candidate_pool_size is not None and not isinstance(self.candidate_pool_size, (int, float)):
+        if self.candidate_pool_size is not None and not isinstance(
+            self.candidate_pool_size, (int, float)
+        ):
             try:
                 self.candidate_pool_size = int(self.candidate_pool_size)
             except (ValueError, TypeError):
@@ -133,7 +135,6 @@ def _restrict_topn_pool(
     return uids, pos, cheap_logit, cheap_emb
 
 
-
 class SelectionCacheRunner:
     """
     Selector step (Stage5 / E-step component):
@@ -168,12 +169,14 @@ class SelectionCacheRunner:
 
         print(f"[SelectorRunner] dataset_cache_root={self.dataset_cache_root}")
         print(f"[SelectorRunner] em_cache_root={self.em_cache_root}")
-        print(f"[SelectorRunner] splits={cfg.splits} overwrite={cfg.overwrite} skip_if_ready={cfg.skip_if_ready}")
+        print(
+            f"[SelectorRunner] splits={cfg.splits} overwrite={cfg.overwrite} skip_if_ready={cfg.skip_if_ready}"
+        )
         print(f"[SelectorRunner] sel_version={sel_version} kmax={kmax} epoch={cfg.epoch}")
         print(f"[SelectorRunner] selector_cfg={selector.cfg}")
         print(
-        f"[SelectorRunner] candidate_pool_size={cfg.candidate_pool_size} "
-        f"mode={cfg.candidate_pool_mode} topn_ratio={cfg.candidate_pool_topn_ratio} seed={cfg.candidate_pool_seed}"
+            f"[SelectorRunner] candidate_pool_size={cfg.candidate_pool_size} "
+            f"mode={cfg.candidate_pool_mode} topn_ratio={cfg.candidate_pool_topn_ratio} seed={cfg.candidate_pool_seed}"
         )
 
         for split in cfg.splits:
@@ -297,7 +300,12 @@ class SelectionCacheRunner:
                 overwrite=bool(cfg.overwrite),
             )
 
-        if (not cfg.overwrite) and (store.sel_meta is not None) and (store.sel_meta.state == "ready") and cfg.skip_if_ready:
+        if (
+            (not cfg.overwrite)
+            and (store.sel_meta is not None)
+            and (store.sel_meta.state == "ready")
+            and cfg.skip_if_ready
+        ):
             store.assert_version_consistent()
             print(f"[SelectorRunner] SKIP split={split} (already ready).")
             return
@@ -308,7 +316,9 @@ class SelectionCacheRunner:
         shard_size = pair_end - pair_start
 
         if world_size > 1:
-            print(f"[SelectorRunner:{split}] rank={rank}/{world_size} pair_shard=[{pair_start},{pair_end}) ({shard_size}/{num_pairs})")
+            print(
+                f"[SelectorRunner:{split}] rank={rank}/{world_size} pair_shard=[{pair_start},{pair_end}) ({shard_size}/{num_pairs})"
+            )
 
         mode = "train" if split == "train" else "eval"
         bs_pair = max(1, int(cfg.pair_batch_size))
@@ -402,4 +412,6 @@ class SelectionCacheRunner:
             store.assert_version_consistent()
 
         out_dir = Path(self.em_cache_root) / "em_cache" / split / "selection"
-        print(f"[SelectorRunner:{split}] rank={rank} DONE pairs=[{pair_start},{pair_end}) -> {out_dir}")
+        print(
+            f"[SelectorRunner:{split}] rank={rank} DONE pairs=[{pair_start},{pair_end}) -> {out_dir}"
+        )

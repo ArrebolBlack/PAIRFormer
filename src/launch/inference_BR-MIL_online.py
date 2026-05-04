@@ -2,25 +2,26 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
 
+import dataclasses
+import hashlib
+import json
+import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-
-import dataclasses
-
-import json
-import os
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -32,11 +33,11 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from src.config.data_config import DataConfig
-from src.data.dataset import ChunkedCTSDataset
 from src.data.builder import get_or_build_blocks
-from src.models.registry import build_model
-from src.models.extractors import get_embedding_and_logit
-
+from src.data.cache_identity import dataset_identity
+from src.data.dataset import ChunkedCTSDataset
+from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
+from src.em.token_provider import TokenAssembleConfig, _assemble_tokens
 from src.launch.bench_utils import (
     BenchConfig,
     append_records_to_csv,
@@ -47,10 +48,8 @@ from src.launch.bench_utils import (
     select_pair_ids_subset,
     summarize_repeats_to_records,
 )
-
-from src.data.pair_tokens_gpu import build_pair_tokens_on_gpu
-from src.em.token_provider import TokenAssembleConfig, _assemble_tokens
-from src.data.cache_identity import dataset_identity
+from src.models.extractors import get_embedding_and_logit
+from src.models.registry import build_model
 
 
 # -----------------------------------------------------------------------------
@@ -86,7 +85,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
         kk = k
         for pref in ("model.", "module.", "net."):
             if kk.startswith(pref):
-                kk = kk[len(pref):]
+                kk = kk[len(pref) :]
         cleaned[kk] = v
     return cleaned
 
@@ -94,6 +93,7 @@ def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
 def _stable_cfg_hash(obj: Any) -> str:
     s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
+
 
 def _record_to_dict(rec: Any) -> Dict[str, Any]:
     """
@@ -207,12 +207,25 @@ def _load_em_checkpoint_into_models(
     cand_agg = None
     cand_inst = None
 
-    for k in ("agg_state_dict", "agg_model_state_dict", "aggregator_state_dict", "agg_model", "aggregator"):
+    for k in (
+        "agg_state_dict",
+        "agg_model_state_dict",
+        "aggregator_state_dict",
+        "agg_model",
+        "aggregator",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_agg = ckpt[k]
             break
 
-    for k in ("instance_state_dict", "inst_state_dict", "instance_model_state_dict", "instance_model", "inst_model", "cts_model"):
+    for k in (
+        "instance_state_dict",
+        "inst_state_dict",
+        "instance_model_state_dict",
+        "instance_model",
+        "inst_model",
+        "cts_model",
+    ):
         if k in ckpt and isinstance(ckpt[k], dict):
             cand_inst = ckpt[k]
             break
@@ -271,13 +284,21 @@ def _load_em_checkpoint_into_models(
     miss_i, unexp_i = instance_model.load_state_dict(cand_inst, strict=False)
 
     if miss_a:
-        print(f"[inference_BR-MIL_online] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}")
+        print(
+            f"[inference_BR-MIL_online] WARN agg missing keys: {len(miss_a)} (first10): {miss_a[:10]}"
+        )
     if unexp_a:
-        print(f"[inference_BR-MIL_online] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}")
+        print(
+            f"[inference_BR-MIL_online] WARN agg unexpected keys: {len(unexp_a)} (first10): {unexp_a[:10]}"
+        )
     if miss_i:
-        print(f"[inference_BR-MIL_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}")
+        print(
+            f"[inference_BR-MIL_online] WARN inst missing keys: {len(miss_i)} (first10): {miss_i[:10]}"
+        )
     if unexp_i:
-        print(f"[inference_BR-MIL_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}")
+        print(
+            f"[inference_BR-MIL_online] WARN inst unexpected keys: {len(unexp_i)} (first10): {unexp_i[:10]}"
+        )
 
     agg_model.to(device)
     instance_model.to(device)
@@ -292,10 +313,11 @@ def _load_single_model_ckpt(model: torch.nn.Module, ckpt_path: Path, device: tor
     else:
         sd = ckpt
     if not isinstance(sd, dict):
-        raise RuntimeError(f"[inference_BR-MIL_online] ckpt is not a state_dict-like dict: {ckpt_path}")
+        raise RuntimeError(
+            f"[inference_BR-MIL_online] ckpt is not a state_dict-like dict: {ckpt_path}"
+        )
     model.load_state_dict(_strip_prefix_state_dict(sd), strict=False)
     model.to(device).eval()
-
 
 
 # -----------------------------------------------------------------------------
@@ -343,7 +365,9 @@ class PairIndexAdapter:
         pi = self.pair_index
 
         if pair_id < 0 or pair_id >= self._num_pairs:
-            raise IndexError(f"[inference_BR-MIL_online] pair_id out of range: {pair_id} / {self._num_pairs}")
+            raise IndexError(
+                f"[inference_BR-MIL_online] pair_id out of range: {pair_id} / {self._num_pairs}"
+            )
 
         # Case A: ChunkedCTSDataset-like object
         if hasattr(pi, "pair_offsets") and getattr(pi, "pair_offsets") is not None:
@@ -379,11 +403,14 @@ class PairIndexAdapter:
             ends = getattr(pi, "pair_ends")
             return int(starts[pair_id]), int(ends[pair_id])
 
-        raise RuntimeError("Cannot resolve pair slice from PairIndex; please adapt PairIndexAdapter.get_pair_slice().")
+        raise RuntimeError(
+            "Cannot resolve pair slice from PairIndex; please adapt PairIndexAdapter.get_pair_slice()."
+        )
 
     def get_n_full(self, pair_id: int) -> int:
         s, e = self.get_pair_slice(pair_id)
         return int(max(0, e - s))
+
 
 # -----------------------------------------------------------------------------
 # Online BR-MIL forward wrapper (compute-only)
@@ -443,7 +470,6 @@ class BRMILOnlineForward:
         self._prof_sum = defaultdict(float)  # seconds
         self._prof_cnt = defaultdict(int)
 
-
     def reset_profile(self) -> None:
         self._prof_sum.clear()
         self._prof_cnt.clear()
@@ -484,8 +510,6 @@ class BRMILOnlineForward:
             self._prof_sum[name] += float(dt)
             self._prof_cnt[name] += 1
 
-
-
     @staticmethod
     def _normalize_gather_1d(x: Any) -> torch.Tensor:
         t = x if torch.is_tensor(x) else torch.as_tensor(x)
@@ -495,7 +519,9 @@ class BRMILOnlineForward:
             t = t.reshape(-1)
         return t
 
-    def _batch_gather_all(self, uids_all: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _batch_gather_all(
+        self, uids_all: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
           X_flat:  [M,C,L] uint8 CPU
@@ -511,7 +537,9 @@ class BRMILOnlineForward:
                 fields=("X", "pos", "esa_scores"),
             )
             if not isinstance(out, Mapping):
-                raise RuntimeError("[inference_BR-MIL_online] batch_gather_by_uid must return a Mapping")
+                raise RuntimeError(
+                    "[inference_BR-MIL_online] batch_gather_by_uid must return a Mapping"
+                )
 
             X = out["X"]
             pos = out.get("pos", None)
@@ -533,7 +561,9 @@ class BRMILOnlineForward:
             pos = self._normalize_gather_1d(pos).to(dtype=torch.float32, device="cpu").contiguous()
             esa = self._normalize_gather_1d(esa).to(dtype=torch.float32, device="cpu").contiguous()
             if X.dim() != 3:
-                raise RuntimeError(f"[inference_BR-MIL_online] Expect X_flat [M,C,L], got {tuple(X.shape)}")
+                raise RuntimeError(
+                    f"[inference_BR-MIL_online] Expect X_flat [M,C,L], got {tuple(X.shape)}"
+                )
 
             return X, esa, pos
 
@@ -549,14 +579,20 @@ class BRMILOnlineForward:
                 pos = float(sample[4]) if len(sample) > 4 else 0.0
             elif isinstance(sample, Mapping):
                 x = sample.get("X", sample.get("inputs", sample.get("x")))
-                esa = float(sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0))))
+                esa = float(
+                    sample.get("esa_scores", sample.get("esa_score", sample.get("esa", 0.0)))
+                )
                 pos = float(sample.get("pos", 0.0))
             else:
-                raise RuntimeError(f"[inference_BR-MIL_online] unsupported sample type: {type(sample)}")
+                raise RuntimeError(
+                    f"[inference_BR-MIL_online] unsupported sample type: {type(sample)}"
+                )
 
             x = x if torch.is_tensor(x) else torch.as_tensor(x)
             if x.dim() != 2:
-                raise RuntimeError(f"[inference_BR-MIL_online] Expect 2D window tensor, got {tuple(x.shape)}")
+                raise RuntimeError(
+                    f"[inference_BR-MIL_online] Expect 2D window tensor, got {tuple(x.shape)}"
+                )
             x = x.to(dtype=torch.uint8, device="cpu").contiguous()
 
             X_list.append(x)
@@ -599,7 +635,9 @@ class BRMILOnlineForward:
                 esa = esa_flat[s:e].to(self.device, non_blocking=False)
                 pos = pos_flat[s:e].to(self.device, non_blocking=False)
 
-                feat, logit = get_embedding_and_logit(self.modules.cheap_model, X, esa_scores=esa, pos=pos)
+                feat, logit = get_embedding_and_logit(
+                    self.modules.cheap_model, X, esa_scores=esa, pos=pos
+                )
 
                 if feat is None or logit is None:
                     out = None
@@ -609,7 +647,9 @@ class BRMILOnlineForward:
                         out = self.modules.cheap_model(X)
                     if isinstance(out, Mapping):
                         feat = out.get("feat", out.get("emb", out.get("h", None)))
-                        logit = out.get("logit", out.get("logits", out.get("score", out.get("scores", None))))
+                        logit = out.get(
+                            "logit", out.get("logits", out.get("score", out.get("scores", None)))
+                        )
                     elif isinstance(out, (tuple, list)) and len(out) >= 2:
                         a, b = out[0], out[1]
                         if torch.is_tensor(a) and torch.is_tensor(b):
@@ -622,7 +662,9 @@ class BRMILOnlineForward:
                         feat = None
 
                 if logit is None:
-                    raise RuntimeError("[inference_BR-MIL_online] cheap_model produced no logit/score; adapt _cheap_forward_all.")
+                    raise RuntimeError(
+                        "[inference_BR-MIL_online] cheap_model produced no logit/score; adapt _cheap_forward_all."
+                    )
 
                 if logit.dim() == 2 and logit.shape[-1] == 1:
                     logit = logit.squeeze(-1)
@@ -636,8 +678,11 @@ class BRMILOnlineForward:
                         feat = feat.view(feat.shape[0], -1)
                     cheap_embs.append(feat.detach().to(dtype=torch.float32).cpu())
 
-
-        score_cpu = torch.cat(cheap_scores, dim=0) if cheap_scores else torch.empty((0,), dtype=torch.float32)
+        score_cpu = (
+            torch.cat(cheap_scores, dim=0)
+            if cheap_scores
+            else torch.empty((0,), dtype=torch.float32)
+        )
         emb_cpu = torch.cat(cheap_embs, dim=0) if cheap_embs else None
         return score_cpu, emb_cpu
 
@@ -648,10 +693,10 @@ class BRMILOnlineForward:
         starts_uid: List[int],
         ends_uid: List[int],
         offsets_n: List[Tuple[int, int]],
-        cheap_score: torch.Tensor,          # [M] CPU
+        cheap_score: torch.Tensor,  # [M] CPU
         cheap_emb: Optional[torch.Tensor],  # [M,D] CPU
-        pos_flat: torch.Tensor,             # [M] CPU
-        esa_flat: torch.Tensor,             # [M] CPU (这里其实 selector 不用，但保留不影响)
+        pos_flat: torch.Tensor,  # [M] CPU
+        esa_flat: torch.Tensor,  # [M] CPU (这里其实 selector 不用，但保留不影响)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         B = len(pair_ids)
         K = self.K
@@ -673,7 +718,9 @@ class BRMILOnlineForward:
                 uids_list.append(torch.empty((0,), dtype=torch.long))
                 pos_list.append(torch.empty((0,), dtype=torch.float32))
                 logit_list.append(torch.empty((0,), dtype=torch.float32))
-                emb_list.append(None if cheap_emb is None else cheap_emb.new_empty((0, cheap_emb.shape[1])))
+                emb_list.append(
+                    None if cheap_emb is None else cheap_emb.new_empty((0, cheap_emb.shape[1]))
+                )
                 continue
 
             # uids 必须是“数据集 uid 空间”的绝对 uid（你这里 flat 的就是按 uid 顺序拼的）
@@ -708,7 +755,8 @@ class BRMILOnlineForward:
         mask = torch.zeros((B, K), dtype=torch.bool, device="cpu")
 
         for b in range(B):
-            s_uid = int(starts_uid[b]); e_uid = int(ends_uid[b])
+            s_uid = int(starts_uid[b])
+            e_uid = int(ends_uid[b])
             s_seg, e_seg = offsets_n[b]
             if e_seg <= s_seg:
                 continue
@@ -729,21 +777,20 @@ class BRMILOnlineForward:
                     break
 
             if kept:
-                sel_flat_idx[b, :len(kept)] = torch.tensor(kept, dtype=torch.long)
-                mask[b, :len(kept)] = True
+                sel_flat_idx[b, : len(kept)] = torch.tensor(kept, dtype=torch.long)
+                mask[b, : len(kept)] = True
 
         return sel_flat_idx, mask
-
 
     def _build_batch_cpu_from_flat(
         self,
         *,
         pair_ids: List[int],
-        X_flat: torch.Tensor,    # [M,C,L] uint8 CPU
+        X_flat: torch.Tensor,  # [M,C,L] uint8 CPU
         pos_flat: torch.Tensor,  # [M] float32 CPU
         esa_flat: torch.Tensor,  # [M] float32 CPU
         sel_flat_idx: torch.Tensor,  # [B,K] long, -1 padded
-        mask: torch.Tensor,          # [B,K] bool
+        mask: torch.Tensor,  # [B,K] bool
     ) -> Dict[str, Any]:
         B = len(pair_ids)
         K = self.K
@@ -834,7 +881,11 @@ class BRMILOnlineForward:
                 uids_chunks.append(u)
                 offsets_n.append((cur, cur + ln))
                 cur += ln
-            uids_all = torch.cat(uids_chunks, dim=0) if uids_chunks else torch.empty((0,), dtype=torch.long)
+            uids_all = (
+                torch.cat(uids_chunks, dim=0)
+                if uids_chunks
+                else torch.empty((0,), dtype=torch.long)
+            )
 
             if uids_all.numel() == 0:
                 return torch.zeros((), device=self.device)
@@ -973,7 +1024,6 @@ def main(cfg: DictConfig) -> None:
     profile_sections = bool(run_cfg.get("bench_profile_sections", False))
     profile_sync_cuda = bool(run_cfg.get("bench_profile_sync_cuda", False))
 
-
     cheap_chunk_size = int(run_cfg.get("bench_cheap_chunk_size", 8192))
 
     bench_dir = ensure_dir(run_dir / "bench_fig3")
@@ -985,7 +1035,6 @@ def main(cfg: DictConfig) -> None:
         csv_path = Path(os.path.expandvars(os.path.expanduser(str(bench_csv_cfg))))
         if not csv_path.is_absolute():
             csv_path = run_dir / csv_path
-
 
     # cache root for window blocks
     default_cache = cfg.get("paths", {}).get("cache_root", "cache")
@@ -1034,7 +1083,13 @@ def main(cfg: DictConfig) -> None:
     pi = PairIndexAdapter(pair_index_raw)
 
     # subset pair ids (keep stable across K runs)
-    subset_path = Path(str(run_cfg.get("bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json"))))
+    subset_path = Path(
+        str(
+            run_cfg.get(
+                "bench_pair_ids_path", str(bench_dir / f"pair_ids_{split}_{num_pairs_subset}.json")
+            )
+        )
+    )
     if not subset_path.is_absolute():
         subset_path = run_dir / subset_path
 
@@ -1054,7 +1109,6 @@ def main(cfg: DictConfig) -> None:
         out_path=subset_path,
         allow_overwrite=False,
     )
-
 
     # n_full stats
     n_full_list = [pi.get_n_full(pid) for pid in pair_ids_subset]
@@ -1089,27 +1143,35 @@ def main(cfg: DictConfig) -> None:
     if cheap_arch_cfg is None and isinstance(em_node, Mapping):
         cheap_arch_cfg = em_node.get("cheap_model", None)
     if cheap_arch_cfg is None:
-        raise KeyError("[inference_BR-MIL_online] Missing cheap model config: cfg.cheap_model (or cfg.em.cheap_model)")
+        raise KeyError(
+            "[inference_BR-MIL_online] Missing cheap model config: cfg.cheap_model (or cfg.em.cheap_model)"
+        )
 
     cheap_arch = str(cheap_arch_cfg.get("arch", cheap_arch_cfg.get("name")))
     cheap_model = build_model(cheap_arch, cheap_arch_cfg, data_cfg=data_cfg).to(device).eval()
 
     cheap_ckpt = _resolve_path(cfg.get("cheap_ckpt_path", None), orig_cwd)
     if cheap_ckpt is None or (not cheap_ckpt.exists()):
-        raise FileNotFoundError(f"[inference_BR-MIL_online] cheap_ckpt_path not found: {cheap_ckpt}")
+        raise FileNotFoundError(
+            f"[inference_BR-MIL_online] cheap_ckpt_path not found: {cheap_ckpt}"
+        )
     _load_single_model_ckpt(cheap_model, cheap_ckpt, device)
 
     # instance model config
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model")
     if inst_cfg is None:
-        raise KeyError("[inference_BR-MIL_online] missing instance model config: cfg.instance_model / cfg.cts_model")
+        raise KeyError(
+            "[inference_BR-MIL_online] missing instance model config: cfg.instance_model / cfg.cts_model"
+        )
     inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
     instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device).eval()
 
     # aggregator model config
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model")
     if agg_cfg is None:
-        raise KeyError("[inference_BR-MIL_online] missing aggregator model config: cfg.model (or cfg.agg_model)")
+        raise KeyError(
+            "[inference_BR-MIL_online] missing aggregator model config: cfg.model (or cfg.agg_model)"
+        )
     agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
     agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device).eval()
 
@@ -1118,7 +1180,9 @@ def main(cfg: DictConfig) -> None:
     em_ckpt = _resolve_required_ckpt_path(ckpt_path_cfg, run_dir=run_dir, orig_cwd=orig_cwd)
     if not em_ckpt.exists():
         raise FileNotFoundError(f"[inference_BR-MIL_online] EM checkpoint not found: {em_ckpt}")
-    _load_em_checkpoint_into_models(em_ckpt, agg_model=agg_model, instance_model=instance_model, device=device)
+    _load_em_checkpoint_into_models(
+        em_ckpt, agg_model=agg_model, instance_model=instance_model, device=device
+    )
     agg_model.eval()
     instance_model.eval()
 
@@ -1129,7 +1193,9 @@ def main(cfg: DictConfig) -> None:
 
     selector_module = instantiate(sel_mod_node)
     sel_hash = _stable_cfg_hash(OmegaConf.to_container(sel_mod_node, resolve=True))
-    print(f"[inference_BR-MIL_online] selector={selector_module.__class__.__name__} sel_hash={sel_hash}")
+    print(
+        f"[inference_BR-MIL_online] selector={selector_module.__class__.__name__} sel_hash={sel_hash}"
+    )
 
     # assemble cfg
     tp_node = cfg.get("token_provider", None)
@@ -1187,7 +1253,9 @@ def main(cfg: DictConfig) -> None:
             prof = forward_fn.profile_summary_ms(reset=True)
             profile_repeats.append(prof)
             print(f"[inference_BR-MIL_online] profile(ms/call) repeat={r}: {prof}")
-            print(f"[inference_BR-MIL_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}")
+            print(
+                f"[inference_BR-MIL_online] repeat={r} done | peak_vram_gb={float(st.peak_vram_bytes)/(1024**3):.3f}"
+            )
 
     records = summarize_repeats_to_records(
         pipeline="BR-MIL_online",

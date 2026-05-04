@@ -1,9 +1,10 @@
 # src/models/modules/set_transformer.py
 from __future__ import annotations
+
+import math
 from dataclasses import dataclass
 from typing import Optional
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,6 +29,7 @@ class MultiHeadAttention(nn.Module):
     Masks:
       key_padding_mask: [B, Lk] where True=valid, False=pad
     """
+
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
@@ -57,7 +59,7 @@ class MultiHeadAttention(nn.Module):
         kh = self.k_proj(k).view(B, Lk, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,Lk,Dh]
         vh = self.v_proj(v).view(B, Lk, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,Lk,Dh]
 
-        scores = torch.matmul(qh, kh.transpose(-1, -2)) / math.sqrt(self.d_head)     # [B,H,Lq,Lk]
+        scores = torch.matmul(qh, kh.transpose(-1, -2)) / math.sqrt(self.d_head)  # [B,H,Lq,Lk]
 
         if key_padding_mask is not None:
             # key_padding_mask: [B, Lk] True=valid, False=pad
@@ -77,6 +79,7 @@ class MultiHeadAttention(nn.Module):
 
 class RowwiseFF(nn.Module):
     """Row-wise feed-forward (applied independently to each element)."""
+
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0, activation: str = "gelu"):
         super().__init__()
         act = activation.lower()
@@ -102,20 +105,23 @@ class MAB(nn.Module):
       out = LN(H + rFF(H))
     Supports optional query_mask for padding queries.
     """
+
     def __init__(self, cfg: SetTransformerConfig):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.d_model)
         self.ln2 = nn.LayerNorm(cfg.d_model)
         self.attn = MultiHeadAttention(cfg.d_model, cfg.n_heads, dropout=cfg.dropout)
-        self.ff = RowwiseFF(cfg.d_model, cfg.d_ff, dropout=cfg.dropout, activation=cfg.ff_activation)
+        self.ff = RowwiseFF(
+            cfg.d_model, cfg.d_ff, dropout=cfg.dropout, activation=cfg.ff_activation
+        )
         self.drop = nn.Dropout(cfg.dropout)
 
     def forward(
         self,
-        x: torch.Tensor,                           # [B, Lx, D]
-        y: torch.Tensor,                           # [B, Ly, D]
-        key_padding_mask: Optional[torch.Tensor] = None,   # [B, Ly] True=valid
-        query_padding_mask: Optional[torch.Tensor] = None, # [B, Lx] True=valid
+        x: torch.Tensor,  # [B, Lx, D]
+        y: torch.Tensor,  # [B, Ly, D]
+        key_padding_mask: Optional[torch.Tensor] = None,  # [B, Ly] True=valid
+        query_padding_mask: Optional[torch.Tensor] = None,  # [B, Lx] True=valid
     ) -> torch.Tensor:
         # Attention sub-layer
         attn_out = self.attn(x, y, y, key_padding_mask=key_padding_mask)
@@ -132,6 +138,7 @@ class MAB(nn.Module):
 
 class SAB(nn.Module):
     """Set Attention Block: SAB(X)=MAB(X,X). Complexity O(n^2)."""
+
     def __init__(self, cfg: SetTransformerConfig):
         super().__init__()
         self.mab = MAB(cfg)
@@ -148,6 +155,7 @@ class ISAB(nn.Module):
       out = MAB(X, H)
     I are trainable inducing points.
     """
+
     def __init__(self, cfg: SetTransformerConfig, m: int):
         super().__init__()
         self.m = int(m)
@@ -177,6 +185,7 @@ class PMA(nn.Module):
       PMA_k(Z) = MAB(S, rFF(Z)) where S are k trainable seed vectors.
     Output: [B, k, D]
     """
+
     def __init__(self, cfg: SetTransformerConfig, k: int):
         super().__init__()
         self.k = int(k)
@@ -186,12 +195,14 @@ class PMA(nn.Module):
         nn.init.xavier_uniform_(self.seed)
 
         # paper uses rFF(Z) before attention
-        self.pre_ff = RowwiseFF(cfg.d_model, cfg.d_ff, dropout=cfg.dropout, activation=cfg.ff_activation)
+        self.pre_ff = RowwiseFF(
+            cfg.d_model, cfg.d_ff, dropout=cfg.dropout, activation=cfg.ff_activation
+        )
         self.mab = MAB(cfg)
 
     def forward(self, z: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B = z.size(0)
-        S = self.seed.expand(B, -1, -1)     # [B, k, D]
-        z2 = self.pre_ff(z)                 # [B, n, D]
+        S = self.seed.expand(B, -1, -1)  # [B, k, D]
+        z2 = self.pre_ff(z)  # [B, n, D]
         out = self.mab(S, z2, key_padding_mask=mask, query_padding_mask=None)  # [B,k,D]
         return out

@@ -2,51 +2,52 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+
 try:
     mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
 import warnings
+
 from Bio import BiopythonDeprecationWarning
+
 warnings.filterwarnings("ignore", category=BiopythonDeprecationWarning)
 
-import os
-import json
 import csv
-import time
 import hashlib
+import json
+import os
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import hydra
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf
 from hydra.utils import get_original_cwd, instantiate
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, Subset
 
 from src.config.data_config import DataConfig
-from src.data.dataset import ChunkedCTSDataset
-from src.data.pair_dataset_dynamic import DynamicPairDataset
-from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
 from src.data.builder import get_or_build_blocks
-
-from src.models.registry import build_model
-
+from src.data.dataset import ChunkedCTSDataset
+from src.data.pair_batch_builder_cpu import PairBatchBuilderCPU, PairBatchBuilderCPUConfig
+from src.data.pair_dataset_dynamic import DynamicPairDataset
+from src.em.cheap_runner import CheapCacheBuildConfig, CheapCacheRunner
+from src.em.instance_runner import (  # optional, only if you benchmark cached-instance mode
+    run_instance_cache,
+)
+from src.em.selection_runner import run_selection_cache
 from src.em.token_provider import TokenProvider, TokenProviderConfig
 from src.em.update_policy import UpdatePolicy, UpdatePolicyConfig
-
-from src.em.cheap_runner import CheapCacheRunner, CheapCacheBuildConfig
-from src.em.selection_runner import run_selection_cache
-from src.em.instance_runner import run_instance_cache  # optional, only if you benchmark cached-instance mode
-
+from src.models.registry import build_model
 from src.utils import set_seeds
-
 
 # -------------------------
 # Small utilities
 # -------------------------
+
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:
     if p is None:
@@ -155,7 +156,9 @@ def _selection_compatible(
     return True
 
 
-def _make_or_load_pair_subset(out_dir: Path, split: str, n_pairs: int, seed: int, total_pairs: int) -> List[int]:
+def _make_or_load_pair_subset(
+    out_dir: Path, split: str, n_pairs: int, seed: int, total_pairs: int
+) -> List[int]:
     out_p = out_dir / f"bench_pairs_{split}_{n_pairs}_seed{seed}.txt"
     if out_p.exists():
         ids: List[int] = []
@@ -195,7 +198,7 @@ def _bench_loop(
     End-to-end: loader -> token_provider.build_tokens -> agg forward
     Includes ONLINE instance encode if plan.use_instance_cache=False.
     """
-    device_is_cuda = (device.type == "cuda")
+    device_is_cuda = device.type == "cuda"
     if device_is_cuda:
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
@@ -274,8 +277,8 @@ def _bench_loop(
     peak_alloc_gb = 0.0
     peak_reserved_gb = 0.0
     if device_is_cuda:
-        peak_alloc_gb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 3))
-        peak_reserved_gb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 3))
+        peak_alloc_gb = float(torch.cuda.max_memory_allocated(device) / (1024**3))
+        peak_reserved_gb = float(torch.cuda.max_memory_reserved(device) / (1024**3))
 
     return {
         "pairs_per_s": float(total_pairs / elapsed),
@@ -330,7 +333,9 @@ def main(cfg: DictConfig) -> None:
     # - "cached" : read instance cache (requires instance cache ready)
     inst_mode = str(bench.get("instance_mode", "online")).lower().strip()
     if inst_mode not in ("online", "cached"):
-        raise ValueError(f"[bench] bench.instance_mode must be 'online' or 'cached', got: {inst_mode}")
+        raise ValueError(
+            f"[bench] bench.instance_mode must be 'online' or 'cached', got: {inst_mode}"
+        )
 
     # K grid
     k_list = bench.get("k_list", None)
@@ -373,7 +378,9 @@ def main(cfg: DictConfig) -> None:
     # ---- build models: instance + aggregator ----
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
     if inst_cfg is None:
-        raise KeyError("[bench] missing instance model config: cfg.instance_model / cfg.cts_model / cfg.model_instance")
+        raise KeyError(
+            "[bench] missing instance model config: cfg.instance_model / cfg.cts_model / cfg.model_instance"
+        )
     inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
     instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device)
 
@@ -389,19 +396,23 @@ def main(cfg: DictConfig) -> None:
     for k, v in sd.items():
         for pref in ("model.", "module.", "net."):
             if k.startswith(pref):
-                k = k[len(pref):]
+                k = k[len(pref) :]
         cleaned[k] = v
     instance_model.load_state_dict(cleaned, strict=False)
     instance_model.to(device)
 
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
     if agg_cfg is None:
-        raise KeyError("[bench] missing aggregator model config: cfg.model (or cfg.agg_model / cfg.pair_model).")
+        raise KeyError(
+            "[bench] missing aggregator model config: cfg.model (or cfg.agg_model / cfg.pair_model)."
+        )
     agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
     agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device)
 
     # optional: load agg ckpt if provided (recommended)
-    agg_ckpt = _resolve_path(cfg.get("agg_ckpt_path", cfg.get("aggregator_ckpt_path", None)), orig_cwd)
+    agg_ckpt = _resolve_path(
+        cfg.get("agg_ckpt_path", cfg.get("aggregator_ckpt_path", None)), orig_cwd
+    )
     if agg_ckpt is not None and agg_ckpt.exists():
         ckptA = torch.load(str(agg_ckpt), map_location="cpu")
         sdA = ckptA.get("state_dict", ckptA) if isinstance(ckptA, dict) else ckptA
@@ -409,13 +420,15 @@ def main(cfg: DictConfig) -> None:
         for k, v in sdA.items():
             for pref in ("model.", "module.", "net.", "agg_state_dict.", "agg_state_dict"):
                 if k.startswith(pref):
-                    k = k[len(pref):]
+                    k = k[len(pref) :]
             cleanedA[k] = v
         agg_model.load_state_dict(cleanedA, strict=False)
         agg_model.to(device)
         print(f"[bench] Loaded agg ckpt: {agg_ckpt}")
     else:
-        print("[bench] WARN no agg_ckpt_path provided; using randomly initialized aggregator weights.")
+        print(
+            "[bench] WARN no agg_ckpt_path provided; using randomly initialized aggregator weights."
+        )
 
     # ---- selector module (required if we need to build selection cache) ----
     em_node = cfg.get("em", {}) or {}
@@ -474,7 +487,7 @@ def main(cfg: DictConfig) -> None:
             for k, v in sdC.items():
                 for pref in ("model.", "module.", "net."):
                     if k.startswith(pref):
-                        k = k[len(pref):]
+                        k = k[len(pref) :]
                 cleanedC[k] = v
             cheap_model.load_state_dict(cleanedC, strict=False)
             cheap_model.to(device)
@@ -487,13 +500,22 @@ def main(cfg: DictConfig) -> None:
     skip_if_ready = bool(bootstrap.get("skip_if_ready", (not overwrite_all)))
 
     # If benchmark uses cached instance, we may need instance cache too
-    need_inst_cache = (inst_mode == "cached")
+    need_inst_cache = inst_mode == "cached"
 
     if bootstrap_enabled:
-        need_cheap = overwrite_all or (not _stage_compatible(em_cache_root, bench_split, "cheap", cts_ds))
-        need_sel = overwrite_all or (not _selection_compatible(
-            em_cache_root, bench_split, cts_ds, sel_version=sel_version, cheap_version=cheap_version, min_kmax=maxK
-        ))
+        need_cheap = overwrite_all or (
+            not _stage_compatible(em_cache_root, bench_split, "cheap", cts_ds)
+        )
+        need_sel = overwrite_all or (
+            not _selection_compatible(
+                em_cache_root,
+                bench_split,
+                cts_ds,
+                sel_version=sel_version,
+                cheap_version=cheap_version,
+                min_kmax=maxK,
+            )
+        )
 
         need_inst = False
         if need_inst_cache:
@@ -600,17 +622,34 @@ def main(cfg: DictConfig) -> None:
 
     # After bootstrap, hard-check required metas
     if not _stage_compatible(em_cache_root, bench_split, "cheap", cts_ds):
-        raise FileNotFoundError(f"[bench] cheap cache not ready for split={bench_split} under {em_cache_root}")
-    if not _selection_compatible(em_cache_root, bench_split, cts_ds, sel_version=sel_version, cheap_version=cheap_version, min_kmax=maxK):
-        raise FileNotFoundError(f"[bench] selection cache not ready/matched for split={bench_split} under {em_cache_root}")
+        raise FileNotFoundError(
+            f"[bench] cheap cache not ready for split={bench_split} under {em_cache_root}"
+        )
+    if not _selection_compatible(
+        em_cache_root,
+        bench_split,
+        cts_ds,
+        sel_version=sel_version,
+        cheap_version=cheap_version,
+        min_kmax=maxK,
+    ):
+        raise FileNotFoundError(
+            f"[bench] selection cache not ready/matched for split={bench_split} under {em_cache_root}"
+        )
 
-    if inst_mode == "cached" and (not _stage_compatible(em_cache_root, bench_split, "instance", cts_ds)):
-        raise FileNotFoundError(f"[bench] instance cache not ready for split={bench_split} under {em_cache_root}")
+    if inst_mode == "cached" and (
+        not _stage_compatible(em_cache_root, bench_split, "instance", cts_ds)
+    ):
+        raise FileNotFoundError(
+            f"[bench] instance cache not ready for split={bench_split} under {em_cache_root}"
+        )
 
     # ---- build TokenProvider (split-specific) ----
     tp_cfg_node = cfg.get("token_provider", cfg.get("em", {}).get("token_provider", None))
     if tp_cfg_node is None:
-        raise KeyError("[bench] missing token_provider config. Expected cfg.token_provider or cfg.em.token_provider")
+        raise KeyError(
+            "[bench] missing token_provider config. Expected cfg.token_provider or cfg.em.token_provider"
+        )
 
     # Minimal policy for benchmark (we override plan anyway)
     policy_cfg = UpdatePolicyConfig(
@@ -632,7 +671,9 @@ def main(cfg: DictConfig) -> None:
     cheap_meta = _load_json(_meta_path(em_cache_root, bench_split, "cheap"))
 
     sel_version_used = str(sel_meta.get("sel_version", sel_version))
-    cheap_version_used = str(sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version)))
+    cheap_version_used = str(
+        sel_meta.get("cheap_version_used", cheap_meta.get("cheap_version", cheap_version))
+    )
 
     inst_emb_dim = int(em_node.get("inst_emb_dim", 384))
     inst_version = str(em_node.get("inst_version", "inst_v0"))
@@ -655,7 +696,9 @@ def main(cfg: DictConfig) -> None:
     )
 
     # ---- build stable pair subset ----
-    pair_ids = _make_or_load_pair_subset(eval_dir, bench_split, bench_pairs, bench_seed, total_pairs=int(len(pair_ds_full)))
+    pair_ids = _make_or_load_pair_subset(
+        eval_dir, bench_split, bench_pairs, bench_seed, total_pairs=int(len(pair_ds_full))
+    )
     pair_ds = Subset(pair_ds_full, pair_ids)
 
     # ---- plan for benchmark ----
@@ -687,9 +730,13 @@ def main(cfg: DictConfig) -> None:
 
     print("\n" + "=" * 90)
     print("[bench] Figure3 Compute vs K")
-    print(f"[bench] split={bench_split} instance_mode={inst_mode} pairs={len(pair_ids)} repeats={repeats}")
+    print(
+        f"[bench] split={bench_split} instance_mode={inst_mode} pairs={len(pair_ids)} repeats={repeats}"
+    )
     print(f"[bench] K grid={k_list}")
-    print(f"[bench] loader: batch_size={bench_batch_size} num_workers={bench_num_workers} drop_last={drop_last}")
+    print(
+        f"[bench] loader: batch_size={bench_batch_size} num_workers={bench_num_workers} drop_last={drop_last}"
+    )
     print(f"[bench] device={device} amp={amp}")
     print(f"[bench] output_csv={out_csv}")
     print("=" * 90 + "\n")
@@ -780,8 +827,11 @@ def main(cfg: DictConfig) -> None:
     # optional summary
     try:
         import pandas as pd
+
         df = pd.DataFrame(rows)
-        agg = df.groupby("K")[["pairs_per_s", "peak_alloc_gb", "peak_reserved_gb"]].agg(["mean", "std"])
+        agg = df.groupby("K")[["pairs_per_s", "peak_alloc_gb", "peak_reserved_gb"]].agg(
+            ["mean", "std"]
+        )
         print("\n[bench] Summary (mean±std):")
         print(agg)
     except Exception:

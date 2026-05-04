@@ -40,7 +40,9 @@ def _forward_logits(model, x: torch.Tensor) -> torch.Tensor:
     return logits.view(-1)
 
 
-def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False):
+def _make_loader(
+    root: str, split: str, batch_size: int, num_workers: int, max_samples=None, shuffle=False
+):
     ds = WindowShardDataset(root, split=split, include_ignore=False, max_samples=max_samples)
     use_chunk_aware = True
     if use_chunk_aware:
@@ -72,7 +74,9 @@ def _make_loader(root: str, split: str, batch_size: int, num_workers: int, max_s
     return ds, ld
 
 
-def _aggregate_pair_logits(pair_np: np.ndarray, logits_np: np.ndarray, num_pairs: int) -> np.ndarray:
+def _aggregate_pair_logits(
+    pair_np: np.ndarray, logits_np: np.ndarray, num_pairs: int
+) -> np.ndarray:
     """Vectorized pair-level logit aggregation via max-pooling."""
     pair_logits = np.full((num_pairs,), -1e9, dtype=np.float32)
     valid = (pair_np >= 0) & (pair_np < num_pairs)
@@ -96,7 +100,9 @@ def _build_lr_scheduler(optimizer, train_cfg, num_epochs):
     if sched_name == "cosine":
         t_max = int(train_cfg.get("scheduler_t_max", num_epochs))
         eta_min = float(train_cfg.get("scheduler_eta_min", 1e-6))
-        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
+        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=t_max, eta_min=eta_min
+        )
     elif sched_name == "step":
         step_size = int(train_cfg.get("scheduler_step_size", 10))
         gamma = float(train_cfg.get("scheduler_gamma", 0.1))
@@ -127,7 +133,9 @@ def _build_lr_scheduler(optimizer, train_cfg, num_epochs):
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     set_seeds(int(cfg.get("seed", 2020)))
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
     run_dir = Path.cwd()
     ckpt_dir = _resolve_ckpt_dir(run_dir, cfg)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -140,12 +148,20 @@ def main(cfg: DictConfig) -> None:
     max_train = cfg.scalable.get("max_train_samples", None)
     max_val = cfg.scalable.get("max_val_samples", None)
 
-    train_ds, train_loader = _make_loader(cache_root, "train", batch_size, num_workers, max_train, shuffle=True)
-    val_ds, val_loader = _make_loader(cache_root, "val", batch_size, num_workers, max_val, shuffle=False)
+    train_ds, train_loader = _make_loader(
+        cache_root, "train", batch_size, num_workers, max_train, shuffle=True
+    )
+    val_ds, val_loader = _make_loader(
+        cache_root, "val", batch_size, num_workers, max_val, shuffle=False
+    )
     val_pair_labels = _pair_labels(data_cfg, "val")
-    print(f"[train_targetnet_shard] train_samples={len(train_ds)} val_samples={len(val_ds)} batch_size={batch_size}")
+    print(
+        f"[train_targetnet_shard] train_samples={len(train_ds)} val_samples={len(val_ds)} batch_size={batch_size}"
+    )
 
-    model = build_model(str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg).to(device)
+    model = build_model(
+        str(cfg.model.get("arch", cfg.model.get("name"))), cfg.model, data_cfg=data_cfg
+    ).to(device)
     train_cfg = cfg.train
     criterion = BinaryClassificationLoss(train_cfg=train_cfg)
     lr = float(train_cfg.get("lr", 5e-3))
@@ -173,7 +189,9 @@ def main(cfg: DictConfig) -> None:
     val_interval = int(cfg.run.get("val_interval", 1))
     scheduler = _build_lr_scheduler(optimizer, train_cfg, num_epochs)
     if scheduler is not None:
-        print(f"[train_targetnet_shard] lr={lr}, scheduler={train_cfg.get('scheduler')}, warmup={train_cfg.get('warmup_epochs', 0)}")
+        print(
+            f"[train_targetnet_shard] lr={lr}, scheduler={train_cfg.get('scheduler')}, warmup={train_cfg.get('warmup_epochs', 0)}"
+        )
     print(f"[train_targetnet_shard] val_interval={val_interval}")
 
     for epoch in range(num_epochs):
@@ -206,9 +224,17 @@ def main(cfg: DictConfig) -> None:
                 scheduler.step()
 
         # Always save last.pt
-        torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric}, ckpt_dir / "last.pt")
+        torch.save(
+            {"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric},
+            ckpt_dir / "last.pt",
+        )
 
-        do_val = (val_interval <= 1) or ((epoch + 1) % val_interval == 0) or (epoch == 0) or (epoch == num_epochs - 1)
+        do_val = (
+            (val_interval <= 1)
+            or ((epoch + 1) % val_interval == 0)
+            or (epoch == 0)
+            or (epoch == num_epochs - 1)
+        )
         if not do_val:
             current_lr = optimizer.param_groups[0]["lr"]
             print(
@@ -217,6 +243,7 @@ def main(cfg: DictConfig) -> None:
             )
             if wandb_run is not None:
                 import wandb  # type: ignore
+
                 wandb.log({"epoch": epoch + 1, "train/loss": train_loss / max(1, train_seen)})
             continue
 
@@ -262,7 +289,10 @@ def main(cfg: DictConfig) -> None:
         improved = (current > best_metric) if greater_is_better else (current < best_metric)
         if improved:
             best_metric = current
-            torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric}, ckpt_dir / "best.pt")
+            torch.save(
+                {"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_metric},
+                ckpt_dir / "best.pt",
+            )
 
         # Step plateau scheduler with val metric
         if scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
@@ -277,6 +307,7 @@ def main(cfg: DictConfig) -> None:
         )
         if wandb_run is not None:
             import wandb  # type: ignore
+
             log_dict = {"epoch": epoch + 1, "train/loss": train_loss / max(1, train_seen)}
             for k, v in metrics.items():
                 try:
@@ -286,7 +317,9 @@ def main(cfg: DictConfig) -> None:
             wandb.log(log_dict)
 
     if bool(cfg.run.get("eval_test_after_train", False)):
-        test_ds, test_loader = _make_loader(cache_root, "test", batch_size, num_workers, None, shuffle=False)
+        test_ds, test_loader = _make_loader(
+            cache_root, "test", batch_size, num_workers, None, shuffle=False
+        )
         test_pair_labels = _pair_labels(data_cfg, "test")
         model.eval()
         all_logits: List[torch.Tensor] = []
@@ -316,11 +349,19 @@ def main(cfg: DictConfig) -> None:
             )
             if wandb_run is not None:
                 import wandb  # type: ignore
-                wandb.log({f"test/{k}": float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))})
+
+                wandb.log(
+                    {
+                        f"test/{k}": float(v)
+                        for k, v in test_metrics.items()
+                        if isinstance(v, (int, float))
+                    }
+                )
 
     if wandb_run is not None:
         try:
             import wandb  # type: ignore
+
             wandb.finish()
         except Exception:
             pass

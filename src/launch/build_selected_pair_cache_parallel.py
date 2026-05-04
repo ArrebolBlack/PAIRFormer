@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import hydra
 import torch
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
-from pathlib import Path
 
 from src.config.data_config import DataConfig
 from src.data.selected_pair_cache import SelectedPairCacheWriter
 from src.data.stream_pair_dataset import StreamPairDataset
 from src.em.cheap_runner import load_ckpt_into_model
 from src.models.registry import build_model
-from src.precompute.pair_stream_builder_parallel import PairStreamBuilderParallel, PairStreamParallelBuildConfig
+from src.precompute.pair_stream_builder_parallel import (
+    PairStreamBuilderParallel,
+    PairStreamParallelBuildConfig,
+)
 from src.selectors.selector_module import SelectorModule
 from src.selectors.st_selector import STSelectorConfig
 from src.selectors.stream_st_selector import StreamSTSelector, StreamSTSelectorConfig
@@ -23,6 +27,7 @@ def _build_stream_selector_factory(cfg: DictConfig):
     kmax = int(cfg.run.kmax)
 
     if selector_name == "topk":
+
         def _factory():
             return StreamTopKSelector(
                 StreamTopKSelectorConfig(
@@ -31,9 +36,11 @@ def _build_stream_selector_factory(cfg: DictConfig):
                     keep_cheap_emb=False,
                 )
             )
+
         return _factory
 
     if selector_name == "stselector":
+
         def _factory():
             st_cfg = STSelectorConfig(kmax=kmax, k1_ratio=float(cfg.scalable.selector.k1_ratio))
             selector_module = SelectorModule(st_cfg)
@@ -47,12 +54,15 @@ def _build_stream_selector_factory(cfg: DictConfig):
                 ),
                 selector_module=selector_module,
             )
+
         return _factory
 
     raise ValueError(f"Unknown scalable selector: {selector_name}")
 
 
-def _build_cheap_model(cfg: DictConfig, data_cfg: DataConfig, device: torch.device) -> torch.nn.Module:
+def _build_cheap_model(
+    cfg: DictConfig, data_cfg: DataConfig, device: torch.device
+) -> torch.nn.Module:
     cheap_cfg = cfg.get("cheap_model", None)
     if cheap_cfg is None:
         raise KeyError("Missing cfg.cheap_model for scalable selected-pair cache build.")
@@ -79,7 +89,9 @@ def main(cfg: DictConfig) -> None:
         split=split,
         max_pairs=(None if max_pairs is None else int(max_pairs)),
     )
-    device = torch.device("cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and str(cfg.get("device", "cuda")) != "cpu" else "cpu"
+    )
 
     selector_factory = _build_stream_selector_factory(cfg)
 

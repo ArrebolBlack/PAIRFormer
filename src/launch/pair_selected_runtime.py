@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import copy
-import json
 import numpy as np
-from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
 
 from src.data.selected_pair_collate import selected_pair_collate
 from src.data.selected_pair_dataset import SelectedPairDataset
@@ -124,7 +124,11 @@ def run_selected_predict(
 
 def clone_task_with_threshold(task_cfg: Any, threshold: float):
     if task_cfg is None:
-        return {"problem_type": "binary_classification", "from_logits": True, "threshold": float(threshold)}
+        return {
+            "problem_type": "binary_classification",
+            "from_logits": True,
+            "threshold": float(threshold),
+        }
     try:
         cloned = OmegaConf.create(OmegaConf.to_container(task_cfg, resolve=True))
         cloned.threshold = float(threshold)
@@ -199,7 +203,12 @@ def write_eval_strategy_outputs(output_root: Path, metrics_by_strategy: Dict[str
     for k, v in metrics_by_strategy.items():
         if isinstance(v, dict):
             with open(output_root / f"{k}.json", "w") as f:
-                json.dump({kk: float(vv) for kk, vv in v.items() if isinstance(vv, (int, float))}, f, indent=2, sort_keys=True)
+                json.dump(
+                    {kk: float(vv) for kk, vv in v.items() if isinstance(vv, (int, float))},
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
         elif isinstance(v, (int, float)):
             with open(output_root / f"{k}.txt", "w") as f:
                 f.write(f"{float(v):.8f}\n")
@@ -218,6 +227,8 @@ def default_best_checkpoint(ckpt_dir: Path) -> Path:
 def resolve_pair_selected_ckpt_dir(run_dir: Path, cfg: Any) -> Path:
     ckpt_subdir = str(cfg.run.get("ckpt_subdir", "checkpoints"))
     if ckpt_subdir == "checkpoints":
-        exp_name = str(cfg.run.get("checkpoint_experiment_name", cfg.get("experiment_name", "pair_selected")))
+        exp_name = str(
+            cfg.run.get("checkpoint_experiment_name", cfg.get("experiment_name", "pair_selected"))
+        )
         return run_dir / "checkpoints" / exp_name
     return run_dir / ckpt_subdir

@@ -5,7 +5,9 @@ from typing import Any, Dict, List
 import torch
 
 
-def selected_pair_collate(batch: List[Dict[str, Any]], *, truncate_k: int | None = None) -> Dict[str, Any]:
+def selected_pair_collate(
+    batch: List[Dict[str, Any]], *, truncate_k: int | None = None
+) -> Dict[str, Any]:
     pair_id = torch.tensor([int(x["pair_id"]) for x in batch], dtype=torch.long)
     y_pair = torch.tensor([float(x["y_pair"]) for x in batch], dtype=torch.float32)
     sel_len = torch.tensor([int(x["sel_len"]) for x in batch], dtype=torch.long)

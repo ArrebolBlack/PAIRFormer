@@ -1,9 +1,12 @@
 # src/data/pair_batch_contract.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
+
+from typing import Any, Dict, Optional
+
 import torch
 
 MASK_TRUE_IS_VALID = True  # 约定：mask=True 表示 valid，False 表示 pad
+
 
 def validate_pair_batch(
     batch: Dict[str, Any],

@@ -17,9 +17,9 @@ class StreamSelectorInput:
 
 @dataclass
 class StreamSelectorOutput:
-    X: torch.Tensor          # [K,C,L] uint8/float
-    esa: torch.Tensor        # [K]
-    pos: torch.Tensor        # [K]
+    X: torch.Tensor  # [K,C,L] uint8/float
+    esa: torch.Tensor  # [K]
+    pos: torch.Tensor  # [K]
     sel_len: int
     cheap_logit: Optional[torch.Tensor] = None
     cheap_emb: Optional[torch.Tensor] = None
@@ -43,14 +43,11 @@ class StreamSelector(Protocol):
     In both cases, the selector scope is only the current pair.
     """
 
-    def reset(self, *, pair_id: int) -> None:
-        ...
+    def reset(self, *, pair_id: int) -> None: ...
 
-    def add(self, item: StreamSelectorInput) -> None:
-        ...
+    def add(self, item: StreamSelectorInput) -> None: ...
 
-    def finalize(self) -> StreamSelectorOutput:
-        ...
+    def finalize(self) -> StreamSelectorOutput: ...
 
 
 @dataclass

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
-import time
 
 import torch
 
@@ -110,8 +110,8 @@ class PairStreamBuilder:
 
         self.cache_writer.set_ready()
         total_dt = time.time() - t0
-        avg_candidates = (total_candidates / max(1, num_pairs))
-        avg_selected = (total_selected / max(1, num_pairs))
+        avg_candidates = total_candidates / max(1, num_pairs)
+        avg_selected = total_selected / max(1, num_pairs)
         print(
             "[PairStreamBuilder] DONE "
             f"pairs={num_pairs} total_candidates={total_candidates} total_selected={total_selected} "
