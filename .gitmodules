@@ -1,3 +1,6 @@
 [submodule "external/Mimosa"]
 	path = external/Mimosa
 	url = https://github.com/biyueeee/Mimosa.git
+[submodule "external/TargetNet"]
+	path = external/TargetNet
+	url = https://github.com/seonwoo-min/TargetNet.git

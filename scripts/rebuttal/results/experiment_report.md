@@ -18,20 +18,21 @@ PAIR-Former 在所有指标上显著优于所有基线方法。相比最近发�
 
 ## 2. 全面对比表 (miRAW 10-fold, thr=0.5)
 
-| Metric | Mimosa | MaxPool (TN-Opt) | PAIR-Former (tuned) | PF vs MaxPool | PF vs Mimosa |
-|--------|--------|-------------------|---------------------|---------------|--------------|
-| **PR-AUC** | 0.740±0.028 | 0.808±0.023 | **0.869±0.031** | **+7.5%** | **+17.4%** |
-| **F1@0.5** | 0.788±0.017 | 0.798±0.017 | **0.840±0.022** | **+5.3%** | **+6.6%** |
-| **ROC-AUC** | 0.810±0.025 | 0.839±0.021 | **0.898±0.024** | **+7.0%** | **+10.9%** |
-| **Accuracy** | 0.742±0.024 | 0.752±0.024 | **0.831±0.026** | **+10.5%** | **+12.0%** |
-| **Precision** | 0.675±0.024 | 0.673±0.021 | — | — | — |
-| **Recall** | 0.954±0.027 | 0.982±0.009 | — | — | — |
-| **Specificity** | 0.527±0.047 | 0.522±0.041 | — | — | — |
-| **NPV** | 0.925±0.034 | 0.965±0.017 | — | — | — |
+| Metric | TargetNet (official) | Mimosa | MaxPool (TN-Opt) | PAIR-Former | PF vs TN | PF vs Mimosa |
+|--------|---------------------|--------|-------------------|-------------|----------|--------------|
+| **PR-AUC** | 0.773±0.026 | 0.740±0.028 | 0.808±0.023 | **0.869±0.031** | **+12.4%** | **+17.4%** |
+| **F1@0.5** | 0.779±0.018 | 0.788±0.017 | 0.798±0.017 | **0.840±0.022** | **+7.8%** | **+6.6%** |
+| **ROC-AUC** | 0.803±0.022 | 0.810±0.025 | 0.839±0.021 | **0.898±0.024** | **+11.8%** | **+10.9%** |
+| **Accuracy** | 0.730±0.021 | 0.742±0.024 | 0.752±0.024 | **0.831±0.026** | **+13.8%** | **+12.0%** |
+| **Precision** | 0.660±0.017 | 0.675±0.024 | 0.673±0.021 | — | — | — |
+| **Recall** | 0.951±0.027 | 0.954±0.027 | 0.982±0.009 | — | — | — |
+| **Specificity** | 0.510±0.031 | 0.527±0.047 | 0.522±0.041 | — | — | — |
+| **NPV** | 0.913±0.044 | 0.925±0.034 | 0.965±0.017 | — | — | — |
 
-> **MaxPool (TN-Opt)**: TargetNet_Optimized (dp=0.1) + max pooling 聚合，10-fold 评估。  
-> **Mimosa**: 官方 pre-trained checkpoint (Bi et al., NAR 2024)，gene-level sliding window (step=1, 40-nt), any-positive aggregation，10-fold 评估。  
-> **PAIR-Former**: 最优超参配置 (见第5节)，10-fold 评估。  
+> **TargetNet (official)**: 官方 pre-trained checkpoint (seonwoo-min/TargetNet)，BioPython pairwise2 ESA (≥6) + max pooling 聚合，10-fold 评估。
+> **Mimosa**: 官方 pre-trained checkpoint (Bi et al., NAR 2024)，gene-level sliding window (step=1, 40-nt), any-positive aggregation，10-fold 评估。
+> **MaxPool (TN-Opt)**: TargetNet_Optimized (dp=0.1) + max pooling 聚合，10-fold 评估。
+> **PAIR-Former**: 最优超参配置 (见第5节)，10-fold 评估。
 > 所有模型均在相同 10-fold balanced 80/20 测试集上评估，结果可比较。
 
 ---
@@ -55,7 +56,24 @@ PAIR-Former 在所有指标上显著优于所有基线方法。相比最近发�
 | **Mean** | **0.840** | **0.898** | **0.869** | **0.831** | — |
 | **Std** | **0.022** | **0.024** | **0.031** | **0.026** | — |
 
-### 3.2 MaxPool (TN-Opt dp=0.1, 10-fold)
+### 3.2 TargetNet (Official, pre-trained, 10-fold)
+
+| Fold | PR-AUC | F1 | Acc | Prec | Rec | Spec | NPV | ROC-AUC | CM (TP/FP/FN/TN) |
+|------|--------|------|------|------|------|------|------|---------|-------------------|
+| 0 | 0.8054 | 0.7774 | 0.7294 | 0.6603 | 0.9450 | 0.5138 | 0.9032 | 0.8216 | 103/53/6/56 |
+| 1 | 0.7927 | 0.8046 | 0.7661 | 0.6908 | 0.9633 | 0.5688 | 0.9394 | 0.8348 | 105/47/4/62 |
+| 2 | 0.7439 | 0.7529 | 0.7018 | 0.6429 | 0.9083 | 0.4954 | 0.8438 | 0.7636 | 99/55/10/54 |
+| 3 | 0.7480 | 0.7704 | 0.7156 | 0.6460 | 0.9541 | 0.4771 | 0.9123 | 0.7870 | 104/57/5/52 |
+| 4 | 0.7285 | 0.7839 | 0.7294 | 0.6524 | 0.9817 | 0.4771 | 0.9630 | 0.7687 | 107/57/2/52 |
+| 5 | 0.7897 | 0.7833 | 0.7385 | 0.6688 | 0.9450 | 0.5321 | 0.9062 | 0.8145 | 103/51/6/58 |
+| 6 | 0.7773 | 0.7969 | 0.7569 | 0.6842 | 0.9541 | 0.5596 | 0.9242 | 0.8105 | 104/48/5/61 |
+| 7 | 0.7714 | 0.7452 | 0.6927 | 0.6364 | 0.8991 | 0.4862 | 0.8281 | 0.8027 | 98/56/11/53 |
+| 8 | 0.7643 | 0.7852 | 0.7339 | 0.6584 | 0.9725 | 0.4954 | 0.9474 | 0.8031 | 106/55/3/54 |
+| 9 | 0.8103 | 0.7897 | 0.7385 | 0.6605 | 0.9817 | 0.4954 | 0.9643 | 0.8245 | 107/55/2/54 |
+| **Mean** | **0.773** | **0.779** | **0.730** | **0.660** | **0.951** | **0.510** | **0.913** | **0.803** | |
+| **Std** | **0.026** | **0.018** | **0.021** | **0.017** | **0.027** | **0.031** | **0.044** | **0.022** | |
+
+### 3.3 MaxPool (TN-Opt dp=0.1, 10-fold)
 
 | Fold | PR-AUC | F1 | Acc | Prec | Rec | Spec | NPV | ROC-AUC |
 |------|--------|------|------|------|------|------|------|---------|
@@ -72,7 +90,7 @@ PAIR-Former 在所有指标上显著优于所有基线方法。相比最近发�
 | **Mean** | **0.808** | **0.798** | **0.752** | **0.673** | **0.982** | **0.522** | **0.965** | **0.839** |
 | **Std** | **0.023** | **0.017** | **0.024** | **0.021** | **0.009** | **0.041** | **0.017** | **0.021** |
 
-### 3.3 PAIR-Former (基线配置, 调参前)
+### 3.4 PAIR-Former (基线配置, 调参前)
 
 | Fold | F1 | ROC-AUC |
 |------|--------|---------|
@@ -88,7 +106,7 @@ PAIR-Former 在所有指标上显著优于所有基线方法。相比最近发�
 | 9 | 0.8093 | 0.8960 |
 | **Mean** | **0.815±0.029** | **0.881±0.018** |
 
-### 3.3 Mimosa (Bi et al., NAR 2024, pre-trained)
+### 3.5 Mimosa (Bi et al., NAR 2024, pre-trained)
 
 | Fold | PR-AUC | F1 | Acc | Prec | Rec | Spec | NPV | ROC-AUC | CM (TP/FP/FN/TN) |
 |------|--------|------|------|------|------|------|------|---------|-------------------|
@@ -181,17 +199,18 @@ seed: 2020
 
 | Model | Type | F1 | PR-AUC | ROC-AUC | 说明 |
 |-------|------|-----|--------|---------|------|
-| TargetNet (official) | Stage-1 | 0.667 | — | 0.546 | 全预测为正类，数据格式不兼容 |
-| TargetNet (dp-0.5) | Stage-1 | 0.667 | — | 0.546 | 同上 |
-| TargetNet_Optimized (MaxPool) | Stage-1+MaxPool | **0.798±0.017** | 0.808±0.023 | 0.839±0.021 | 有效基线，简单 max 聚合 |
-| **Mimosa** (Bi et al., NAR 2024) | Transformer | **0.788±0.017** | 0.740±0.028 | **0.810±0.025** | 官方 ckpt, any-positive 聚合 |
+| TargetNet (official) | ResNet-CNN | 0.779±0.018 | 0.773±0.026 | 0.803±0.022 | 官方 ckpt, BioPython ESA, max 聚合 |
+| TargetNet_Optimized (MaxPool) | Stage-1+MaxPool | 0.798±0.017 | 0.808±0.023 | 0.839±0.021 | PAIR-Former CTS 编码器, max 聚合 |
+| **Mimosa** (Bi et al., NAR 2024) | Transformer | 0.788±0.017 | 0.740±0.028 | 0.810±0.025 | 官方 ckpt, any-positive 聚合 |
 | **PAIR-Former** (tuned) | BR-MIL | **0.840±0.022** | **0.869±0.031** | **0.898±0.024** | **本方法** |
 
-> 所有模型均在相同 10-fold balanced 80/20 测试集上评估。TargetNet (official/dp-0.5) 仅在单 split 上评估（数据格式不兼容，结果不可靠）。
+> 所有模型均在相同 10-fold balanced 80/20 测试集上评估，均使用官方 pre-trained checkpoint + max/any-positive 聚合。
+
+**TargetNet (official)**: 使用 seonwoo-min/TargetNet 官方代码和 pre-trained checkpoint。BioPython pairwise2 计算 ESA，过滤 ESA<6 的 CTS。高 Rec (0.951) 低 Spec (0.510)。
 
 **Mimosa 分析**: 高 Rec (0.954) 低 Spec (0.527)。"any-positive" 聚合策略（任一窗口预测正 → pair 预测正）导致大量 FP (平均 51.8/fold vs TN 平均 56.3/fold)。
 
-**MaxPool 分析**: 高 Rec (0.982) 低 Spec (0.522)。简单 max 聚合同样偏向正类预测，但 ROC-AUC (0.839) 显著优于 Mimosa (0.810)。PAIR-Former 通过 Set Transformer 选择性聚合将 F1 提升 +5.3%。
+**MaxPool 分析**: 高 Rec (0.982) 低 Spec (0.522)。简单 max 聚合同样偏向正类预测，但 ROC-AUC (0.839) 显著优于 Mimosa (0.810) 和 TargetNet (0.803)。PAIR-Former 通过 Set Transformer 选择性聚合将 F1 提升 +5.3%。
 
 ---
 
@@ -216,6 +235,8 @@ seed: 2020
 | `scripts/rebuttal/results/10fold_balanced_results.md` | 10-fold 基线结果 |
 | `scripts/rebuttal/tuning/eval_baselines_results.md` | 基线评估结果 |
 | `scripts/rebuttal/baselines/eval_mimosa.py` | Mimosa 评估脚本 |
+| `scripts/rebuttal/baselines/eval_targetnet.py` | TargetNet (official) 评估脚本 |
 | `scripts/rebuttal/baselines/plan_mimosa.sh` | Mimosa 执行计划 |
-| `scripts/rebuttal/baselines/results/` | Mimosa per-fold JSON 结果 |
+| `scripts/rebuttal/baselines/plan_targetnet.sh` | TargetNet 执行计划 |
+| `scripts/rebuttal/baselines/results/` | 所有基线 per-fold JSON 结果 |
 | `scripts/rebuttal/tuning/plan_deepTargetPro_full_5090.sh` | deepTargetPro full pipeline 计划 (待执行) |

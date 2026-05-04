@@ -1,0 +1,20 @@
+{
+  "f1": 0.8045977011494253,
+  "roc_auc": 0.8347782173217743,
+  "pr_auc": 0.7926941995384731,
+  "accuracy": 0.7660550458715596,
+  "precision": 0.6907894736842105,
+  "recall": 0.963302752293578,
+  "specificity": 0.5688073394495413,
+  "npv": 0.9393939393939394,
+  "tp": 105,
+  "fp": 47,
+  "fn": 4,
+  "tn": 62,
+  "n_samples": 218,
+  "n_positive": 109,
+  "n_negative": 109,
+  "min_esa": 6,
+  "elapsed_sec": 13.3,
+  "test_file": "data/rebuttal/miRAW_fold1_split/miRAW_Test_nosplit.txt"
+}
