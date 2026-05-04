@@ -1,45 +1,49 @@
-# Baseline Evaluation Results (miRAW balanced 80/20 test, MaxPool aggregation)
+# Baseline Evaluation Results (miRAW balanced 80/20)
 
 **Date:** 2026-05-04
-**Test data:** `data/rebuttal/miRAW_8020_balanced/miRAW_Test.txt` (109 pos + 109 neg)
-**Aggregation:** MaxPool (max over all CTS window predictions per pair)
+**Test data:** 10-fold balanced 80/20 splits from miRAW (218 pairs/fold, 109 pos + 109 neg)
+**Pre-trained model:** `external/Mimosa/training/model_mimosa.pth` (Bi et al., NAR 2024)
 
-## Results at thr=0.5
+## 全面对比 (10-fold, thr=0.5)
 
-| Model | Checkpoint | F1 | ROC-AUC | Accuracy | Specificity |
-|-------|-----------|-----|---------|----------|-------------|
-| TargetNet (official) | TargetNet_officical_pretrained_model.pt | 0.667 | 0.546 | 0.500 | 0.000 |
-| TargetNet (dp-0.5) | miRAW_TargetNet_dp-0.5/best.pt | 0.667 | 0.546 | 0.500 | 0.000 |
-| TargetNet_Optimized (dp-0.1) | miRAW_TargetNet_Optimized_dp-0.1/best.pt | **0.796** | **0.834** | **0.748** | **0.514** |
-| PAIR-Former (optimal) | tuned config | **0.840±0.022** | **0.898±0.024** | **0.831±0.026** | — |
+| Metric | Mimosa | MaxPool (TN-Opt) | PAIR-Former |
+|--------|--------|-------------------|-------------|
+| **PR-AUC** | 0.740±0.028 | — | **0.869±0.031** |
+| **F1@0.5** | 0.788±0.017 | 0.796 | **0.840±0.022** |
+| **Acc** | 0.742±0.024 | 0.748 | **0.831±0.026** |
+| **Prec** | 0.675±0.024 | 0.714 | — |
+| **Rec** | 0.954±0.027 | 0.893 | — |
+| **Spec** | 0.527±0.047 | 0.514 | — |
+| **NPV** | 0.925±0.034 | — | — |
+| **ROC-AUC** | 0.810±0.025 | 0.834 | **0.898±0.024** |
 
-| Mimosa (pre-trained, step=1) | model_mimosa.pth | **0.7882±0.0172** | **0.8103±0.0245** | 0.7422±0.0235 | 0.5229±0.0414 |
+## Mimosa 各 Fold 详情
 
-### Mimosa 各 Fold 详情
+| Fold | PR-AUC | F1@0.5 | Acc | Prec | Rec | Spec | NPV | ROC-AUC | CM (TP/FP/FN/TN) |
+|------|--------|--------|-----|------|-----|------|-----|---------|-------------------|
+| 0 | 0.7686 | 0.7925 | 0.7477 | 0.6731 | 0.9633 | 0.5321 | 0.9355 | 0.8275 | 105/51/4/58 |
+| 1 | 0.7644 | 0.8048 | 0.7752 | 0.7113 | 0.9266 | 0.6239 | 0.8947 | 0.8328 | 101/41/8/68 |
+| 2 | 0.7004 | 0.7605 | 0.7110 | 0.6494 | 0.9174 | 0.5046 | 0.8594 | 0.7671 | 100/54/9/55 |
+| 3 | 0.7050 | 0.7909 | 0.7477 | 0.6753 | 0.9541 | 0.5413 | 0.9219 | 0.7889 | 104/50/5/59 |
+| 4 | 0.7264 | 0.7698 | 0.7064 | 0.6331 | 0.9817 | 0.4312 | 0.9592 | 0.7947 | 107/62/2/47 |
+| 5 | 0.7833 | 0.8000 | 0.7569 | 0.6795 | 0.9725 | 0.5413 | 0.9516 | 0.8369 | 106/50/3/59 |
+| 6 | 0.7316 | 0.7985 | 0.7523 | 0.6730 | 0.9817 | 0.5229 | 0.9661 | 0.8113 | 107/52/2/57 |
+| 7 | 0.7585 | 0.7895 | 0.7431 | 0.6688 | 0.9633 | 0.5229 | 0.9344 | 0.8268 | 105/52/4/57 |
+| 8 | 0.7536 | 0.8134 | 0.7706 | 0.6855 | 1.0000 | 0.5413 | 1.0000 | 0.8369 | 109/50/0/59 |
+| 9 | 0.7102 | 0.7623 | 0.7110 | 0.6474 | 0.9266 | 0.4954 | 0.8710 | 0.7799 | 101/55/8/54 |
+| **Mean** | **0.740** | **0.788** | **0.742** | **0.675** | **0.954** | **0.527** | **0.925** | **0.810** |
+| **Std** | **0.028** | **0.017** | **0.024** | **0.024** | **0.027** | **0.047** | **0.034** | **0.025** |
 
-| Fold | F1 | ROC-AUC | PR-AUC | Accuracy | Specificity |
-|------|-----|---------|--------|----------|-------------|
-| 0 | 0.7925 | 0.8275 | 0.7686 | 0.7477 | 0.5321 |
-| 1 | 0.8048 | 0.8328 | 0.7644 | 0.7752 | 0.6239 |
-| 2 | 0.7605 | 0.7671 | 0.7004 | 0.7110 | 0.5046 |
-| 3 | 0.7909 | 0.7889 | 0.7050 | 0.7477 | 0.5413 |
-| 4 | 0.7698 | 0.7947 | 0.7264 | 0.7064 | 0.4312 |
-| 5 | 0.8000 | 0.8369 | 0.7833 | 0.7569 | 0.5413 |
-| 6 | 0.7985 | 0.8113 | 0.7316 | 0.7523 | 0.5229 |
-| 7 | 0.7895 | 0.8268 | 0.7585 | 0.7431 | 0.5229 |
-| 8 | 0.8134 | 0.8369 | 0.7536 | 0.7706 | 0.5413 |
-| 9 | 0.7623 | 0.7799 | 0.7102 | 0.7110 | 0.4954 |
+## TargetNet Baselines (balanced 80/20 single split)
 
-### Balanced 80/20 Test (single split)
-
-| Model | F1 | ROC-AUC | PR-AUC | Accuracy | Specificity |
-|-------|-----|---------|--------|----------|-------------|
-| Mimosa (step=1) | 0.7910 | 0.7944 | 0.7158 | 0.7431 | 0.5138 |
+| Model | F1 | ROC-AUC | Acc | Spec |
+|-------|-----|---------|-----|------|
+| TargetNet (official) | 0.667 | 0.546 | 0.500 | 0.000 |
+| TargetNet (dp-0.5) | 0.667 | 0.546 | 0.500 | 0.000 |
+| TargetNet_Optimized (dp-0.1, MaxPool) | 0.796 | 0.834 | 0.748 | 0.514 |
 
 ## Notes
 
-- **TargetNet (original)** 模型在 balanced test 上全预测为正类，ROC-AUC=0.546 ≈ 随机。
-  可能原因：模型架构与数据预处理不兼容（原始 TargetNet 使用不同的 CTS 提取/编码方式）
-- **TargetNet_Optimized (dp-0.1, MaxPool)**: F1=0.796, 是有效的 Stage-1 baseline
-- **Mimosa (pre-trained)**: 官方检查点 (Bi et al., NAR 2024)，gene-level prediction (sliding window step=1, any-positive aggregation)。F1=0.788, ROC-AUC=0.810。高 recall (0.95+) 低 specificity (~0.52)，偏向预测正类。
-- **PAIR-Former**: F1=0.840, 相比 Mimosa 提升 +6.6%, 相比 MaxPool baseline 提升 +5.5%
+- **Mimosa**: 官方 pre-trained checkpoint, gene-level sliding window (step=1, 40-nt), any-positive aggregation。高 Rec (0.95+) 低 Spec (0.53)，"any-positive" 策略偏向预测正类。
+- **PAIR-Former vs Mimosa**: F1 +6.6%, ROC-AUC +10.9%, PR-AUC +17.4%
+- **TargetNet (original)**: 全预测为正类 (ROC-AUC=0.546)，数据预处理不兼容

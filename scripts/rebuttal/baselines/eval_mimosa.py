@@ -277,21 +277,27 @@ def main():
     y_pred = (y_scores > 0.5).astype(int)
 
     # Metrics
+    from sklearn.metrics import precision_score
     f1 = f1_score(y_true, y_pred)
     roc_auc = roc_auc_score(y_true, y_scores)
     pr_auc = average_precision_score(y_true, y_scores)
     acc = accuracy_score(y_true, y_pred)
     recall = recall_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     specificity = tn / (tn + fp)
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0.0
 
     results = {
         'f1': float(f1),
         'roc_auc': float(roc_auc),
         'pr_auc': float(pr_auc),
         'accuracy': float(acc),
+        'precision': float(precision),
         'recall': float(recall),
         'specificity': float(specificity),
+        'npv': float(npv),
+        'tp': int(tp), 'fp': int(fp), 'fn': int(fn), 'tn': int(tn),
         'n_samples': int(len(y_true)),
         'n_positive': int(y_true.sum()),
         'n_negative': int((1 - y_true).sum()),
@@ -303,13 +309,15 @@ def main():
     print(f"\n{'='*50}")
     print(f"  Mimosa Evaluation Results")
     print(f"{'='*50}")
-    print(f"  F1:          {results['f1']:.4f}")
-    print(f"  ROC-AUC:     {results['roc_auc']:.4f}")
     print(f"  PR-AUC:      {results['pr_auc']:.4f}")
+    print(f"  F1@0.5:      {results['f1']:.4f}")
     print(f"  Accuracy:    {results['accuracy']:.4f}")
+    print(f"  Precision:   {results['precision']:.4f}")
     print(f"  Recall:      {results['recall']:.4f}")
     print(f"  Specificity: {results['specificity']:.4f}")
-    print(f"  Samples:     {results['n_samples']} ({results['n_positive']}+ / {results['n_negative']}-)")
+    print(f"  NPV:         {results['npv']:.4f}")
+    print(f"  ROC-AUC:     {results['roc_auc']:.4f}")
+    print(f"  CM: TP={tp} FP={fp} FN={fn} TN={tn}")
     print(f"  Time:        {elapsed:.1f}s")
     print(f"{'='*50}")
 
