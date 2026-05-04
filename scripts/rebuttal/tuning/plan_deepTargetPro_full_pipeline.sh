@@ -13,6 +13,8 @@
 # 用法：
 #   bash plan_deepTargetPro_full_pipeline.sh          # 全部串行
 #   STAGE=1 bash plan_deepTargetPro_full_pipeline.sh  # 只跑 Stage 1
+#   STAGE=2 GPU=0 bash plan_deepTargetPro_full_pipeline.sh  # 只跑 Stage 2
+#   STAGE=3 GPU=0 bash plan_deepTargetPro_full_pipeline.sh  # 只跑 Stage 3
 # =============================================================================
 set -e
 
@@ -20,13 +22,27 @@ STAGE="${STAGE:-all}"
 GPU="${GPU:-0}"
 SEED=2020
 
+# Helper: resolve latest checkpoint from outputs/
+resolve_ckpt() {
+    local exp_name="$1"
+    local ckpt_name="${2:-best.pt}"
+    local pattern="outputs/${exp_name}/*/checkpoints/${ckpt_name}"
+    local files=$(ls -t $pattern 2>/dev/null | head -1)
+    if [ -z "$files" ]; then
+        echo "ERROR: No checkpoint found for ${exp_name}/${ckpt_name}" >&2
+        echo "Searched: ${pattern}" >&2
+        exit 1
+    fi
+    echo "$files"
+}
+
 echo "=== deepTargetPro Full Pipeline ==="
 echo "Stage: $STAGE, GPU: $GPU, Seed: $SEED"
 
 # =====================================================================
 # Stage 1: Train TargetNet_Optimized on deepTargetPro CTS data
 # =====================================================================
-STAGE1_CKPT="checkpoints/deepTargetPro_TargetNet_Optimized/checkpoints/best.pt"
+STAGE1_EXP="deepTargetPro_TargetNet_Optimized"
 
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "1" ]; then
     echo ""
@@ -39,17 +55,26 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "1" ]; then
         run.eval_test_after_train=true \
         2>&1 | tail -5
 
-    echo "Stage 1 done. Checkpoint: $STAGE1_CKPT"
+    echo "Stage 1 done."
 fi
+
+STAGE1_CKPT=$(resolve_ckpt "$STAGE1_EXP" "best.pt")
+echo "Stage 1 checkpoint: $STAGE1_CKPT"
 
 # =====================================================================
 # Stage 2: CheapCTSNet distillation
 # =====================================================================
-STAGE2_CKPT="checkpoints/deepTargetPro_CheapCTSNet/checkpoints/best.pt"
+STAGE2_EXP="deepTargetPro_CheapCTSNet"
 
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "2" ]; then
     echo ""
     echo "=== Stage 2: CheapCTSNet distillation ==="
+
+    if [ ! -f "$STAGE1_CKPT" ]; then
+        echo "ERROR: Stage 1 checkpoint not found: $STAGE1_CKPT" >&2
+        echo "Run STAGE=1 first or provide the correct checkpoint." >&2
+        exit 1
+    fi
 
     CUDA_VISIBLE_DEVICES=$GPU python -m src.launch.train \
         experiment=CheapCTSNet \
@@ -62,11 +87,14 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "2" ]; then
         paths.cache_root=cache_deepTargetPro_cheap \
         experiment_name=deepTargetPro_CheapCTSNet \
         experiment.name=deepTargetPro_CheapCTSNet \
-        train.teacher_ckpt=$STAGE1_CKPT \
+        run.distill_teacher_ckpt="$STAGE1_CKPT" \
         2>&1 | tail -5
 
-    echo "Stage 2 done. Checkpoint: $STAGE2_CKPT"
+    echo "Stage 2 done."
 fi
+
+STAGE2_CKPT=$(resolve_ckpt "$STAGE2_EXP" "best.pt")
+echo "Stage 2 checkpoint: $STAGE2_CKPT"
 
 # =====================================================================
 # Stage 3: BR-MIL pipeline with new checkpoints
@@ -74,6 +102,15 @@ fi
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "3" ]; then
     echo ""
     echo "=== Stage 3: BR-MIL pipeline (10-fold) ==="
+
+    if [ ! -f "$STAGE1_CKPT" ]; then
+        echo "ERROR: Stage 1 checkpoint not found: $STAGE1_CKPT" >&2
+        exit 1
+    fi
+    if [ ! -f "$STAGE2_CKPT" ]; then
+        echo "ERROR: Stage 2 checkpoint not found: $STAGE2_CKPT" >&2
+        exit 1
+    fi
 
     for fold in $(seq 0 9); do
         EXP="dtp_full_fold${fold}"
@@ -137,6 +174,8 @@ if results:
     print(f'\nComparison:')
     print(f'  miRAW checkpoints (transfer): F1=0.8388±0.0368')
     print(f'  deepTargetPro full pipeline:  F1={np.mean(f1s):.4f}±{np.std(f1s):.4f}')
+else:
+    print('No results found.')
 "
 fi
 
