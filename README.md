@@ -236,19 +236,68 @@ PAIRFormer/
 │   ├── distill/         # Knowledge distillation utilities
 │   ├── em/              # EM pipeline: controller, token provider, cache builders
 │   ├── evaluator/       # Evaluation: metrics, reports, plots
-│   ├── launch/          # Entry points: train, eval, benchmark, cache build
+│   ├── launch/          # Entry points: train, eval, benchmark, cache build (29 files)
 │   ├── models/          # Model implementations + registry
 │   ├── selectors/       # STSelector and variants
 │   ├── trainer/         # Trainer (Stage 1-2), TrainerEM (Stage 3), loss functions
-│   └── utils/           # Efficiency tracking, embedding dump
-├── configs/             # Hydra YAML configurations
+│   └── utils/           # Efficiency tracking, DDP utilities, embedding dump
+│
+├── configs/
+│   ├── experiment/      # Experiment configurations (27 core + 10 variants + 40 archived)
+│   │   ├── *.yaml       # Core experiment configs (miRAW, deepTargetPro, MTI)
+│   │   ├── variants/    # Experimental variants
+│   │   ├── archive/     # Historical configs
+│   │   └── README.md    # Configuration documentation
+│   ├── data/            # Dataset configurations
+│   ├── model/           # Model architecture configs
+│   ├── train/           # Training hyperparameters
+│   └── ...              # Other config groups
+│
+├── docs/
+│   ├── README.md        # Documentation index
+│   ├── reports/         # Experiment summary reports
+│   ├── DDP_TRAINING.md  # DDP multi-GPU training guide
+│   ├── NEW_SERVER_DEPLOYMENT.md  # Server deployment guide
+│   └── MTI_*.md         # MTI experiment documentation
+│
 ├── checkpoints/         # Pre-trained model weights (Git LFS)
-├── scripts/             # Data conversion, utility scripts
-│   └── rebuttal/        # Rebuttal experiment scripts (organized by topic)
-├── experiments/         # Organized experiment results
+│   ├── BR-MIL/          # Main PAIR-Former model
+│   ├── MTI_*_shard*/    # MTI shard-trained models
+│   └── ...              # Other checkpoints
+│
+├── scripts/
+│   ├── rebuttal/        # Rebuttal experiment scripts (25 docs + scripts)
+│   └── ...              # Data conversion, utility scripts
+│
+├── experiments/         # Experiment plans and results
+│   ├── EXP8/            # EXP8 experiment reports
+│   ├── EXP_PLAN_*.md    # Experiment plans
+│   └── README_NEURIPS2026.md
+│
 ├── paper/               # Figure/table generation scripts and artifacts
-└── data/                # Dataset files (not tracked for large files)
+├── data/                # Dataset files (not tracked for large files)
+│
+└── [Core Documentation]
+    ├── README.md        # This file
+    ├── CLAUDE.md        # Claude Code development guide
+    ├── goal.md          # Refactoring goals
+    ├── todo.md          # Task breakdown
+    ├── progress.md      # Progress tracking
+    ├── acceptance.md    # Acceptance criteria
+    ├── launch_analysis.md      # Launch entry point analysis
+    ├── config_analysis.md      # Config file classification
+    ├── docs_analysis.md        # Documentation organization
+    └── verification_report.md  # Code verification report
 ```
+
+## Documentation
+
+- **Main README**: This file
+- **Development Guide**: [CLAUDE.md](CLAUDE.md) - Claude Code usage and project conventions
+- **Technical Docs**: [docs/README.md](docs/README.md) - DDP training, deployment, MTI experiments
+- **Experiment Reports**: [docs/reports/](docs/reports/) - Comprehensive experiment summaries
+- **Configuration Guide**: [configs/experiment/README.md](configs/experiment/README.md) - All 77 experiment configs
+- **Verification Report**: [verification_report.md](verification_report.md) - Code refactoring validation
 
 ## Citation
 
