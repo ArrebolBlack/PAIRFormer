@@ -1,0 +1,3 @@
+[submodule "external/Mimosa"]
+	path = external/Mimosa
+	url = https://github.com/biyueeee/Mimosa.git

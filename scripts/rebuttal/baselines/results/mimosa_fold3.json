@@ -1,0 +1,14 @@
+{
+  "f1": 0.7908745247148289,
+  "roc_auc": 0.7889066576887467,
+  "pr_auc": 0.7049934661425651,
+  "accuracy": 0.7477064220183486,
+  "recall": 0.9541284403669725,
+  "specificity": 0.5412844036697247,
+  "n_samples": 218,
+  "n_positive": 109,
+  "n_negative": 109,
+  "stepsize": 1,
+  "elapsed_sec": 96.8,
+  "test_file": "data/rebuttal/miRAW_fold3_split/miRAW_Test.txt"
+}
