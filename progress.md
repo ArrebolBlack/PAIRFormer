@@ -63,7 +63,7 @@
 
 ---
 
-## 第1轮：创建工作分支 (待开始)
+## 第1轮：创建工作分支 (已完成)
 
 ### 当前子任务
 创建refactor分支并确认git状态
@@ -75,13 +75,86 @@
 4. Push到远程
 
 ### 怎么判断这轮做成了
-- [ ] 新分支创建成功
-- [ ] 分支已推送到远程
-- [ ] Git状态干净（无未追踪的重要文件）
+- [x] 新分支创建成功
+- [x] 分支已推送到远程
+- [x] Git状态干净（无未追踪的重要文件）
 
 ### 结果要更新到哪个状态文件里
 - progress.md（本文件）
 - todo.md（更新任务状态）
+
+### 完成情况
+**状态**: ✅ 已完成
+
+**执行记录**:
+1. 检查git状态：发现paper/artifacts/figures/fig4_MTI.pdf有修改
+2. 提交规划文件到main分支（goal.md, todo.md, acceptance.md, progress.md）
+3. 创建新分支 `refactor/code-cleanup-2026-05`
+4. 提交fig4_MTI.pdf的修改
+5. 推送分支到远程
+
+**遇到的问题**:
+无
+
+**解决方案**:
+N/A
+
+**下一步**:
+开始第2轮：审查和分类launch入口点
+
+---
+
+## 第2轮：审查launch入口点 (已完成)
+
+### 当前子任务
+审查和分类29个launch入口点，确定哪些必须保留，哪些可以归档
+
+### 这轮准备怎么做
+1. 列出所有launch/*.py文件
+2. 检查每个文件的用途和大小
+3. 识别论文实验相关的文件
+4. 检查MTI实验是否使用shard工具
+5. 创建分类分析文档
+
+### 怎么判断这轮做成了
+- [x] 创建了launch_analysis.md分类文档
+- [x] 确认MTI实验使用shard工具（必须保留）
+- [x] 识别出核心文件和需审查文件
+- [x] 明确了shard工具用于MTI Stage 1-2训练
+
+### 结果要更新到哪个状态文件里
+- progress.md（本文件）
+- launch_analysis.md（分类分析结果）
+
+### 完成情况
+**状态**: ✅ 已完成
+
+**执行记录**:
+1. 列出29个launch文件及其大小
+2. 检查文件头部文档
+3. 创建launch_analysis.md分类文档
+4. 发现MTI实验使用7个shard相关配置
+5. 确认MTI_TargetNet_Optimized_shard和MTI_CheapCTSNet_shard checkpoint存在
+
+**关键发现**:
+- **核心文件（14个）**: 训练/评估/推理/cache构建
+- **MTI shard工具（必须保留）**: 用于MTI Stage 1-2训练
+  - build_window_shards.py
+  - build_teacher_shards.py
+  - compact_window_shards.py
+  - relabel_window_shards.py
+  - merge_inst_shards.py
+  - train_cheapcts_shard.py
+  - train_targetnet_shard.py
+  - eval_window_shard.py
+- **可能归档（7个）**: pair cache工具、测试工具
+
+**决策**:
+由于MTI是论文的关键大规模实验（420K pairs），所有shard工具必须保留。
+只有少数测试/调试工具可以归档。
+
+**下一步**:
+开始第3轮：清理根目录临时文件
 
 ---
 
