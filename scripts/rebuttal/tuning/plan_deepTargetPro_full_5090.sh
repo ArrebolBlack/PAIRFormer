@@ -93,11 +93,12 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "2" ]; then
         run.checkpoint=null \
         data.path.train=data/deepTargetPro/train_seed_1234.txt \
         data.path.val=data/deepTargetPro/valid_seed_1234.txt \
-        data.path.test=data/deepTargetPro/deepTargetPro_Test_0,6-9.txt \
+        data.path.test=\'data/deepTargetPro/deepTargetPro_Test_0,6-9.txt\' \
         paths.cache_root=cache_deepTargetPro_cheap \
         experiment_name=deepTargetPro_CheapCTSNet \
         experiment.name=deepTargetPro_CheapCTSNet \
         run.distill_teacher_ckpt="$STAGE1_CKPT" \
+        run.num_workers=0 \
         2>&1 | tee /tmp/dtp_stage2.log | tail -10
 
     STAGE2_CKPT=$(resolve_ckpt "$STAGE2_EXP" "best.pt")
