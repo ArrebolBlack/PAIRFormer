@@ -6,6 +6,15 @@ Official codebase for the ICML 2026 submission **"PAIR-Former: Budgeted Relation
 
 PAIR-Former is a Budgeted Relational Multi-Instance Learning (BR-MIL) framework that predicts functional miRNA-mRNA target interactions by aggregating information from multiple CTS (Candidate Target Site) windows. The key innovation is a three-stage training pipeline that decouples expensive per-instance encoding from budgeted set-level aggregation.
 
+### Key Features
+
+- 🚀 **State-of-the-art Performance**: F1=0.840 on miRAW, 0.839 on deepTargetPro, 0.793 on MTI (420K pairs)
+- ⚡ **Efficient Budgeted Learning**: Processes thousands of CTSs per pair with O(K) cost instead of O(n²)
+- 🔄 **Three-Stage Pipeline**: Decouples expensive encoding from relational aggregation
+- 🎯 **Set Transformer Aggregation**: Permutation-invariant relational reasoning over selected CTSs
+- 📊 **Large-Scale Ready**: Scales to 420K pairs (38× larger than miRAW) with DDP training
+- 🧪 **Reproducible**: Complete configs, checkpoints, and examples for all paper experiments
+
 ### Architecture
 
 ```
@@ -72,45 +81,50 @@ miRNA_name    mRNA_name    CTS_sequence    label    additional_features...
 
 ## Quick Start
 
-### Stage 1: Train CTS Encoder
+### Simple Training (Recommended)
+
+Train all three stages with one command:
 
 ```bash
+python examples/quickstart.py --stage all
+```
+
+Or train individual stages:
+
+```bash
+python scripts/train_stage1.py --config miRAW  # Stage 1: CTS encoder
+python scripts/train_stage2.py --config miRAW  # Stage 2: Cheap encoder
+python scripts/train_stage3.py --config miRAW  # Stage 3: BR-MIL pipeline
+```
+
+### Evaluation
+
+```bash
+python scripts/evaluate.py --config miRAW --stage 3
+```
+
+### Advanced Usage
+
+For more control, use the low-level launch scripts:
+
+```bash
+# Stage 1-2
 python -m src.launch.train experiment=miRAW_TargetNet_Optimized_baseline
-```
-
-### Stage 2: Distill Cheap Encoder
-
-```bash
 python -m src.launch.train experiment=CheapCTSNet
-```
 
-### Stage 3: Train BR-MIL Pipeline
-
-```bash
+# Stage 3
 python -m src.launch.train_em experiment=miRAW_EM_Pipeline
-```
 
-### Evaluate
-
-```bash
-# Stage 1-2 evaluation
-python -m src.launch.eval experiment=miRAW_TargetNet_Optimized_baseline
-
-# Stage 3 evaluation
+# Evaluation
 python -m src.launch.eval_em experiment=miRAW_EM_Pipeline
 ```
 
 ### Multi-Seed Training
 
 ```bash
-python -m src.launch.train_em experiment=miRAW_EM_Pipeline seed=2020
+python scripts/train_stage3.py --config miRAW --epochs 150  # seed=2020 (default)
 python -m src.launch.train_em experiment=miRAW_EM_Pipeline seed=2025
 python -m src.launch.train_em experiment=miRAW_EM_Pipeline seed=2026
-```
-
-Aggregate results:
-```bash
-python paper/artifacts/scripts/wandb_compute_mean_std.py
 ```
 
 ## Configuration
