@@ -75,7 +75,10 @@ class PairCNNAggregator(nn.Module):
             return attn_mask.to(device=device).bool()
         if attn_mask.dim() == 4:
             return attn_mask[:, 0, 0, :].to(device=device).bool()
-        raise ValueError(f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}")
+        raise ValueError(
+            f"[PairCNNAggregator._normalize_mask] "
+            f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}"
+        )
 
     def forward(
         self,

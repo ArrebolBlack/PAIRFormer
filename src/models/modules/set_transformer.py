@@ -94,7 +94,7 @@ class RowwiseFF(nn.Module):
         elif self.act == "relu":
             x = self.fc2(self.drop(F.relu(self.fc1(x))))
         else:
-            raise ValueError(f"Unsupported ff_activation={self.act}, expected gelu/relu")
+            raise ValueError(f"[RowwiseFF.forward] Unsupported ff_activation={self.act}, expected 'gelu' or 'relu'")
         return x
 
 
@@ -160,7 +160,7 @@ class ISAB(nn.Module):
         super().__init__()
         self.m = int(m)
         if self.m <= 0:
-            raise ValueError("ISAB requires m > 0")
+            raise ValueError("[ISAB.__init__] m (num_inducing_points) must be > 0")
         self.inducing = nn.Parameter(torch.zeros(1, self.m, cfg.d_model))
         nn.init.xavier_uniform_(self.inducing)
 
@@ -190,7 +190,7 @@ class PMA(nn.Module):
         super().__init__()
         self.k = int(k)
         if self.k <= 0:
-            raise ValueError("PMA requires k > 0")
+            raise ValueError("[PMA.__init__] k (num_seed_vectors) must be > 0")
         self.seed = nn.Parameter(torch.zeros(1, self.k, cfg.d_model))
         nn.init.xavier_uniform_(self.seed)
 
