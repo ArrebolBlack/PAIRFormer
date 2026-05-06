@@ -35,7 +35,10 @@ class PairSetTransformerAggregator(nn.Module):
         # ---- 1) dims ----
         self.in_dim: int = int(p.get("in_dim"))
         if self.in_dim <= 0:
-            raise ValueError("PairSetTransformerAggregator requires cfg.model.in_dim > 0")
+            raise ValueError(
+                "[PairSetTransformerAggregator.__init__] "
+                "cfg.model.in_dim must be > 0"
+            )
 
         d_model: int = int(p.get("d_model", 256))
         n_heads: int = int(p.get("n_heads", 8))
@@ -78,7 +81,10 @@ class PairSetTransformerAggregator(nn.Module):
             elif self.block_type == "sab":
                 layers.append(SAB(stcfg))
             else:
-                raise ValueError("cfg.model.block_type must be one of ['isab','sab']")
+                raise ValueError(
+                    "[PairSetTransformerAggregator.__init__] "
+                    "cfg.model.block_type must be one of ['isab', 'sab']"
+                )
         self.encoder = nn.ModuleList(layers)
 
         # ---- 5) decoder ----
@@ -114,7 +120,10 @@ class PairSetTransformerAggregator(nn.Module):
             # [B,1,1,L] -> [B,L]
             return attn_mask[:, 0, 0, :].to(device=device).bool()
 
-        raise ValueError(f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}")
+        raise ValueError(
+            f"[PairSetTransformerAggregator._normalize_mask] "
+            f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}"
+        )
 
     def forward(
         self,
@@ -124,7 +133,10 @@ class PairSetTransformerAggregator(nn.Module):
     ) -> torch.Tensor:
         B, L, Din = x.shape
         if Din != self.in_dim:
-            raise ValueError(f"Expected in_dim={self.in_dim}, but got {Din}")
+            raise ValueError(
+                f"[PairSetTransformerAggregator.forward] "
+                f"Expected in_dim={self.in_dim}, but got {Din}"
+            )
 
         # mask: [B, L] True=valid
         mask = self._normalize_mask(attn_mask, L, x.device)
