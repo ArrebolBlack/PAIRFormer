@@ -48,8 +48,8 @@ if inst_ckpt is not None and inst_ckpt.exists():  # This is always True if we re
 **Impact**: Unprofessional for international publication
 **Count**: ~200+ occurrences in 86 files
 **Fix**: Translate to English or remove
-**Status**: ✅ PARTIALLY FIXED (3/86 files: train.py, train_em.py, registry.py)
-**Remaining**: 83 files
+**Status**: ✅ PARTIALLY FIXED (5/86 files: train.py, train_em.py, registry.py, builder.py, dataset.py)
+**Remaining**: 81 files (~94% of work remaining)
 
 ### 8. Nested functions that should be module-level
 **File**: `src/launch/train_em.py:198-206`, `train.py:228-256`

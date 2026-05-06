@@ -14,7 +14,7 @@ This codebase has undergone systematic quality improvements. **7 out of 26 ident
 ### High Priority
 4. ✅ **Checkpoint loading duplication** - Extracted to `src/utils/checkpoint.py`
 5. ✅ **Data loading duplication** - Removed 49 lines of duplicate code in `train.py`
-6. ✅ **Chinese comments** - Cleaned 3 core files (train.py, train_em.py, registry.py)
+6. ✅ **Chinese comments** - Cleaned 5 core files (train.py, train_em.py, registry.py, builder.py, dataset.py)
 7. ✅ **Unnecessary nested functions** - Removed `build_loader_for_split()` in train.py
 
 ## Remaining Issues (19)
