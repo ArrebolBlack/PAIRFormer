@@ -255,56 +255,54 @@ def main(cfg: DictConfig):
             set_labels_local = get_set_labels(data_cfg, split_name)
             return ds, ld, set_labels_local, True
 
-    if task_mode == "pair_level_train":
-        pair_cfg = cfg.data.pair
+    def build_train_val_loaders():
+        """Build train and val loaders based on task mode."""
+        if task_mode == "pair_level_train":
+            pair_cfg = cfg.data.pair
+            train_ds, train_loader = build_pair_level_dataset_and_loader(
+                pair_cfg=pair_cfg,
+                split="train",
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=True,
+                drop_last=False,
+            )
+            val_ds, val_loader = build_pair_level_dataset_and_loader(
+                pair_cfg=pair_cfg,
+                split="val",
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            return train_ds, train_loader, val_ds, val_loader, None, False
+        else:
+            train_ds, train_loader = build_dataset_and_loader(
+                data_cfg=data_cfg,
+                split_idx="train",
+                cache_data_path=cache_root,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=True,
+                drop_last=False,
+            )
+            val_ds, val_loader = build_dataset_and_loader(
+                data_cfg=data_cfg,
+                split_idx="val",
+                cache_data_path=cache_root,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                shuffle=False,
+                drop_last=False,
+            )
+            val_set_labels = get_set_labels(data_cfg, "val")
+            return train_ds, train_loader, val_ds, val_loader, val_set_labels, True
 
-        train_ds, train_loader = build_pair_level_dataset_and_loader(
-            pair_cfg=pair_cfg,
-            split="train",
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            shuffle=True,
-            drop_last=False,
-        )
-
-        val_ds, val_loader = build_pair_level_dataset_and_loader(
-            pair_cfg=pair_cfg,
-            split="val",
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            shuffle=False,
-            drop_last=False,
-        )
-
-        val_set_labels = None
-        aggregate_sets = False
-
-    else:
-        train_ds, train_loader = build_dataset_and_loader(
-            data_cfg=data_cfg,
-            split_idx="train",
-            cache_data_path=cache_root,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            shuffle=True,
-            drop_last=False,
-        )
-        val_ds, val_loader = build_dataset_and_loader(
-            data_cfg=data_cfg,
-            split_idx="val",
-            cache_data_path=cache_root,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            shuffle=False,
-            drop_last=False,
-        )
-
-        val_set_labels = get_set_labels(data_cfg, "val")
-        aggregate_sets = True
+    train_ds, train_loader, val_ds, val_loader, val_set_labels, aggregate_sets = build_train_val_loaders()
 
     model_name = cfg.model.get("arch", cfg.model.get("name"))
     model = build_model(model_name, cfg.model, data_cfg=data_cfg)
