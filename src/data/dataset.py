@@ -2,28 +2,26 @@
 """
 dataset.py
 ======================
-本模块提供 ChunkedCTSDataset：
+Provides ChunkedCTSDataset: a lazy-loading Dataset implementation that relies only on meta.json.
 
-- 一种只依赖 meta.json 文件的懒加载 Dataset 实现。
-- 每个样本存储在若干 .pt block 中，Dataset 通过元信息知道：
-  * 每个 block 的路径
-  * block 内的样本数量
-  * 全局索引如何映射到具体 block 与 block 内局部 index
+Each sample is stored in multiple .pt blocks. The dataset uses metadata to determine:
+  * Path to each block
+  * Number of samples per block
+  * Mapping from global index to specific block and local index
 
-核心特点：
-- 初始化快速：不需要逐个读取所有 .pt block，只需读取单个 meta.json。
-- 内存友好：只在访问样本时加载当前 block 的数据，切换 block 时主动释放旧数据并触发 GC。
-- 适合大规模数据：block 大小可控（由 BLOCK_SIZE 和编码大小决定）。
+Key features:
+- Fast initialization: Only reads meta.json, not all .pt blocks
+- Memory-efficient: Loads blocks on-demand, releases old blocks with GC on switch
+- Scalable: Block size is configurable (determined by BLOCK_SIZE and encoding size)
 
-典型用法
---------
+Typical usage:
     from src.data.cache import get_or_build_blocks
     from src.data.dataset import ChunkedCTSDataset
 
-    get_or_build_blocks(data_cfg, "train", cache_path)  # 确保 meta.json 存在
+    get_or_build_blocks(data_cfg, "train", cache_path)  # Ensure meta.json exists
     ds = ChunkedCTSDataset(cache_path, data_cfg, "train")
 
-    len(ds)             # 总样本数
+    len(ds)             # Total samples
     x, y, set_idx = ds[0]
 """
 
@@ -39,53 +37,42 @@ import torch
 
 class ChunkedCTSDataset(torch.utils.data.Dataset):
     """
-    支持按块懒加载的 Dataset 实现，专为 CTS/miRNA 类大规模数据设计。
+    Lazy-loading Dataset for large-scale CTS/miRNA data with block-based storage.
 
-    初始化只依赖 meta.json 文件，不需要在构造时把所有 block 文件读入内存。
-    当 __getitem__ 被调用时，才在需要时加载对应 block，并在 block 切换时主动释放旧 block。
+    Initialization only requires meta.json, not loading all block files into memory.
+    Blocks are loaded on-demand when __getitem__ is called, and old blocks are released
+    when switching to a new block.
 
-    属性
-    ----
-    chunk_files : List[str]
-        所有 block 文件的路径列表
-    chunk_sizes : List[int]
-        每个 block 内的样本数
-    cum_sizes   : List[int]
-        累积样本数（用于通过二分查找确定 idx 所在的 block）
-    total_size  : int
-        总样本数
-    current_chunk_idx : int
-        当前已经加载到内存的 block 索引
-    current_chunk     : dict or None
-        当前 block 对应的内容（torch.load 得到的 dict）
+    Attributes:
+        chunk_files (List[str]): Paths to all block files
+        chunk_sizes (List[int]): Number of samples per block
+        cum_sizes (List[int]): Cumulative sample counts (for binary search to locate block)
+        total_size (int): Total number of samples
+        current_chunk_idx (int): Index of currently loaded block
+        current_chunk (dict or None): Content of current block (dict from torch.load)
 
-    返回样本格式
-    ------------
-    __getitem__ 返回三元组：
-        x       : torch.Tensor,  one-hot 特征（uint8），形状约 (C, L)
-        y       : torch.Tensor,  形状 (1,) 的标签
-        set_idx : torch.Tensor,  形状 (1,) 的 long，表示在当前 split 内的连续编号
+    Returns:
+        __getitem__ returns a tuple:
+            x (torch.Tensor): One-hot features (uint8), shape ~(C, L)
+            y (torch.Tensor): Label, shape (1,)
+            set_idx (torch.Tensor): Sequential ID within current split, shape (1,), dtype long
 
-    上层可以在 collate_fn 中将其转换为 dict，例如：
-        {"x": x.float(), "label": y.squeeze(-1), "set_idx": set_idx.squeeze(-1)}
+        Upstream collate_fn can convert to dict, e.g.:
+            {"x": x.float(), "label": y.squeeze(-1), "set_idx": set_idx.squeeze(-1)}
     """
 
     def __init__(self, cache_data_path: str, data_cfg, split_idx: str):
         """
-        构造函数：根据 data_cfg 和 split_idx 找到 meta.json，并初始化元信息。
+        Initialize dataset by loading meta.json based on data_cfg and split_idx.
 
-        参数
-        ----
-        cache_data_path : str
-            缓存目录路径
-        data_cfg : DataConfig
-            原始数据配置（至少包含 path 字段）
-        split_idx : str
-            当前使用的数据 split（如 "train", "val", "test0"）
+        Args:
+            cache_data_path (str): Cache directory path
+            data_cfg (DataConfig): Original data configuration (must contain path field)
+            split_idx (str): Data split to use (e.g., "train", "val", "test0")
         """
         data_file_path = str(data_cfg.get_path(split_idx))
 
-        # ✅ 新增：把 alignment 拼进 hash key，区分不同 alignment 下的 cache
+        # Include alignment in hash key to distinguish caches for different alignments
         alignment = getattr(data_cfg, "alignment", "extended_seed_alignment")
         hash_key = f"{data_file_path}|{alignment}"
         path_hash = hashlib.md5(hash_key.encode("utf-8")).hexdigest()[:8]
@@ -96,13 +83,13 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         if not os.path.exists(meta_filepath):
             raise FileNotFoundError(
                 f"Meta file not found: {meta_filepath}. "
-                f"请先调用 get_or_build_blocks(data_cfg, '{split_idx}', '{cache_data_path}') 生成缓存。"
+                f"Please call get_or_build_blocks(data_cfg, '{split_idx}', '{cache_data_path}') first to generate cache."
             )
 
         with open(meta_filepath, "r") as f:
             block_metadata = json.load(f)
 
-        # 保证顺序与构建时一致
+        # Ensure order matches build-time order
         block_metadata.sort(key=lambda x: (x["block_idx"], x["shard_idx"]))
 
         self.chunk_files: List[str] = [m["path"] for m in block_metadata]
@@ -118,7 +105,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             f"with {self.total_size} samples across {len(self.chunk_files)} blocks."
         )
 
-        # ---- Stage 1: load PairIndex (optional but recommended) ----
+        # Stage 1: Load PairIndex (optional but recommended)
         pair_index_name = f"pair_index_{split_idx}_{path_hash}.pt"
         pair_index_path = os.path.join(cache_data_path, pair_index_name)
         self.pair_offsets = None
@@ -138,60 +125,54 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             )
 
     def __len__(self) -> int:
-        """
-        返回数据集中样本总数。
-        """
+        """Return total number of samples in the dataset."""
         return self.total_size
 
     def __getitem__(self, idx: int):
         """
-        根据全局索引 idx 返回单个样本 (x, y, set_idx)。
+        Return a single sample (x, y, set_idx) by global index idx.
 
-        实现细节
-        --------
-        1. 使用 bisect_right 在 self.cum_sizes 中找到 idx 对应的 block_idx。
-        2. 若当前 block 与上一次访问不同，则释放旧 block（current_chunk）并加载新 block。
-           - 加载时显式指定 weights_only=False，以避免 PyTorch 未来更改默认行为。
-        3. 计算 idx 在当前 block 内的局部索引 local_idx（如果是第 0 块则 local_idx=idx，否则减去前一块累积大小）。
-        4. 从当前 block 的 dict 中取出 X、labels、set_idxs 的对应条目。
+        Implementation details:
+            1. Use bisect_right on self.cum_sizes to find block_idx for idx
+            2. If current block differs from last access, release old block and load new one
+               - Load with weights_only=False to avoid future PyTorch default behavior changes
+            3. Compute local_idx within current block (local_idx=idx if block 0, else subtract previous cumulative size)
+            4. Extract X, labels, set_idxs entries from current block dict
 
-        参数
-        ----
-        idx : int
-            全局样本索引（0 <= idx < len(self)）
+        Args:
+            idx (int): Global sample index (0 <= idx < len(self))
 
-        返回
-        ----
-        (x, y, set_idx, esa_score) : tuple
-            - x       : torch.Tensor, one-hot 特征（uint8）
-            - y       : torch.Tensor, 标签 (1,)
-            - set_idx : torch.Tensor, 原始行号 (1,)
-            - esa_score: torch.Tensor, esa_score (1,)
-            - pos     : torch.Tensor, pos (1,)
+        Returns:
+            tuple: (x, y, set_idx, esa_score, pos)
+                - x (torch.Tensor): One-hot features (uint8)
+                - y (torch.Tensor): Label, shape (1,)
+                - set_idx (torch.Tensor): Original row number, shape (1,)
+                - esa_score (torch.Tensor): ESA score, shape (1,)
+                - pos (torch.Tensor): Position, shape (1,)
         """
         if idx < 0 or idx >= self.total_size:
             raise IndexError("Index out of range")
 
         import bisect
 
-        # 找到 block 索引
+        # Find block index
         chunk_idx = bisect.bisect_right(self.cum_sizes, idx)
 
-        # 如果需要，切换到对应 block（懒加载）
+        # Switch to corresponding block if needed (lazy loading)
         if self.current_chunk_idx != chunk_idx:
             if self.current_chunk is not None:
-                # 显式释放旧 block 并触发 GC，有助于降低内存峰值
+                # Explicitly release old block and trigger GC to reduce memory peak
                 del self.current_chunk
                 gc.collect()
 
             self.current_chunk = torch.load(
                 self.chunk_files[chunk_idx],
                 map_location="cpu",
-                weights_only=False,  # 我们加载的是数据，不是模型权重
+                weights_only=False,  # Loading data, not model weights
             )
             self.current_chunk_idx = chunk_idx
 
-        # 计算该样本在当前 block 内的局部索引
+        # Compute local index within current block
         local_idx = idx if chunk_idx == 0 else idx - self.cum_sizes[chunk_idx - 1]
 
         x = self.current_chunk["X"][local_idx]
@@ -209,9 +190,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         return x, y, set_idx, esa_score, pos
 
     def __repr__(self) -> str:
-        """
-        返回可读性较好的字符串表示，用于打印调试。
-        """
+        """Return readable string representation for debugging."""
         return (
             f"ChunkedCTSDataset(\n"
             f"  total_samples={self.total_size},\n"
@@ -220,7 +199,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         )
 
     def get_pair_slice(self, pair_id: int):
-        """O(1) 获取某个 pair 的 CTS uid 区间 [start, end)."""
+        """Get CTS uid range [start, end) for a given pair in O(1) time."""
         if self.pair_offsets is None:
             raise RuntimeError(
                 "PairIndex not loaded. Please rebuild cache to generate pair_index_*.pt."
@@ -235,13 +214,14 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
 
     def get_cts_meta_by_uid(self, uids, fields=("X", "labels", "set_idxs", "pos", "esa_scores")):
         """
-        Stage 1 朴素实现：逐 uid 调 __getitem__/load chunk。
-        Stage 4 再做高性能 batch gather（按 chunk 分组）。
+        Stage 1 naive implementation: iterate through uids, call __getitem__/load chunk.
+        Stage 4 will implement high-performance batch gather (group by chunk).
         """
         out = {k: [] for k in fields}
         for uid in uids:
-            idx = int(uid)  # 在当前设计中 uid == global idx
-            # 强行走 __getitem__ 会丢失新字段；这里直接定位 chunk + local_idx，读 current_chunk
+            idx = int(uid)  # In current design, uid == global idx
+            # Directly locate chunk + local_idx and read from current_chunk
+            # (calling __getitem__ would lose new fields)
             import bisect
 
             chunk_idx = bisect.bisect_right(self.cum_sizes, idx)
@@ -257,7 +237,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             for k in fields:
                 if k in self.current_chunk:
                     out[k].append(self.current_chunk[k][local_idx])
-        # stack（若为空则返回空）
+        # Stack (return empty if no data)
         for k in list(out.keys()):
             if len(out[k]) > 0:
                 out[k] = torch.stack(out[k], dim=0)
@@ -267,9 +247,9 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
 
     def validate_pair_offsets(self, num_checks: int = 20, seed: int = 0):
         """
-        随机抽 pair，验证：
-        1) slice 长度 == pair_counts
-        2) slice 内 set_idx 全等于 pair_id（需要读取少量样本验证）
+        Randomly sample pairs and verify:
+        1) Slice length == pair_counts
+        2) All set_idx values in slice equal pair_id (requires reading a few samples)
         """
         if self.pair_offsets is None:
             raise RuntimeError("PairIndex not loaded.")
@@ -282,7 +262,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             s, e = self.get_pair_slice(pid)
             if e < s:
                 raise AssertionError(f"Invalid offsets for pid={pid}: {s},{e}")
-            # 抽查头尾几个 uid
+            # Sample head/tail uids for verification
             probe = [s, min(s + 1, e - 1), max(e - 1, s)]
             probe = [u for u in probe if s <= u < e]
             meta = self.get_cts_meta_by_uid(probe, fields=("set_idxs",))
@@ -300,8 +280,9 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         fields=("inputs", "labels", "set_idx", "esa_scores", "pos"),
     ):
         """
-        Stage-4: 高性能 gather：按 chunk 分组，一次 load 一个 chunk，张量索引取多条。
-        约定：cts_uid == 全局样本 idx（也就是 ChunkedCTSDataset 的 global index）。
+        Stage 4: High-performance gather by grouping by chunk, loading each chunk once,
+        and using tensor indexing to extract multiple entries.
+        Convention: cts_uid == global sample idx (ChunkedCTSDataset global index).
         """
         import torch
 
@@ -313,25 +294,25 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
         if uids.numel() == 0:
             return {k: None for k in fields}
 
-        # cum_sizes_t: [num_chunks]，严格递增
+        # cum_sizes_t: [num_chunks], strictly increasing
         if not hasattr(self, "cum_sizes_t"):
             self.cum_sizes_t = torch.tensor(self.cum_sizes, dtype=torch.long)
 
         # chunk_ids: [N], in [0, num_chunks-1]
         chunk_ids = torch.bucketize(uids, self.cum_sizes_t, right=True)
 
-        # sort by chunk_id to make contiguous segments
+        # Sort by chunk_id to create contiguous segments
         order = torch.argsort(chunk_ids)
         uids_s = uids[order]
         cids_s = chunk_ids[order]
 
-        # inverse permutation to restore original order
+        # Inverse permutation to restore original order
         inv = torch.empty_like(order)
         inv[order] = torch.arange(order.numel(), dtype=torch.long)
 
         out_chunks = {k: [] for k in fields}
 
-        # iterate segments
+        # Iterate segments
         n = uids_s.numel()
         i = 0
         while i < n:
@@ -340,7 +321,7 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
             while j < n and int(cids_s[j].item()) == cid:
                 j += 1
 
-            # load chunk once
+            # Load chunk once
             if self.current_chunk_idx != cid:
                 if self.current_chunk is not None:
                     del self.current_chunk
@@ -349,26 +330,26 @@ class ChunkedCTSDataset(torch.utils.data.Dataset):
                 )
                 self.current_chunk_idx = cid
 
-            # compute local indices
+            # Compute local indices
             base = 0 if cid == 0 else self.cum_sizes_t[cid - 1].item()
             local = (uids_s[i:j] - int(base)).to(dtype=torch.long)
 
             for k in fields:
                 if k not in self.current_chunk:
-                    # 兼容：字段不存在则返回 None（本阶段你不加新字段）
+                    # Compatibility: return None if field doesn't exist
                     out_chunks[k].append(None)
                 else:
                     out_chunks[k].append(self.current_chunk[k].index_select(0, local))
 
             i = j
 
-        # concat per field, then reorder back to original uid order
+        # Concatenate per field, then reorder back to original uid order
         out = {}
         for k, parts in out_chunks.items():
             if all(p is None for p in parts):
                 out[k] = None
                 continue
-            # 过滤 None（字段缺失的情况）
+            # Filter None (missing fields)
             parts2 = [p for p in parts if p is not None]
             cat = torch.cat(parts2, dim=0)
             out[k] = cat.index_select(0, inv)
