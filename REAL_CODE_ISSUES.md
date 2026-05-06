@@ -37,16 +37,19 @@ if inst_ckpt is not None and inst_ckpt.exists():  # This is always True if we re
 **Fix**: Extract to `src/utils/checkpoint.py:clean_state_dict_keys()`
 
 ### 6. Massive code duplication in data loading
-**File**: `src/launch/train.py:332-384`
+**File**: `src/launch/train.py:258-307`
 **Issue**: 50 lines duplicated for pair_level vs window_level, only `shuffle` differs
 **Fix**: Extract common logic, parameterize differences
+**Status**: ✅ FIXED - Extracted to `build_train_val_loaders()` helper
 
 ### 7. Chinese comments throughout codebase
 **Files**: `src/launch/train.py`, `train_em.py`, `src/data/*.py`, `src/models/*.py`
 **Issue**: Docstrings and comments in Chinese (e.g., "本模块", "主要职责")
 **Impact**: Unprofessional for international publication
-**Count**: ~200+ occurrences
+**Count**: ~200+ occurrences in 86 files
 **Fix**: Translate to English or remove
+**Status**: ✅ PARTIALLY FIXED (3/86 files: train.py, train_em.py, registry.py)
+**Remaining**: 83 files
 
 ### 8. Nested functions that should be module-level
 **File**: `src/launch/train_em.py:200-206`, `train.py:301-330`
@@ -137,8 +140,8 @@ Run `autoflake --remove-all-unused-imports` to find
 **Documentation**: 3 issues → 0 fixed
 
 **Total**: 26 real issues identified
-**Fixed**: 3 (12%)
-**Remaining**: 23 (88%)
+**Fixed**: 5 (19%)
+**Remaining**: 21 (81%)
 
 ---
 
