@@ -304,6 +304,20 @@ def _run_final_val_evaluation(
     return best_threshold
 
 
+def _oc_select(cfg_obj: DictConfig, key: str, default=None):
+    """Safely select from OmegaConf, returning default on any error."""
+    try:
+        return OmegaConf.select(cfg_obj, key, default=default)
+    except Exception:
+        return default
+
+
+def _stable_cfg_hash(obj: Any) -> str:
+    """Generate stable 10-char hash of config object for versioning."""
+    s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
@@ -476,16 +490,6 @@ def main(cfg: DictConfig) -> None:
         )
 
     # Selection cache refresh setup
-    def _oc_select(cfg_obj: DictConfig, key: str, default=None):
-        try:
-            return OmegaConf.select(cfg_obj, key, default=default)
-        except Exception:
-            return default
-
-    def _stable_cfg_hash(obj: Any) -> str:
-        s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
-
     sel_mod_node = (
         _oc_select(cfg, "em.selector_module")
         or _oc_select(cfg, "em.selector")
