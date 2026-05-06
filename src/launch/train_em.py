@@ -99,28 +99,88 @@ def _pick_device(cfg: DictConfig) -> torch.device:
     return torch.device("cpu")
 
 
-@hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    # Basic environment
+def _setup_environment(cfg: DictConfig) -> Tuple[int, Path, Path, torch.device]:
+    """Set up random seeds, working directories, and DDP device.
+
+    Args:
+        cfg: Hydra configuration
+
+    Returns:
+        (seed, orig_cwd, run_dir, device)
+    """
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
     orig_cwd = Path(get_original_cwd())
     run_dir = Path.cwd()
 
-    # DDP setup
     rank, local_rank, world_size = setup_ddp()
     if world_size > 1:
         print_on_rank0(
             f"[train_em] DDP mode: rank={rank} local_rank={local_rank} world_size={world_size}"
         )
         device = torch.device(f"cuda:{local_rank}")
-        set_seeds(seed + rank)  # offset seed per rank for DDP
+        set_seeds(seed + rank)
     else:
         print("[train_em] Single GPU mode")
         device = _pick_device(cfg)
 
-    # Checkpoint and evaluation directories
+    return seed, orig_cwd, run_dir, device
+
+
+def _build_output_dirs(run_cfg: DictConfig, run_dir: Path) -> Tuple[Path, Path]:
+    """Build checkpoint and evaluation output directories.
+
+    Args:
+        run_cfg: Run configuration
+        run_dir: Current Hydra run directory
+
+    Returns:
+        (ckpt_dir, eval_dir)
+    """
+    ckpt_dir_cfg = run_cfg.get("ckpt_dir", run_cfg.get("ckpt_subdir", "checkpoints"))
+    eval_dir_cfg = run_cfg.get("eval_dir", run_cfg.get("eval_subdir", "eval"))
+
+    ckpt_dir = Path(ckpt_dir_cfg)
+    eval_dir = Path(eval_dir_cfg)
+
+    if not ckpt_dir.is_absolute():
+        ckpt_dir = run_dir / ckpt_dir
+    if not eval_dir.is_absolute():
+        eval_dir = run_dir / eval_dir
+
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    return ckpt_dir, eval_dir
+
+
+def _resolve_cache_paths(cfg: DictConfig, run_cfg: DictConfig, orig_cwd: Path) -> Tuple[Path, Path]:
+    """Resolve cache root and EM cache root paths.
+
+    Args:
+        cfg: Full Hydra configuration
+        run_cfg: Run configuration
+        orig_cwd: Original working directory
+
+    Returns:
+        (cache_root, em_cache_root)
+    """
+    default_cache = cfg.get("paths", {}).get("cache_root", "cache")
+    cache_root_cfg = run_cfg.get("cache_path", default_cache)
+    cache_root = _resolve_path(str(cache_root_cfg), orig_cwd)
+    assert cache_root is not None
+
+    em_cache_root_cfg = cfg.get("em_cache_root", str(cache_root))
+    em_cache_root = _resolve_path(str(em_cache_root_cfg), orig_cwd)
+    assert em_cache_root is not None
+
+    return cache_root, em_cache_root
+
+
+@hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
+def main(cfg: DictConfig) -> None:
+    seed, orig_cwd, run_dir, device = _setup_environment(cfg)
     run_cfg = cfg.run if ("run" in cfg and cfg.run is not None) else {}
     ckpt_dir_cfg = run_cfg.get("ckpt_dir", run_cfg.get("ckpt_subdir", "checkpoints"))
     eval_dir_cfg = run_cfg.get("eval_dir", run_cfg.get("eval_subdir", "eval"))
@@ -169,15 +229,7 @@ def main(cfg: DictConfig) -> None:
         f"refresh_instance_after_update={refresh_instance_after_update}"
     )
 
-    # Cache root directories
-    default_cache = cfg.get("paths", {}).get("cache_root", "cache")
-    cache_root_cfg = run_cfg.get("cache_path", default_cache)
-    cache_root = _resolve_path(str(cache_root_cfg), orig_cwd)
-    assert cache_root is not None
-
-    em_cache_root_cfg = cfg.get("em_cache_root", str(cache_root))
-    em_cache_root = _resolve_path(str(em_cache_root_cfg), orig_cwd)
-    assert em_cache_root is not None
+    cache_root, em_cache_root = _resolve_cache_paths(cfg, run_cfg, orig_cwd)
 
     # Dataset bootstrap
     splits_needed = [split_train] if split_val == split_train else [split_train, split_val]
