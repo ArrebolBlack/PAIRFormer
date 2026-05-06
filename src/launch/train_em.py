@@ -101,14 +101,14 @@ def _pick_device(cfg: DictConfig) -> torch.device:
 
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
-    # ---- Basic environment ----
+    # Basic environment
     seed = int(cfg.get("seed", 2020))
     set_seeds(seed)
 
     orig_cwd = Path(get_original_cwd())
     run_dir = Path.cwd()
 
-    # ---- DDP setup ----
+    # DDP setup
     rank, local_rank, world_size = setup_ddp()
     if world_size > 1:
         print_on_rank0(
@@ -120,7 +120,7 @@ def main(cfg: DictConfig) -> None:
         print("[train_em] Single GPU mode")
         device = _pick_device(cfg)
 
-    # ---- ckpt/eval dir ----
+    # Checkpoint and evaluation directories
     run_cfg = cfg.run if ("run" in cfg and cfg.run is not None) else {}
     ckpt_dir_cfg = run_cfg.get("ckpt_dir", run_cfg.get("ckpt_subdir", "checkpoints"))
     eval_dir_cfg = run_cfg.get("eval_dir", run_cfg.get("eval_subdir", "eval"))
@@ -133,12 +133,10 @@ def main(cfg: DictConfig) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- wandb (rank 0 only) ----
+    # WandB setup (rank 0 only)
     wandb_run = setup_wandb(cfg)
 
-    # ----------------------------
-    # 0) data cfg / dataset
-    # ----------------------------
+    # Data config and dataset setup
     data_cfg = DataConfig.from_omegaconf(cfg.data)
 
     split_train = str(run_cfg.get("split", "train"))
@@ -171,7 +169,7 @@ def main(cfg: DictConfig) -> None:
         f"refresh_instance_after_update={refresh_instance_after_update}"
     )
 
-    # cache_root
+    # Cache root directories
     default_cache = cfg.get("paths", {}).get("cache_root", "cache")
     cache_root_cfg = run_cfg.get("cache_path", default_cache)
     cache_root = _resolve_path(str(cache_root_cfg), orig_cwd)
@@ -181,7 +179,7 @@ def main(cfg: DictConfig) -> None:
     em_cache_root = _resolve_path(str(em_cache_root_cfg), orig_cwd)
     assert em_cache_root is not None
 
-    # ---- dataset bootstrap ----
+    # Dataset bootstrap
     splits_needed = [split_train] if split_val == split_train else [split_train, split_val]
     for sp in splits_needed:
         get_or_build_blocks(data_cfg, sp, str(cache_root))
@@ -205,9 +203,7 @@ def main(cfg: DictConfig) -> None:
         _cts_ds_by_split[split] = ds
         return ds
 
-    # ----------------------------
-    # 2) build models
-    # ----------------------------
+    # Build models
     inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
     if inst_cfg is None:
         raise KeyError("[train_em] missing instance model config")
@@ -243,9 +239,7 @@ def main(cfg: DictConfig) -> None:
     if is_ddp():
         agg_model = _apply_sync_batchnorm(agg_model)
 
-    # ---------------------------------------------------------
-    # 3) UpdatePolicy + Controller + Refresh FNs
-    # ---------------------------------------------------------
+    # UpdatePolicy, Controller, and Refresh Functions
     em_node = cfg.get("em", {})
 
     policy_node = em_node.get("policy", None)
@@ -277,9 +271,7 @@ def main(cfg: DictConfig) -> None:
     em_cache_root_str = str(em_cache_root)
     refresh_splits = [split_train] if split_val == split_train else [split_train, split_val]
 
-    # =========================================================
-    # 3.1 Cheap refresh
-    # =========================================================
+    # Cheap cache refresh setup
     cheap_model = None
     cheap_arch_cfg = em_node.get("cheap_model", cfg.get("cheap_model", None))
     if cheap_arch_cfg is not None:
@@ -348,9 +340,7 @@ def main(cfg: DictConfig) -> None:
             cfg=c,
         )
 
-    # =========================================================
-    # 3.2 Selection refresh
-    # =========================================================
+    # Selection cache refresh setup
     def _oc_select(cfg_obj: DictConfig, key: str, default=None):
         try:
             return OmegaConf.select(cfg_obj, key, default=default)
@@ -419,9 +409,7 @@ def main(cfg: DictConfig) -> None:
             world_size=world_size,
         )
 
-    # =========================================================
-    # 3.3 Instance refresh
-    # =========================================================
+    # Instance cache refresh setup
     inst_node = em_node.get("instance_cache", {})
     inst_cache_bs = int(inst_node.get("batch_size", 1024))
     inst_cache_nw = int(inst_node.get("num_workers", num_workers))
@@ -494,10 +482,8 @@ def main(cfg: DictConfig) -> None:
             return False
         return True
 
-    # =========================================================
-    # BOOTSTRAP (build missing caches)
+    # Bootstrap: Build missing caches
     # DDP: only rank 0 builds caches, then barrier
-    # =========================================================
     bootstrap_node = em_node.get("bootstrap", {})
     bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
 
@@ -563,9 +549,7 @@ def main(cfg: DictConfig) -> None:
         # DDP: all ranks wait for cache building to complete
         barrier()
 
-    # ----------------------------
-    # Read meta
-    # ----------------------------
+    # Read metadata from cache
     def read_split_meta(split: str):
         sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
         cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
@@ -587,9 +571,7 @@ def main(cfg: DictConfig) -> None:
     else:
         sel_meta_val, cheap_meta_val = val_meta
 
-    # ----------------------------
-    # 4) DataLoaders
-    # ----------------------------
+    # Build DataLoaders
     if refresh_enabled:
         persistent_workers = False
     if num_workers <= 0:
@@ -711,9 +693,7 @@ def main(cfg: DictConfig) -> None:
     train_loader = build_train_loader()
     val_loader = build_val_loader()
 
-    # ----------------------------
-    # total_cts sanity checks
-    # ----------------------------
+    # Total CTS sanity checks
     total_cts_train = int(len(cts_ds_train))
     total_cts_val = int(len(cts_ds_val))
 
@@ -731,9 +711,7 @@ def main(cfg: DictConfig) -> None:
     _assert_total_cts_matches_cheap(split_train, total_cts_train)
     _assert_total_cts_matches_cheap(split_val, total_cts_val)
 
-    # ----------------------------
-    # 5) TokenProvider
-    # ----------------------------
+    # TokenProvider setup
     tp_cfg_node = cfg.get("token_provider", cfg.get("em", {}).get("token_provider", None))
     if tp_cfg_node is None:
         raise KeyError("[train_em] missing token_provider config")
@@ -826,9 +804,7 @@ def main(cfg: DictConfig) -> None:
             inst_kmax=int(sel_meta.get("kmax", 0)),
         )
 
-    # ----------------------------
-    # 6) TrainerEMConfig
-    # ----------------------------
+    # TrainerEM configuration
     tr_node = cfg.get("trainer_em", None)
     if tr_node is None:
         raise ValueError("Missing config node: cfg.trainer_em")
@@ -892,7 +868,7 @@ def main(cfg: DictConfig) -> None:
         task_cfg=(cfg.task if "task" in cfg else None),
     )
 
-    # ---- resume ----
+    # Resume from checkpoint
     if bool(run_cfg.get("resume", False)) or (run_cfg.get("checkpoint", None) is not None):
         ckpt_path = run_cfg.get("checkpoint", str(ckpt_dir / "best.pt"))
         if ckpt_path is not None and os.path.exists(str(ckpt_path)):
@@ -910,7 +886,7 @@ def main(cfg: DictConfig) -> None:
         finally:
             tr.token_provider_val = old
 
-    # ---- Controller ----
+    # EM Pipeline Controller
     ctrl = EMPipelineController(
         cfg=ctrl_cfg,
         update_policy=policy_train,
@@ -922,9 +898,7 @@ def main(cfg: DictConfig) -> None:
         instance_refresh_fn=instance_refresh_fn,
     )
 
-    # ----------------------------
-    # 7) Main training loop
-    # ----------------------------
+    # Main training loop
     num_epochs = int(tr_cfg.num_epochs)
 
     warmup_epochs = int(pol_cfg_dict.get("warmup_epochs", 0))
@@ -944,7 +918,7 @@ def main(cfg: DictConfig) -> None:
         trainer.state.epoch = epoch
         ctrl.on_epoch_begin(epoch)
 
-        # Decide instance-update epoch
+        # Decide if this is an instance-update epoch
         do_inst_epoch = False
         if inst_every > 0 and epoch >= warmup_epochs:
             do_inst_epoch = ((epoch - warmup_epochs) % inst_every) == 0
@@ -965,7 +939,7 @@ def main(cfg: DictConfig) -> None:
                 {"train_instance": False, "use_instance_cache": train_use_inst_cache_default}
             )
 
-        # E-step + rebuild train loader
+        # E-step: refresh caches and rebuild train loader
         new_loader = ctrl.maybe_refresh_and_rebuild(epoch=epoch)
         refresh_plan = dict(ctrl.last_refresh_plan)
         if new_loader is not None:
@@ -979,12 +953,12 @@ def main(cfg: DictConfig) -> None:
             _sync_token_provider_identity(token_provider_train, split_train)
             _sync_token_provider_identity(token_provider_val, split_val)
 
-        # Train
+        # M-step: Train one epoch
         train_metrics = trainer.train_one_epoch(train_loader)
         train_loss = float(train_metrics.get("loss", 0.0))
         print_on_rank0(f"[Epoch {epoch+1}/{num_epochs}] Train loss = {train_loss:.4f}")
 
-        # Post-update: refresh instance cache if needed
+        # Post-update: refresh instance cache if needed after training
         did_train_inst = float(train_metrics.get("train_inst_pct", 0.0)) > 0.0
 
         post_update_splits = []
@@ -1010,7 +984,7 @@ def main(cfg: DictConfig) -> None:
             barrier()
             _notify_token_providers_cache_refreshed({"refresh_instance_cache": True})
 
-        # Validate
+        # Validation
         val_metrics = trainer.validate_one_epoch(
             val_loader,
             use_ema=True,
@@ -1019,7 +993,7 @@ def main(cfg: DictConfig) -> None:
 
         val_loss = float(val_metrics.get("loss", 0.0))
 
-        # scheduler + best
+        # Update schedulers and check for improvement
         trainer.step_schedulers(val_metrics)
         improved = trainer.update_best(val_metrics)
 
@@ -1046,9 +1020,7 @@ def main(cfg: DictConfig) -> None:
                 f"{trainer.state.best_metric:.6f}. Saved best checkpoint."
             )
 
-    # ============================================================
-    # Post-training evaluation on val split
-    # ============================================================
+    # Post-training evaluation on validation split
     val_eval_dir = Path(eval_dir) / "val"
     val_eval_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1079,9 +1051,7 @@ def main(cfg: DictConfig) -> None:
     if best_threshold is not None:
         print_on_rank0(f"[TrainEM] Best threshold on val = {float(best_threshold):.4f}")
 
-    # ============================================================
     # Optional: evaluate on test splits
-    # ============================================================
     if bool(run_cfg.get("eval_test_after_train", False)):
         print_on_rank0("\n[TrainEM] eval_test_after_train=True, start evaluating on test set...")
 
@@ -1123,7 +1093,7 @@ def main(cfg: DictConfig) -> None:
                 test_root = Path(eval_dir) / "test" / str(split_idx) / tag_prefix
                 test_root.mkdir(parents=True, exist_ok=True)
 
-                # (A) fixed threshold = 0.5
+                # Evaluate with fixed threshold = 0.5
                 task_fixed = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
                 task_fixed.threshold = 0.5
                 out_dir_fixed = test_root / "thr0_5"
@@ -1153,7 +1123,7 @@ def main(cfg: DictConfig) -> None:
                         topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                     )
 
-                # (B) val best_threshold
+                # Evaluate with val best_threshold
                 res_valbest = None
                 if best_threshold is not None:
                     task_valbest = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
@@ -1187,7 +1157,7 @@ def main(cfg: DictConfig) -> None:
                             topk=int(run_cfg.get("test_topk", run_cfg.get("eval_topk", 3))),
                         )
 
-                # (C) sweep
+                # Evaluate with threshold sweep
                 task_sweep = OmegaConf.create(OmegaConf.to_container(cfg.task, resolve=True))
                 out_dir_sweep = test_root / "sweep"
                 out_dir_sweep.mkdir(parents=True, exist_ok=True)
@@ -1287,7 +1257,7 @@ def main(cfg: DictConfig) -> None:
         except Exception:
             pass
 
-    # Cleanup DDP
+    # Cleanup DDP resources
     if is_ddp():
         cleanup_ddp()
 
