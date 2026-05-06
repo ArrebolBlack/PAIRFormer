@@ -423,6 +423,29 @@ def _read_split_meta(
     return _load_json(sel_meta_p), _load_json(cheap_meta_p)
 
 
+def _load_sel_meta(em_cache_root: Path, split: str) -> Dict[str, Any]:
+    """Load selection metadata for a split."""
+    p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
+    return _load_json(p)
+
+
+def _assert_total_cts_matches_cheap(
+    em_cache_root: Path,
+    split_name: str,
+    expected: int,
+) -> None:
+    """Verify total CTS count matches cheap cache metadata."""
+    meta_p = os.path.join(str(em_cache_root), "em_cache", split_name, "cheap", "meta.json")
+    if os.path.exists(meta_p):
+        with open(meta_p, "r") as f:
+            d = json.load(f)
+        got = int(d.get("total_cts", -1))
+        if got != expected:
+            raise RuntimeError(
+                f"[train_em] total_cts mismatch for split={split_name}: dataset={expected} vs cheap_meta={got}"
+            )
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
@@ -736,12 +759,8 @@ def main(cfg: DictConfig) -> None:
 
     use_persistent = persistent_workers and (num_workers > 0)
 
-    def _load_sel_meta(split: str) -> Dict[str, Any]:
-        p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
-        return _load_json(p)
-
     def build_train_loader() -> DataLoader:
-        meta = _load_sel_meta(split_train)
+        meta = _load_sel_meta(em_cache_root, split_train)
         cpu_builder = PairBatchBuilderCPU(
             cts_ds=cts_ds_train,
             em_cache_root=em_cache_root,
@@ -769,7 +788,7 @@ def main(cfg: DictConfig) -> None:
         )
 
     def build_val_loader() -> DataLoader:
-        meta = _load_sel_meta(split_val)
+        meta = _load_sel_meta(em_cache_root, split_val)
         cpu_builder = PairBatchBuilderCPU(
             cts_ds=cts_ds_val,
             em_cache_root=em_cache_root,
@@ -854,19 +873,8 @@ def main(cfg: DictConfig) -> None:
     total_cts_train = int(len(cts_ds_train))
     total_cts_val = int(len(cts_ds_val))
 
-    def _assert_total_cts_matches_cheap(split_name: str, expected: int) -> None:
-        meta_p = os.path.join(str(em_cache_root), "em_cache", split_name, "cheap", "meta.json")
-        if os.path.exists(meta_p):
-            with open(meta_p, "r") as f:
-                d = json.load(f)
-            got = int(d.get("total_cts", -1))
-            if got != expected:
-                raise RuntimeError(
-                    f"[train_em] total_cts mismatch for split={split_name}: dataset={expected} vs cheap_meta={got}"
-                )
-
-    _assert_total_cts_matches_cheap(split_train, total_cts_train)
-    _assert_total_cts_matches_cheap(split_val, total_cts_val)
+    _assert_total_cts_matches_cheap(em_cache_root, split_train, total_cts_train)
+    _assert_total_cts_matches_cheap(em_cache_root, split_val, total_cts_val)
 
     # TokenProvider setup
     tp_cfg_node = cfg.get("token_provider", cfg.get("em", {}).get("token_provider", None))
