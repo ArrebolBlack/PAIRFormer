@@ -221,26 +221,18 @@ def main(cfg: DictConfig) -> None:
     # Load instance pretrained checkpoint
     inst_ckpt = _resolve_path(cfg.get("instance_ckpt_path", None), orig_cwd)
     if inst_ckpt is None:
-        raise RuntimeError("[train_em] instance_ckpt is None, do u mean from scratch?")
-    if inst_ckpt is not None and inst_ckpt.exists():
-        ckpt = torch.load(str(inst_ckpt), map_location="cpu")
-        sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-        cleaned = {}
-        for k, v in sd.items():
-            for pref in ("model.", "module.", "net."):
-                if k.startswith(pref):
-                    k = k[len(pref) :]
-            cleaned[k] = v
-        missing, unexpected = instance_model.load_state_dict(cleaned, strict=False)
-        if missing:
-            print(
-                f"[train_em] WARN instance missing keys: {len(missing)} (first10): {missing[:10]}"
-            )
-        if unexpected:
-            print(
-                f"[train_em] WARN instance unexpected keys: {len(unexpected)} (first10): {unexpected[:10]}"
-            )
-        instance_model.to(device)
+        raise RuntimeError("[train_em] instance_ckpt_path is required (not training from scratch)")
+
+    if not inst_ckpt.exists():
+        raise FileNotFoundError(f"[train_em] Instance checkpoint not found: {inst_ckpt}")
+
+    from src.utils.checkpoint import load_model_checkpoint
+    missing, unexpected = load_model_checkpoint(instance_model, inst_ckpt, strict=False, device=device)
+
+    if missing:
+        print(f"[train_em] WARN: {len(missing)} missing keys (first 10): {missing[:10]}")
+    if unexpected:
+        print(f"[train_em] WARN: {len(unexpected)} unexpected keys (first 10): {unexpected[:10]}")
 
     agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
     if agg_cfg is None:

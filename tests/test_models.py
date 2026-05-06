@@ -6,12 +6,12 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from src.models.registry import build_model, get_registered_models
+from src.models.registry import build_model, list_registered_models
 
 
 def test_registry_has_models():
     """Test that models are registered"""
-    models = get_registered_models()
+    models = list_registered_models()
     assert len(models) > 0
     assert "PairSetTransformerAggregator" in models
     assert "TargetNet_Optimized" in models
@@ -20,11 +20,14 @@ def test_registry_has_models():
 
 def test_build_model():
     """Test building a model"""
+    # Use actual required config fields from PairSetTransformerAggregator.__init__
     cfg = OmegaConf.create(
         {
             "arch": "PairSetTransformerAggregator",
-            "num_heads": 4,
-            "num_inds": 32,
+            "in_dim": 387,  # Required field
+            "d_model": 256,
+            "n_heads": 4,
+            "n_layers": 2,
         }
     )
 
@@ -38,9 +41,10 @@ def test_model_forward():
     cfg = OmegaConf.create(
         {
             "arch": "PairSetTransformerAggregator",
-            "num_heads": 4,
-            "num_inds": 32,
-            "dim_hidden": 128,
+            "in_dim": 387,  # Required field
+            "d_model": 128,
+            "n_heads": 4,
+            "n_layers": 2,
         }
     )
 
@@ -58,7 +62,7 @@ def test_model_forward():
     with torch.no_grad():
         output = model(tokens, mask)
 
-    assert output.shape == (batch_size, 1)
+    assert output.shape == (batch_size,)  # Returns [B], not [B,1]
 
 
 if __name__ == "__main__":
