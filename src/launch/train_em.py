@@ -303,6 +303,8 @@ def _run_final_val_evaluation(
 
     return best_threshold
 
+
+@hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
     run_cfg = cfg.run if ("run" in cfg and cfg.run is not None) else {}
@@ -579,41 +581,16 @@ def main(cfg: DictConfig) -> None:
             world_size=world_size,
         )
 
-    def _expected_identity(split: str) -> tuple[str, str]:
+    def _expected_identity_for_split(split: str) -> tuple[str, str]:
         ds = _get_cts_ds(split)
-        return str(getattr(ds, "path_hash")), str(getattr(ds, "dataset_hash_key"))
+        return _expected_identity(ds)
 
-    def _is_stage_compatible(split: str, stage: str) -> bool:
-        p = em_cache_root / "em_cache" / split / stage / "meta.json"
-        if not p.exists():
-            return False
-        d = _load_json(p)
-        if str(d.get("state", "")) != "ready":
-            return False
-        exp_path_hash, exp_dataset_hash_key = _expected_identity(split)
-        if str(d.get("path_hash", "")) != exp_path_hash:
-            return False
-        if str(d.get("dataset_hash_key", "")) != exp_dataset_hash_key:
-            return False
-        return True
+    def _is_stage_compatible_for_split(split: str, stage: str) -> bool:
+        ds = _get_cts_ds(split)
+        return _is_stage_compatible(em_cache_root, split, stage, ds)
 
-    def _load_meta_if_exists(split: str, stage: str) -> Optional[Dict[str, Any]]:
-        p = em_cache_root / "em_cache" / split / stage / "meta.json"
-        if not p.exists():
-            return None
-        return _load_json(p)
-
-    def _selection_ready_and_match(split: str) -> bool:
-        meta = _load_meta_if_exists(split, "selection")
-        if meta is None:
-            return False
-        if str(meta.get("state", "")) != "ready":
-            return False
-        if str(meta.get("sel_version", "")) != str(sel_version):
-            return False
-        if str(meta.get("cheap_version_used", "")) != str(cheap_version):
-            return False
-        return True
+    def _selection_ready_and_match_for_split(split: str) -> bool:
+        return _selection_ready_and_match(em_cache_root, split, str(sel_version), str(cheap_version))
 
     # Bootstrap: Build missing caches
     # DDP: only rank 0 builds caches, then barrier
@@ -631,13 +608,13 @@ def main(cfg: DictConfig) -> None:
 
     if bootstrap_enabled:
         need_cheap = bootstrap_overwrite_all or any(
-            not _is_stage_compatible(sp, "cheap") for sp in refresh_splits
+            not _is_stage_compatible_for_split(sp, "cheap") for sp in refresh_splits
         )
         need_sel = bootstrap_overwrite_all or any(
-            not _selection_ready_and_match(sp) for sp in refresh_splits
+            not _selection_ready_and_match_for_split(sp) for sp in refresh_splits
         )
         need_inst = bootstrap_overwrite_all or any(
-            not _is_stage_compatible(sp, "instance") for sp in refresh_splits
+            not _is_stage_compatible_for_split(sp, "instance") for sp in refresh_splits
         )
 
         if need_cheap:
