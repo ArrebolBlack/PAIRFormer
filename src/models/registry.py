@@ -64,7 +64,10 @@ def register_model(name: str):
 
     def wrapper(cls: Type[nn.Module]) -> Type[nn.Module]:
         if not issubclass(cls, nn.Module):
-            raise TypeError(f"@register_model('{name}') 只能用于 nn.Module 子类，当前: {cls}")
+            raise TypeError(
+                f"[registry.register_model] @register_model('{name}') can only decorate "
+                f"nn.Module subclasses, got: {cls}"
+            )
         _MODEL_REGISTRY[name] = cls
         setattr(cls, "_registry_name", name)
         return cls
