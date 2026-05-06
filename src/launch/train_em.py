@@ -178,20 +178,135 @@ def _resolve_cache_paths(cfg: DictConfig, run_cfg: DictConfig, orig_cwd: Path) -
     return cache_root, em_cache_root
 
 
-@hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
+def _build_models(
+    cfg: DictConfig,
+    data_cfg: DataConfig,
+    device: torch.device,
+    orig_cwd: Path,
+) -> Tuple[torch.nn.Module, torch.nn.Module]:
+    """Build instance model and aggregator model.
+
+    Args:
+        cfg: Hydra configuration
+        data_cfg: Data configuration
+        device: Target device
+        orig_cwd: Original working directory
+
+    Returns:
+        (instance_model, agg_model)
+    """
+    # Build instance model
+    inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
+    if inst_cfg is None:
+        raise KeyError("[train_em] missing instance model config")
+
+    inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
+    instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device)
+
+    if is_ddp():
+        instance_model = _apply_sync_batchnorm(instance_model)
+
+    # Load instance pretrained checkpoint
+    inst_ckpt = _resolve_path(cfg.get("instance_ckpt_path", None), orig_cwd)
+    if inst_ckpt is None:
+        raise RuntimeError("[train_em] instance_ckpt_path is required (not training from scratch)")
+
+    if not inst_ckpt.exists():
+        raise FileNotFoundError(f"[train_em] Instance checkpoint not found: {inst_ckpt}")
+
+    from src.utils.checkpoint import load_model_checkpoint
+
+    missing, unexpected = load_model_checkpoint(instance_model, inst_ckpt, strict=False, device=device)
+
+    if missing:
+        print(f"[train_em] WARN: {len(missing)} missing keys (first 10): {missing[:10]}")
+    if unexpected:
+        print(f"[train_em] WARN: {len(unexpected)} unexpected keys (first 10): {unexpected[:10]}")
+
+    # Build aggregator model
+    agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
+    if agg_cfg is None:
+        raise KeyError("[train_em] missing aggregator model config")
+
+    agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
+    agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device)
+
+    if is_ddp():
+        agg_model = _apply_sync_batchnorm(agg_model)
+
+    return instance_model, agg_model
+
+
+def _run_final_val_evaluation(
+    trainer: TrainerEM,
+    cfg: DictConfig,
+    val_loader: DataLoader,
+    val_set_labels: Optional[Dict[str, Any]],
+    eval_dir: Path,
+    wandb_run: Optional[Any],
+) -> Optional[float]:
+    """Run final validation evaluation and log metrics.
+
+    Args:
+        trainer: Trainer instance
+        cfg: Hydra configuration
+        val_loader: Validation loader
+        val_set_labels: Validation labels
+        eval_dir: Evaluation output directory
+        wandb_run: Optional WandB run
+
+    Returns:
+        Best threshold if available, else None
+    """
+    val_eval_dir = eval_dir / "val"
+    val_eval_dir.mkdir(parents=True, exist_ok=True)
+
+    val_eval_result = evaluate_with_trainer(
+        trainer=trainer,
+        loader=val_loader,
+        set_labels=val_set_labels,
+        aggregate_sets=True,
+        output_dir=str(val_eval_dir),
+        split_name="val",
+        device=trainer.device,
+        reduction=cfg.run.get("eval_reduction", "max"),
+        softmax_temp=cfg.run.get("eval_softmax_temp", 1.0),
+        topk=cfg.run.get("eval_topk", 3),
+    )
+
+    best_threshold = val_eval_result.get("best_threshold", None)
+    metrics = val_eval_result.get("metrics", {})
+
+    print("\n[Train] Final val metrics:")
+    for k, v in val_eval_result.get("metrics", {}).items():
+        if isinstance(v, numbers.Number):
+            print(f"  {k}: {float(v):.4f}")
+        else:
+            print(f"  {k}: {v}")
+
+    if best_threshold is not None:
+        print(f"[Train] Best threshold on val = {best_threshold:.4f}")
+    else:
+        print("[Train] No best_threshold from evaluator (maybe sweep disabled).")
+
+    print("\n[Train] Final val metrics (scalar only):")
+    for k, v in iter_scalar_metrics(metrics):
+        print(f"  {k}: {v:.4f}")
+
+    if "confusion_matrix" in metrics:
+        print("  confusion_matrix:")
+        print(np.array(metrics["confusion_matrix"]))
+
+    if best_threshold is not None and wandb_run is not None:
+        import wandb
+        wandb.run.summary["val/best_threshold"] = float(best_threshold)
+
+    return best_threshold
+
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
     run_cfg = cfg.run if ("run" in cfg and cfg.run is not None) else {}
-    ckpt_dir_cfg = run_cfg.get("ckpt_dir", run_cfg.get("ckpt_subdir", "checkpoints"))
-    eval_dir_cfg = run_cfg.get("eval_dir", run_cfg.get("eval_subdir", "eval"))
-    ckpt_dir = Path(ckpt_dir_cfg)
-    eval_dir = Path(eval_dir_cfg)
-    if not ckpt_dir.is_absolute():
-        ckpt_dir = run_dir / ckpt_dir
-    if not eval_dir.is_absolute():
-        eval_dir = run_dir / eval_dir
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    eval_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir, eval_dir = _build_output_dirs(run_cfg, run_dir)
 
     # WandB setup (rank 0 only)
     wandb_run = setup_wandb(cfg)
@@ -255,41 +370,7 @@ def main(cfg: DictConfig) -> None:
         _cts_ds_by_split[split] = ds
         return ds
 
-    # Build models
-    inst_cfg = _get_cfg_node(cfg, "instance_model", "cts_model", "model_instance")
-    if inst_cfg is None:
-        raise KeyError("[train_em] missing instance model config")
-
-    inst_arch = str(inst_cfg.get("arch", inst_cfg.get("name")))
-    instance_model = build_model(inst_arch, inst_cfg, data_cfg=data_cfg).to(device)
-
-    if is_ddp():
-        instance_model = _apply_sync_batchnorm(instance_model)
-
-    # Load instance pretrained checkpoint
-    inst_ckpt = _resolve_path(cfg.get("instance_ckpt_path", None), orig_cwd)
-    if inst_ckpt is None:
-        raise RuntimeError("[train_em] instance_ckpt_path is required (not training from scratch)")
-
-    if not inst_ckpt.exists():
-        raise FileNotFoundError(f"[train_em] Instance checkpoint not found: {inst_ckpt}")
-
-    from src.utils.checkpoint import load_model_checkpoint
-    missing, unexpected = load_model_checkpoint(instance_model, inst_ckpt, strict=False, device=device)
-
-    if missing:
-        print(f"[train_em] WARN: {len(missing)} missing keys (first 10): {missing[:10]}")
-    if unexpected:
-        print(f"[train_em] WARN: {len(unexpected)} unexpected keys (first 10): {unexpected[:10]}")
-
-    agg_cfg = _get_cfg_node(cfg, "model", "agg_model", "pair_model")
-    if agg_cfg is None:
-        raise KeyError("[train_em] missing aggregator model config")
-    agg_arch = str(agg_cfg.get("arch", agg_cfg.get("name")))
-    agg_model = build_model(agg_arch, agg_cfg, data_cfg=data_cfg).to(device)
-
-    if is_ddp():
-        agg_model = _apply_sync_batchnorm(agg_model)
+    instance_model, agg_model = _build_models(cfg, data_cfg, device, orig_cwd)
 
     # UpdatePolicy, Controller, and Refresh Functions
     em_node = cfg.get("em", {})
@@ -1073,35 +1154,14 @@ def main(cfg: DictConfig) -> None:
             )
 
     # Post-training evaluation on validation split
-    val_eval_dir = Path(eval_dir) / "val"
-    val_eval_dir.mkdir(parents=True, exist_ok=True)
-
-    _val_pk = {"use_instance_cache": val_use_inst_cache_default}
-    val_eval_result = evaluate_with_trainer(
+    best_threshold = _run_final_val_evaluation(
         trainer=trainer,
-        loader=val_loader,
-        task_cfg=cfg.task,
-        logging_cfg=cfg.logging,
-        output_dir=str(val_eval_dir),
-        set_labels=None,
-        aggregate_sets=False,
-        tag="val",
-        do_threshold_sweep=cfg.eval.do_threshold_sweep,
-        sweep_num_thresholds=cfg.eval.sweep_num_thresholds,
-        reduction=cfg.run.get("eval_reduction", "max"),
-        softmax_temp=cfg.run.get("eval_softmax_temp", 1.0),
-        topk=cfg.run.get("eval_topk", 3),
-        predict_kwargs=_val_pk,
+        cfg=cfg,
+        val_loader=val_loader,
+        val_set_labels=None,
+        eval_dir=Path(eval_dir),
+        wandb_run=wandb_run,
     )
-
-    best_threshold = val_eval_result.get("best_threshold", None)
-    metrics = val_eval_result.get("metrics", {})
-
-    print_on_rank0("\n[TrainEM] Final val metrics:")
-    for k, v in iter_scalar_metrics(metrics):
-        print_on_rank0(f"  {k}: {v:.4f}")
-    if best_threshold is not None:
-        print_on_rank0(f"[TrainEM] Best threshold on val = {float(best_threshold):.4f}")
 
     # Optional: evaluate on test splits
     if bool(run_cfg.get("eval_test_after_train", False)):
