@@ -318,6 +318,111 @@ def _stable_cfg_hash(obj: Any) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
 
 
+def _bootstrap_em_caches(
+    bootstrap_node: DictConfig,
+    force_overwrite_bootstrap: bool,
+    refresh_splits: List[str],
+    cheap_refresh_fn: Callable,
+    selection_refresh_fn: Callable,
+    instance_refresh_fn: Callable,
+    is_stage_compatible_fn: Callable[[str, str], bool],
+    selection_ready_fn: Callable[[str], bool],
+) -> None:
+    """Bootstrap EM caches if needed (rank 0 only, then barrier).
+
+    Args:
+        bootstrap_node: Bootstrap configuration
+        force_overwrite_bootstrap: Force overwrite all caches
+        refresh_splits: Splits to refresh
+        cheap_refresh_fn: Cheap cache refresh callback
+        selection_refresh_fn: Selection cache refresh callback
+        instance_refresh_fn: Instance cache refresh callback
+        is_stage_compatible_fn: Check if stage is compatible
+        selection_ready_fn: Check if selection is ready
+    """
+    bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
+    if not bootstrap_enabled:
+        return
+
+    bootstrap_overwrite_all = (
+        True if force_overwrite_bootstrap else bool(bootstrap_node.get("overwrite_all", True))
+    )
+    bootstrap_skip_if_ready = (
+        False if bootstrap_overwrite_all else bool(bootstrap_node.get("skip_if_ready", True))
+    )
+    bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
+    bootstrap_skip_instance = bool(bootstrap_node.get("skip_instance_cache", False))
+
+    need_cheap = bootstrap_overwrite_all or any(
+        not is_stage_compatible_fn(sp, "cheap") for sp in refresh_splits
+    )
+    need_sel = bootstrap_overwrite_all or any(
+        not selection_ready_fn(sp) for sp in refresh_splits
+    )
+    need_inst = bootstrap_overwrite_all or any(
+        not is_stage_compatible_fn(sp, "instance") for sp in refresh_splits
+    )
+
+    # Dependency propagation: cheap → selection → instance
+    if need_cheap:
+        need_sel = True
+        if not bootstrap_skip_instance:
+            need_inst = True
+    if need_sel:
+        if not bootstrap_skip_instance:
+            need_inst = True
+
+    if bootstrap_skip_instance:
+        need_inst = False
+
+    if need_cheap or need_sel or need_inst:
+        print_on_rank0(
+            f"[train_em] BOOTSTRAP: overwrite_all={bootstrap_overwrite_all} "
+            f"need_cheap={need_cheap} need_sel={need_sel} need_inst={need_inst} "
+            f"splits={refresh_splits}"
+        )
+
+    # DDP: only rank 0 builds caches
+    if is_rank0():
+        if need_cheap:
+            cheap_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+        if need_sel:
+            selection_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+        if need_inst:
+            instance_refresh_fn(
+                bootstrap_epoch0,
+                overwrite=bootstrap_overwrite_all,
+                skip_if_ready=bootstrap_skip_if_ready,
+            )
+
+    # DDP: all ranks wait for cache building to complete
+    barrier()
+
+
+def _read_split_meta(
+    em_cache_root: Path,
+    split: str,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Read selection and cheap metadata for a split.
+
+    Returns:
+        (sel_meta, cheap_meta) if both exist, else None
+    """
+    sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
+    cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
+    if (not sel_meta_p.exists()) or (not cheap_meta_p.exists()):
+        return None
+    return _load_json(sel_meta_p), _load_json(cheap_meta_p)
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
@@ -597,86 +702,24 @@ def main(cfg: DictConfig) -> None:
         return _selection_ready_and_match(em_cache_root, split, str(sel_version), str(cheap_version))
 
     # Bootstrap: Build missing caches
-    # DDP: only rank 0 builds caches, then barrier
-    bootstrap_node = em_node.get("bootstrap", {})
-    bootstrap_enabled = bool(bootstrap_node.get("enabled", True))
-
-    bootstrap_overwrite_all = (
-        True if force_overwrite_bootstrap else bool(bootstrap_node.get("overwrite_all", True))
+    _bootstrap_em_caches(
+        bootstrap_node=em_node.get("bootstrap", {}),
+        force_overwrite_bootstrap=force_overwrite_bootstrap,
+        refresh_splits=refresh_splits,
+        cheap_refresh_fn=cheap_refresh_fn,
+        selection_refresh_fn=selection_refresh_fn,
+        instance_refresh_fn=instance_refresh_fn,
+        is_stage_compatible_fn=_is_stage_compatible_for_split,
+        selection_ready_fn=_selection_ready_and_match_for_split,
     )
-    bootstrap_skip_if_ready = (
-        False if bootstrap_overwrite_all else bool(bootstrap_node.get("skip_if_ready", True))
-    )
-    bootstrap_epoch0 = int(bootstrap_node.get("epoch", 0))
-    bootstrap_skip_instance = bool(bootstrap_node.get("skip_instance_cache", False))
-
-    if bootstrap_enabled:
-        need_cheap = bootstrap_overwrite_all or any(
-            not _is_stage_compatible_for_split(sp, "cheap") for sp in refresh_splits
-        )
-        need_sel = bootstrap_overwrite_all or any(
-            not _selection_ready_and_match_for_split(sp) for sp in refresh_splits
-        )
-        need_inst = bootstrap_overwrite_all or any(
-            not _is_stage_compatible_for_split(sp, "instance") for sp in refresh_splits
-        )
-
-        if need_cheap:
-            need_sel = True
-            if not bootstrap_skip_instance:
-                need_inst = True
-        if need_sel:
-            if not bootstrap_skip_instance:
-                need_inst = True
-
-        if bootstrap_skip_instance:
-            need_inst = False
-
-        if need_cheap or need_sel or need_inst:
-            print_on_rank0(
-                f"[train_em] BOOTSTRAP: overwrite_all={bootstrap_overwrite_all} "
-                f"need_cheap={need_cheap} need_sel={need_sel} need_inst={need_inst} "
-                f"splits={refresh_splits}"
-            )
-
-        # DDP: only rank 0 builds caches
-        if is_rank0():
-            if need_cheap:
-                cheap_refresh_fn(
-                    bootstrap_epoch0,
-                    overwrite=bootstrap_overwrite_all,
-                    skip_if_ready=bootstrap_skip_if_ready,
-                )
-            if need_sel:
-                selection_refresh_fn(
-                    bootstrap_epoch0,
-                    overwrite=bootstrap_overwrite_all,
-                    skip_if_ready=bootstrap_skip_if_ready,
-                )
-            if need_inst:
-                instance_refresh_fn(
-                    bootstrap_epoch0,
-                    overwrite=bootstrap_overwrite_all,
-                    skip_if_ready=bootstrap_skip_if_ready,
-                )
-
-        # DDP: all ranks wait for cache building to complete
-        barrier()
 
     # Read metadata from cache
-    def read_split_meta(split: str):
-        sel_meta_p = em_cache_root / "em_cache" / split / "selection" / "meta.json"
-        cheap_meta_p = em_cache_root / "em_cache" / split / "cheap" / "meta.json"
-        if (not sel_meta_p.exists()) or (not cheap_meta_p.exists()):
-            return None
-        return _load_json(sel_meta_p), _load_json(cheap_meta_p)
-
-    train_meta = read_split_meta(split_train)
+    train_meta = _read_split_meta(em_cache_root, split_train)
     if train_meta is None:
         raise FileNotFoundError(f"[train_em] missing meta for split={split_train}")
     sel_meta_train, cheap_meta_train = train_meta
 
-    val_meta = read_split_meta(split_val)
+    val_meta = _read_split_meta(em_cache_root, split_val)
     if val_meta is None:
         print_on_rank0(
             f"[train_em] WARN val meta not found for split={split_val}, fallback to train meta."
