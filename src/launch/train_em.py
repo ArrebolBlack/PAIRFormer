@@ -446,6 +446,37 @@ def _assert_total_cts_matches_cheap(
             )
 
 
+def _sync_token_provider_identity(
+    tp: Any,
+    em_cache_root: Path,
+    split: str,
+) -> None:
+    """Sync token provider identity fields from selection metadata."""
+    meta = _load_sel_meta(em_cache_root, split)
+    if hasattr(tp, "path_hash"):
+        tp.path_hash = str(meta["path_hash"])
+    if hasattr(tp, "dataset_hash_key"):
+        tp.dataset_hash_key = str(meta["dataset_hash_key"])
+    if hasattr(tp, "sel_version_used"):
+        tp.sel_version_used = str(
+            meta.get("sel_version", getattr(tp, "sel_version_used", "sel_v0"))
+        )
+    if hasattr(tp, "cheap_version_used"):
+        tp.cheap_version_used = str(
+            meta.get("cheap_version_used", getattr(tp, "cheap_version_used", "cheap_v0"))
+        )
+
+
+def _notify_token_providers_cache_refreshed(
+    token_providers: List[Any],
+    plan: Dict[str, bool],
+) -> None:
+    """Notify token providers that caches have been refreshed."""
+    for tp in token_providers:
+        if hasattr(tp, "on_cache_refreshed"):
+            tp.on_cache_refreshed(plan)
+
+
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     seed, orig_cwd, run_dir, device = _setup_environment(cfg)
@@ -805,56 +836,6 @@ def main(cfg: DictConfig) -> None:
         sampler = get_ddp_sampler(pair_ds_val, shuffle=False, seed=seed)
         return DataLoader(
             pair_ds_val,
-            batch_size=batch_size,
-            sampler=sampler,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=use_persistent,
-            collate_fn=cpu_builder,
-            drop_last=False,
-        )
-
-    def _sync_token_provider_identity(tp: Any, split: str) -> None:
-        meta = _load_sel_meta(split)
-        if hasattr(tp, "path_hash"):
-            tp.path_hash = str(meta["path_hash"])
-        if hasattr(tp, "dataset_hash_key"):
-            tp.dataset_hash_key = str(meta["dataset_hash_key"])
-        if hasattr(tp, "sel_version_used"):
-            tp.sel_version_used = str(
-                meta.get("sel_version", getattr(tp, "sel_version_used", "sel_v0"))
-            )
-        if hasattr(tp, "cheap_version_used"):
-            tp.cheap_version_used = str(
-                meta.get("cheap_version_used", getattr(tp, "cheap_version_used", "cheap_v0"))
-            )
-
-    def _notify_token_providers_cache_refreshed(plan: Dict[str, bool]) -> None:
-        for tp in [token_provider_train, token_provider_val]:
-            if hasattr(tp, "on_cache_refreshed"):
-                tp.on_cache_refreshed(plan)
-
-    def build_eval_loader_for_split(split: str) -> DataLoader:
-        ds = _get_cts_ds(split)
-        pair_ds = DynamicPairDataset(ds)
-        meta = _load_sel_meta(split)
-        cpu_builder = PairBatchBuilderCPU(
-            cts_ds=ds,
-            em_cache_root=em_cache_root,
-            split=split,
-            cfg=PairBatchBuilderCPUConfig(
-                kmax=kmax,
-                include_pos=bool(run_cfg.get("include_pos", True)),
-                include_esa=bool(run_cfg.get("include_esa", True)),
-                pin_memory=True,
-            ),
-            expected_path_hash=str(meta["path_hash"]),
-            expected_dataset_hash_key=str(meta["dataset_hash_key"]),
-        )
-        sampler = get_ddp_sampler(pair_ds, shuffle=False, seed=seed)
-        return DataLoader(
-            pair_ds,
             batch_size=batch_size,
             sampler=sampler,
             shuffle=False,
