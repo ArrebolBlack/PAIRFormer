@@ -225,36 +225,6 @@ def main(cfg: DictConfig):
     experiment_cfg = cfg.get("experiment", None)
     task_mode = getattr(experiment_cfg, "task", None) if experiment_cfg is not None else None
 
-    def build_loader_for_split(split_name: str):
-        """
-        Build dataset and loader for given split (val/test).
-        Returns (dataset, loader, set_labels, aggregate_sets_flag).
-        """
-        if task_mode == "pair_level_train":
-            ds, ld = build_pair_level_dataset_and_loader(
-                pair_cfg=cfg.data.pair,
-                split=split_name,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                shuffle=False,
-                drop_last=False,
-            )
-            return ds, ld, None, False
-        else:
-            ds, ld = build_dataset_and_loader(
-                data_cfg=data_cfg,
-                split_idx=split_name,
-                cache_data_path=cache_root,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                shuffle=False,
-                drop_last=False,
-            )
-            set_labels_local = get_set_labels(data_cfg, split_name)
-            return ds, ld, set_labels_local, True
-
     def build_train_val_loaders():
         """Build train and val loaders based on task mode."""
         if task_mode == "pair_level_train":
@@ -448,7 +418,37 @@ def main(cfg: DictConfig):
         max_batches = int(max_batches) if max_batches is not None else None
 
         print(f"\n[Efficiency] Benchmarking inference throughput on split='{bench_split}' ...")
-        _, bench_loader, _, _ = build_loader_for_split(bench_split)
+
+        # Build loader for benchmark split
+        if task_mode == "pair_level_train":
+            _, bench_loader, _, _ = (
+                *build_pair_level_dataset_and_loader(
+                    pair_cfg=cfg.data.pair,
+                    split=bench_split,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory,
+                    shuffle=False,
+                    drop_last=False,
+                ),
+                None,
+                False,
+            )
+        else:
+            _, bench_loader, _, _ = (
+                *build_dataset_and_loader(
+                    data_cfg=data_cfg,
+                    split_idx=bench_split,
+                    cache_data_path=cache_root,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory,
+                    shuffle=False,
+                    drop_last=False,
+                ),
+                get_set_labels(data_cfg, bench_split),
+                True,
+            )
 
         infer_stats = trainer.benchmark_inference(
             bench_loader,
