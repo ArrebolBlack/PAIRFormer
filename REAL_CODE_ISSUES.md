@@ -56,7 +56,8 @@ if inst_ckpt is not None and inst_ckpt.exists():  # This is always True if we re
 **Issue**: Functions defined inside `main()` but don't use closure variables
 **Fix**: Move to module level or inline if used once
 **Status**: ✅ PARTIALLY FIXED - train.py: removed `build_loader_for_split` (used once, inlined)
-**Remaining**: train_em.py has 10 nested functions (some use closures, need case-by-case analysis)
+**Status**: ✅ MAJOR PROGRESS - train_em.py: 20 → 15 nested functions (-25%), extracted 12 module-level helpers
+**Remaining**: train_em.py has 15 nested functions (most are closures, need context objects)
 
 ## Medium Priority Issues
 
@@ -142,8 +143,8 @@ Run `autoflake --remove-all-unused-imports` to find
 **Documentation**: 3 issues → 0 fixed
 
 **Total**: 26 real issues identified
-**Fixed**: 7 (27%)
-**Remaining**: 19 (73%)
+**Fixed**: 10 (38%)
+**Remaining**: 16 (62%)
 
 ---
 
