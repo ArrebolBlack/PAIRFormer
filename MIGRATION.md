@@ -101,8 +101,23 @@ freeze 缺失的 `scikit-learn/pandas/matplotlib/seaborn`（与 numpy 1.24.4/py3
   在服务器跑。**本机 Windows 无法本地起多进程 DDP**（torch 2.4.1 Windows 构建缺 libuv → torchrun
   rendezvous 失败；mp.spawn 亦不稳）—— 故多卡一律服务器验证。EM 路径 DDP 早已可用。
 
-## 待办（后续层）
-- **L2b** DDP launcher 样板收口到 `src/utils/ddp.py`（3 个 launcher 的 setup/device/SyncBN/
-  sampler/rank0 去重，行为保持）；**L4 续** `evaluate_test_abc_once` 收编三处 A/B/C 手抄、trainer.py
-  注释死代码；**L5** 数值优化开关（AMP/compile，默认关）；**L6 续** lock 重生 + README。
-- **阶段4** EXPERIMENTS.md（见仓库 EXPERIMENTS.md）+ 逐条总验收。每层等价闸门见 refactor_plan.md。
+### ✅ L4 续 + L2b（commit b71b924 / a56b922 / c843c84 等）
+- `BaseCheapCTSNet`：TinyConv/StatsMLP 共享 `_get_meta`/`_init_weights`/forward-tail
+  （StatsMLP `emb_mlp`→`emb_head`；extractors 只用 TinyConv，安全）。golden 逐位一致。
+- 删 TargetNet_Optimized 内 75 行注释死代码（边界校验脚本）。
+- `_apply_sync_batchnorm` 收口到 `ddp.apply_sync_batchnorm`（L2b）。
+- 新增 Stage-1 golden 回归 `tests/test_stage1_models_golden.py`（4 模型）。
+
+## 本地优化已收尾 —— 余下需服务器/有意延后
+本机可安全验证的去重/质量优化已做完（配置/checkpoint/DDP 修复/BasePairAggregator/
+BaseCheapCTSNet/loss 统一/SyncBN/死代码/依赖/文档；6 个确定性测试 + cfgdiff 闸门）。
+**以下刻意延后，均需服务器或更重的等价研究，非本机可安全完成：**
+- **eval 三处 A/B/C 块收编到 `evaluate_test_abc_once`**：该 helper 是**并行实现**（非已知等价
+  的抽取），收编需在真实 eval 上逐输出对比；train.py 路径本机 eval 退化（全正类）难判细微差异，
+  train_em/eval_em 本机无 ckpt 不能跑 → 须服务器做等价研究后再收编。
+- **torch.compile 开关（L5）**：任务要求"验收通过后"再加；其收益需 GPU 验证；且有 `_orig_mod.`
+  ckpt 前缀坑需处理。可按需添加（默认关、off 路径本机已可保证等价）。
+- **真多卡 DDP**：`scripts/verify_ddp_pair_selected.sh`（2×/8×A100）；本机 Windows 无法起多进程 DDP。
+- **关键实验复现**：`EXPERIMENTS.md` 全部待在 5090/A100 跑，并收口 UNKNOWN。
+- **DDP launcher 其余样板去重**（setup/device/seed/sampler/rank0）：本机不可验，留服务器。
+- 阶段4 正式总验收：对照 goal_acceptance.md 逐条签收。每层等价闸门见 refactor_plan.md。
