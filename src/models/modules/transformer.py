@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.modules.attn_backend import efficient_attention_enabled
+
 
 # -----------------------
 # 配置对象（方便从 cfg.model.params 里构造）
@@ -130,23 +132,37 @@ class MultiHeadSelfAttention(nn.Module):
         if self.use_rope:
             q, k = apply_rotary_pos_emb(q, k)
 
-        # scaled dot-product attention
-        attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.d_head)  # (B,H,L,L)
+        if efficient_attention_enabled():
+            # FlashAttention / mem-efficient kernel (opt-in; numerics differ from manual path).
+            # Fold causal + padding into one boolean keep-mask (True=attend).
+            keep = None
+            if self.causal:
+                keep = torch.tril(torch.ones(L, L, device=x.device, dtype=torch.bool))[None, None]
+            if attn_mask is not None:
+                am = (attn_mask != 0)
+                keep = am if keep is None else (keep & am)
+            context = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=keep,
+                dropout_p=(self.attn_drop.p if self.training else 0.0),
+            )  # (B,H,L,Dh)
+        else:
+            # scaled dot-product attention (manual)
+            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.d_head)  # (B,H,L,L)
 
-        # 因果 mask（下三角）
-        if self.causal:
-            causal_mask = torch.tril(torch.ones(L, L, device=x.device, dtype=torch.bool))
-            attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
+            # 因果 mask（下三角）
+            if self.causal:
+                causal_mask = torch.tril(torch.ones(L, L, device=x.device, dtype=torch.bool))
+                attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
 
-        # 额外传入的 mask（例如 padding mask）
-        if attn_mask is not None:
-            # attn_mask 形状假设为 (B,1,L,L) 或 (1,1,L,L)，值为 0/1
-            attn_scores = attn_scores.masked_fill(attn_mask == 0, float("-inf"))
+            # 额外传入的 mask（例如 padding mask）
+            if attn_mask is not None:
+                # attn_mask 形状假设为 (B,1,L,L) 或 (1,1,L,L)，值为 0/1
+                attn_scores = attn_scores.masked_fill(attn_mask == 0, float("-inf"))
 
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.attn_drop(attn_probs)
+            attn_probs = F.softmax(attn_scores, dim=-1)
+            attn_probs = self.attn_drop(attn_probs)
 
-        context = torch.matmul(attn_probs, v)  # (B,H,L,Dh)
+            context = torch.matmul(attn_probs, v)  # (B,H,L,Dh)
         context = context.transpose(1, 2).contiguous().view(B, L, D)
         out = self.o_proj(context)
         out = self.proj_drop(out)

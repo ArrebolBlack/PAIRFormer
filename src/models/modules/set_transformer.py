@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.modules.attn_backend import efficient_attention_enabled
+
 
 @dataclass
 class SetTransformerConfig:
@@ -57,18 +59,25 @@ class MultiHeadAttention(nn.Module):
         kh = self.k_proj(k).view(B, Lk, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,Lk,Dh]
         vh = self.v_proj(v).view(B, Lk, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,Lk,Dh]
 
-        scores = torch.matmul(qh, kh.transpose(-1, -2)) / math.sqrt(self.d_head)     # [B,H,Lq,Lk]
+        if efficient_attention_enabled():
+            # FlashAttention / mem-efficient kernel (opt-in; numerics differ from the manual path).
+            km = key_padding_mask[:, None, None, :] if key_padding_mask is not None else None  # [B,1,1,Lk] True=keep
+            out = F.scaled_dot_product_attention(
+                qh, kh, vh, attn_mask=km,
+                dropout_p=(self.attn_drop.p if self.training else 0.0),
+            )  # [B,H,Lq,Dh]
+        else:
+            scores = torch.matmul(qh, kh.transpose(-1, -2)) / math.sqrt(self.d_head)     # [B,H,Lq,Lk]
 
-        if key_padding_mask is not None:
-            # key_padding_mask: [B, Lk] True=valid, False=pad
-            # -> broadcast to [B,1,1,Lk]
-            km = key_padding_mask[:, None, None, :]  # bool
-            scores = scores.masked_fill(~km, float("-inf"))
+            if key_padding_mask is not None:
+                # key_padding_mask: [B, Lk] True=valid, False=pad -> broadcast to [B,1,1,Lk]
+                km = key_padding_mask[:, None, None, :]  # bool
+                scores = scores.masked_fill(~km, float("-inf"))
 
-        attn = F.softmax(scores, dim=-1)
-        attn = self.attn_drop(attn)
+            attn = F.softmax(scores, dim=-1)
+            attn = self.attn_drop(attn)
 
-        out = torch.matmul(attn, vh)  # [B,H,Lq,Dh]
+            out = torch.matmul(attn, vh)  # [B,H,Lq,Dh]
         out = out.transpose(1, 2).contiguous().view(B, Lq, D)
         out = self.o_proj(out)
         out = self.proj_drop(out)

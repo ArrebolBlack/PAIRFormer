@@ -18,6 +18,13 @@ def set_seeds(seed: int = 2020, deterministic: bool = True) -> None:
     deterministic : bool
         若为 True，则启用 cudnn 的确定性模式（会略微牺牲速度）。
     """
+    # Env override so the fast (non-deterministic + TF32) path is reachable without editing
+    # launchers: PF_DETERMINISTIC=0 -> fast; unset -> keep the caller's default (True), so the
+    # equivalence baseline is unchanged.
+    _env_det = os.environ.get("PF_DETERMINISTIC")
+    if _env_det is not None:
+        deterministic = _env_det.strip().lower() in ("1", "true", "yes", "on")
+
     random.seed(seed)
     np.random.seed(seed)
 
@@ -34,6 +41,9 @@ def set_seeds(seed: int = 2020, deterministic: bool = True) -> None:
         # 不加也能跑，只是有些算子可能仍有非确定性。
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     else:
-        # 非确定性模式下可以打开 benchmark 以获得更快的卷积实现
+        # 非确定性模式：打开 cudnn.benchmark + TF32，在 Ampere/A100 上大幅加速 conv/matmul
+        # （TF32 数值略变 → 仅用于真实训练；等价基线走上面的 deterministic=True 分支，不受影响）。
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
