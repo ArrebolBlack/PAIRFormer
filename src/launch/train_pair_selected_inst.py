@@ -17,6 +17,7 @@ from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 
 from src.config.data_config import DataConfig
+from src.data.selected_pair_collate import selected_pair_collate
 from src.em.cheap_runner import load_ckpt_into_model
 from src.launch.pair_selected_runtime import (
     build_selected_loader,
@@ -124,7 +125,7 @@ def main(cfg: DictConfig) -> None:
         sampler=train_sampler,
         shuffle=(train_sampler is None),  # only shuffle if no sampler
         num_workers=num_workers,
-        collate_fn=train_ds.collate_fn,
+        collate_fn=selected_pair_collate,  # SelectedPairDataset 无 collate_fn 属性；用 build_selected_loader 同款
         pin_memory=True,
         persistent_workers=use_persistent,
         drop_last=False,
@@ -135,7 +136,7 @@ def main(cfg: DictConfig) -> None:
         sampler=val_sampler,
         shuffle=False,
         num_workers=num_workers,
-        collate_fn=val_ds.collate_fn,
+        collate_fn=selected_pair_collate,
         pin_memory=True,
         persistent_workers=use_persistent,
         drop_last=False,
