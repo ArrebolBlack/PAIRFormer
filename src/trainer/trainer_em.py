@@ -677,21 +677,18 @@ class TrainerEM:
     def load_checkpoint(self, path: str, *, map_location: Optional[torch.device] = None) -> None:
         ckpt = torch.load(path, map_location=("cpu" if map_location is None else map_location))
 
-        # Strip DDP prefix if present
-        def strip_ddp_prefix(k: str) -> str:
-            for prefix in ("module.",):
-                if k.startswith(prefix):
-                    return k[len(prefix):]
-            return k
+        # Strip DDP prefix if present. Consolidated into clean_state_dict_keys
+        # (behavior unchanged; verified by tests/test_checkpoint_utils.py).
+        from src.utils.checkpoint import clean_state_dict_keys
 
         agg_sd = ckpt.get("agg_state_dict", ckpt)
         if isinstance(agg_sd, dict):
-            agg_sd_cleaned = {strip_ddp_prefix(k): v for k, v in agg_sd.items()}
+            agg_sd_cleaned = clean_state_dict_keys(agg_sd, ("module.",))
             self.agg_model.load_state_dict(agg_sd_cleaned, strict=False)
 
         inst_sd = ckpt.get("inst_state_dict", None)
         if isinstance(inst_sd, dict):
-            inst_sd_cleaned = {strip_ddp_prefix(k): v for k, v in inst_sd.items()}
+            inst_sd_cleaned = clean_state_dict_keys(inst_sd, ("module.",))
             self.instance_model.load_state_dict(inst_sd_cleaned, strict=False)
 
         if "opt_agg" in ckpt and ckpt["opt_agg"] is not None:

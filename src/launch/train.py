@@ -183,13 +183,10 @@ def load_model_state(model: nn.Module, ckpt_path: str, device: torch.device) -> 
     ckpt = torch.load(str(ckpt_path), map_location=device)
     state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
 
-    cleaned = {}
-    for k, v in state_dict.items():
-        if k.startswith("model."):
-            k = k[len("model."):]
-        if k.startswith("net."):
-            k = k[len("net."):]
-        cleaned[k] = v
+    # Consolidated into clean_state_dict_keys (behavior unchanged;
+    # verified by tests/test_checkpoint_utils.py). prefixes = ("model.","net.").
+    from src.utils.checkpoint import clean_state_dict_keys
+    cleaned = clean_state_dict_keys(state_dict, ("model.", "net."))
 
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing:

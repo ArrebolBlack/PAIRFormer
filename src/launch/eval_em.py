@@ -90,14 +90,10 @@ def _stable_cfg_hash(obj: Any) -> str:
 
 
 def _strip_prefix_state_dict(sd: Dict[str, Any]) -> Dict[str, Any]:
-    cleaned: Dict[str, Any] = {}
-    for k, v in sd.items():
-        kk = k
-        for pref in ("model.", "module.", "net."):
-            if kk.startswith(pref):
-                kk = kk[len(pref):]
-        cleaned[kk] = v
-    return cleaned
+    # Consolidated into src.utils.checkpoint.clean_state_dict_keys (behavior unchanged;
+    # verified by tests/test_checkpoint_utils.py). prefixes = ("model.","module.","net.").
+    from src.utils.checkpoint import clean_state_dict_keys
+    return clean_state_dict_keys(sd)
 
 
 def _resolve_ckpt_path(p: Optional[str], *, run_dir: Path, orig_cwd: Path, ckpt_dir: Path) -> Path:

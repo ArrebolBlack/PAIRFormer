@@ -315,14 +315,10 @@ def load_model(model_cfg: DictConfig, ckpt_path: str, device: torch.device):
     else:
         state_dict = ckpt["state_dict"]
 
-    cleaned_state_dict = {}
-    for k, v in state_dict.items():
-        new_k = k
-        if new_k.startswith("model."):
-            new_k = new_k[len("model."):]
-        if new_k.startswith("net."):
-            new_k = new_k[len("net."):]
-        cleaned_state_dict[new_k] = v
+    # Consolidated into clean_state_dict_keys (behavior unchanged;
+    # verified by tests/test_checkpoint_utils.py). prefixes = ("model.","net.").
+    from src.utils.checkpoint import clean_state_dict_keys
+    cleaned_state_dict = clean_state_dict_keys(state_dict, ("model.", "net."))
 
     missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
 
