@@ -64,6 +64,33 @@ F2 rebuttal 子配置（已是薄覆盖范式）随其父被抽取自动受益�
   （MTI/deepTargetPro/split*/k1ratio05）显式覆盖回 `hybrid`。
   → 规范化（统一为 `hybrid`）留待 bugfix 层，并以 golden 训练对比确认零数值变化。
 
+## 代码层 + 依赖（进行中）
+
+### ✅ L2a checkpoint 工具（commit e89bcb0）
+`src/utils/checkpoint.py: clean_state_dict_keys(sd, prefixes)` 统一 7 处 per-key 前缀剥离
+（各传原始 prefix 元组保行为，golden 单测 4/4 验证）。`eval_pair_selected.py` 的整字典公共前缀
+剥离器**刻意不动**（语义不同；统一它非等价）。死代码 `ddp_entry.py` → `_legacy/`。
+
+### ✅ L4 模型/损失/死代码（commit 96dc5a3 / af3f904 / a4b45e6 / 55ba258 / fbbe2e3）
+- 聚合器 golden 回归（`tests/test_pair_aggregators_golden.py`，6 个 bit-identical）。
+- `PairGNNMoEAggregator` 近克隆 → 薄子类（num_experts 移入基类）。
+- `BasePairAggregator`：Set/CNN/GNN 共享 `_normalize_mask`/掩码预处理/分类头（`_build_head`
+  在原构造点调用以保权重初始化 RNG 顺序；CNN 传 GELU）。
+- **loss 统一**：`Trainer._compute_loss` binary 分支委托给 `trainer/loss.BinaryClassificationLoss`，
+  删重复的 `Trainer._binary_focal_loss`（`tests/test_loss_equivalence.py` 证 24/24 配置逐位等价；
+  miRAW 基线 bit-identical）。
+- 死/破损文件归档：`update_model_name.sh` / `test_config_and_checkpoint.py` /
+  `test_checkpoint_update.yaml` → `_legacy/`；空文件 `train` 删除。
+
+### ✅ L6 依赖修正（部分）
+`requirements.in`：删除误写的 `hydra==2.5`（错误包，需 MSVC 编译）；补 eval 实际需要但原 Linux
+freeze 缺失的 `scikit-learn/pandas/matplotlib/seaborn`（与 numpy 1.24.4/py3.10 兼容，不影响训练数值）。
+本机 Windows 安装：cu121 index 装 torch 2.4.1 → 按 pin 装纯 python 依赖（见 baseline/run/BASELINE.md）。
+
 ## 待办（后续层）
-- DDP 统一 / checkpoint 工具（L2）、PairSelected 崩溃修复（L3）、质量去重（L4）、
-  数值优化开关（L5）、依赖/文档（L6）。每层各自的等价闸门见 refactor_plan.md。
+- **L2b** DDP launcher 样板收口到 `src/utils/ddp.py`；**L3** 修 PairSelected 崩溃
+  （launcher 传 local_rank 给无此参数的 trainer）+ 加 DDP 梯度同步。EM/pair 路径本机缺 ckpt
+  难复跑 → import/结构校验 + 服务器 DDP=1/多卡 + Workflow 对抗核验。
+- **L4 续**：`evaluate_test_abc_once` 收编三处 A/B/C 手抄；trainer.py 注释死代码。
+- **L5** 数值优化开关（AMP/compile，默认关）；**L6 续** requirements lock 重生 + README 安装更新 +
+  EXPERIMENTS.md（阶段4）。每层等价闸门见 refactor_plan.md。
