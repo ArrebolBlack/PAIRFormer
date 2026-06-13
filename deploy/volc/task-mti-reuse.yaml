@@ -10,11 +10,11 @@ Priority: 4
 ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
-  - {Name: KMAX,      Value: "512"}
-  - {Name: BATCH,     Value: "64"}        # 每卡；8 卡全局 512
+  - {Name: KMAX,      Value: "64"}         # ⚠️ 该缓存 meta.json kmax=64（不是 512）；K512 需另建缓存
+  - {Name: BATCH,     Value: "64"}         # 每卡；8 卡全局 512
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_st05_retrain_r4_v3relbl}
-  # 复现 exp8 主结果再加：
-  # - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.n_layers=4"}
+  # 该 ST05 缓存用 xlarge instance 编码器建（inst_emb_dim=1536 → token=1539）→ 聚合器须配 exp8 xlarge 架构：
+  - {Name: EXTRA, Value: "run.num_epochs=100 model.in_dim=1539 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.ff_activation=gelu model.dropout=0.1"}
 TaskRoleSpecs:
   - RoleName: worker
     RoleReplicas: 1

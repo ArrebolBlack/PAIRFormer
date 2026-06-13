@@ -39,7 +39,9 @@ esac
 
 # ---- 3. 满效率开关 ----
 export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-1} PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+# ml.pni2 = 每 GPU 14 vCPU。num_workers≈12 喂满（留 ~2 给主进程/系统）；OMP 调小防 12 worker 过订阅 14 核。
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+NW=${NW:-12}   # 每个 DDP 进程（=每张卡）的 DataLoader worker 数；按 14 vCPU/GPU 拉满
 
 # ---- 4. 参数 ----
 MODE=${MODE:-reuse}
@@ -66,11 +68,20 @@ if [ "$MODE" = "reuse" ]; then
   if [ ! -f "$CACHE_DIR/selected_pair_cache/train/selected_inst/meta.json" ]; then
     echo "[FATAL] $CACHE_DIR/selected_pair_cache/train/selected_inst/meta.json 不存在 —— CACHE_DIR 指错层？"; exit 4
   fi
+  # 吞吐关键：vePFS 随机读很慢 → 把缓存搬到 /dev/shm（内存盘，实测 1.4T）再训。USE_SHM=0 可关。
+  if [ "${USE_SHM:-1}" = "1" ]; then
+    SHM=/dev/shm/$(basename "$CACHE_DIR")
+    if [ ! -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ]; then
+      echo "[$(date)] 复制缓存到内存盘 $SHM（一次性，~1-2 分钟）..."
+      mkdir -p "$SHM" && cp -r "$CACHE_DIR/selected_pair_cache" "$SHM/"
+    fi
+    CACHE_DIR="$SHM"
+  fi
   echo "[$(date)] MODE=reuse  cache=$CACHE_DIR  kmax=$KMAX"
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
-    run.kmax=$KMAX run.batch_size=$BATCH trainer_pair_selected.use_amp=true \
+    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
     scalable.cache_root="$CACHE_DIR" $CKPT_OVR \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
@@ -90,7 +101,7 @@ elif [ "$MODE" = "build" ]; then
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
-    run.kmax=$KMAX run.batch_size=$BATCH trainer_pair_selected.use_amp=true \
+    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
     scalable.cache_root="$CROOT" $CKPT_OVR \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
