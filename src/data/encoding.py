@@ -28,6 +28,8 @@ encoding.py
   方便未来替换编码方式（例如改为 k-mer、embedding 等）而不影响缓存和 Dataset 逻辑。
 """
 
+from functools import lru_cache
+
 import numpy as np
 from Bio import pairwise2
 
@@ -102,10 +104,25 @@ def extended_seed_alignment(mi_seq: str, cts_r_seq: str):
         cts_r_esa   : str 或 None
         esa_score   : float，对齐得分（无结果时为 -1）
     """
+    # 该函数在缓存构建时对每个 pair 的 ~960 个滑窗各调用一次，且 miRNA / mRNA 区段在
+    # 数据集中大量重复。比对结果只依赖两个 10 字符切片 mi_seq[:10] 与 cts_r_seq[5:15]
+    # （这正是传给 globaldx 的实参），因此用 (mi10, cts10) 做键的 LRU 记忆化是**逐位等价**
+    # 的纯函数缓存：输出完全不变，只是跳过重复比对。详见 docs/PERF_AUDIT.md（瓶颈 #1）。
+    return _esa_globaldx_cached(mi_seq[:10], cts_r_seq[5:15])
+
+
+@lru_cache(maxsize=1_000_000)
+def _esa_globaldx_cached(mi10: str, cts10: str):
+    """extended_seed_alignment 的纯函数核心，按 (mi10, cts10) 记忆化。
+
+    与原内联实现逐字符等价（同样的 globaldx 调用、同样的 score_matrix、同样的
+    one_alignment_only=True、同样的异常→(None,None,-1) 兜底）。每个 worker 进程各持一份
+    缓存（multiprocessing 下天然隔离），生命周期内跨 pair 复用。
+    """
     try:
         alns = pairwise2.align.globaldx(
-            mi_seq[:10],
-            cts_r_seq[5:15],
+            mi10,
+            cts10,
             score_matrix,
             one_alignment_only=True,
         )
