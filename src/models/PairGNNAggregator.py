@@ -11,6 +11,7 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
+from src.models.base_pair_aggregator import BasePairAggregator
 from src.models.registry import register_model
 from src.models.modules.gnn_layers import (
     build_knn_graph,
@@ -20,7 +21,7 @@ from src.models.modules.gnn_layers import (
 
 
 @register_model("PairGNNAggregator")
-class PairGNNAggregator(nn.Module):
+class PairGNNAggregator(BasePairAggregator):
     """GAT-based aggregator for pair-level prediction.
 
     Forward signature identical to PairSetTransformerAggregator:
@@ -58,23 +59,8 @@ class PairGNNAggregator(nn.Module):
         ])
 
         self.pool = GlobalAttentionPooling(d_model)
-        self.norm = nn.LayerNorm(d_model)
-        self.classifier = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
-
-    @staticmethod
-    def _normalize_mask(attn_mask, L, device):
-        if attn_mask is None:
-            return torch.ones(1, L, device=device, dtype=torch.bool)
-        if attn_mask.dim() == 2:
-            return attn_mask.to(device=device).bool()
-        if attn_mask.dim() == 4:
-            return attn_mask[:, 0, 0, :].to(device=device).bool()
-        raise ValueError(f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}")
+        # norm + classifier (shared head). Construct LAST to preserve weight-init RNG order.
+        self._build_head(d_model, dropout)
 
     def forward(
         self,
@@ -85,14 +71,7 @@ class PairGNNAggregator(nn.Module):
         B, K, Din = x.shape
         assert Din == self.in_dim
 
-        mask = self._normalize_mask(attn_mask, K, x.device)
-        if mask.size(0) == 1 and B > 1:
-            mask = mask.expand(B, -1)
-
-        empty = mask.sum(dim=1) == 0
-        if empty.any():
-            mask = mask.clone()
-            mask[empty, 0] = True
+        mask = self._prep_mask(attn_mask, B, K, x.device)
 
         x = x.to(dtype=self.input_proj.weight.dtype)
 

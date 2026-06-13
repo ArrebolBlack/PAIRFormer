@@ -12,11 +12,12 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
+from src.models.base_pair_aggregator import BasePairAggregator
 from src.models.registry import register_model
 
 
 @register_model("PairCNNAggregator")
-class PairCNNAggregator(nn.Module):
+class PairCNNAggregator(BasePairAggregator):
     """Sorted 1D-CNN aggregator.
 
     Forward signature identical to PairSetTransformerAggregator:
@@ -53,24 +54,10 @@ class PairCNNAggregator(nn.Module):
             })
             self.conv_blocks.append(block)
 
-        self.norm = nn.LayerNorm(d_model)
+        # Shared head; PairCNN uses GELU (when ff_activation=gelu) unlike GNN/SetTransformer.
+        # Construct LAST to preserve weight-init RNG order vs the original inline norm+classifier.
         act = nn.GELU() if ff_activation == "gelu" else nn.ReLU()
-        self.classifier = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            act,
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
-
-    @staticmethod
-    def _normalize_mask(attn_mask, L, device):
-        if attn_mask is None:
-            return torch.ones(1, L, device=device, dtype=torch.bool)
-        if attn_mask.dim() == 2:
-            return attn_mask.to(device=device).bool()
-        if attn_mask.dim() == 4:
-            return attn_mask[:, 0, 0, :].to(device=device).bool()
-        raise ValueError(f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}")
+        self._build_head(d_model, dropout, activation=act)
 
     def forward(
         self,
@@ -81,15 +68,7 @@ class PairCNNAggregator(nn.Module):
         B, K, Din = x.shape
         assert Din == self.in_dim
 
-        mask = self._normalize_mask(attn_mask, K, x.device)
-        if mask.size(0) == 1 and B > 1:
-            mask = mask.expand(B, -1)
-
-        # Prevent all-pad samples
-        empty = mask.sum(dim=1) == 0
-        if empty.any():
-            mask = mask.clone()
-            mask[empty, 0] = True
+        mask = self._prep_mask(attn_mask, B, K, x.device)
 
         x = x.to(dtype=self.input_proj.weight.dtype)
 

@@ -7,6 +7,7 @@ import torch.nn as nn
 from omegaconf import DictConfig
 
 from src.config.data_config import DataConfig
+from src.models.base_pair_aggregator import BasePairAggregator
 from src.models.registry import register_model
 from src.models.modules.set_transformer import (
     SetTransformerConfig, SAB, ISAB, PMA
@@ -14,7 +15,7 @@ from src.models.modules.set_transformer import (
 
 
 @register_model("PairSetTransformerAggregator")
-class PairSetTransformerAggregator(nn.Module):
+class PairSetTransformerAggregator(BasePairAggregator):
     """
     PairSetTransformerAggregator
     ============================
@@ -86,32 +87,9 @@ class PairSetTransformerAggregator(nn.Module):
         self.pma = PMA(stcfg, k=self.num_seeds)
         self.out_sab = SAB(stcfg) if self.use_output_sab and self.num_seeds > 1 else None
 
-        # ---- 6) head ----
-        self.norm = nn.LayerNorm(d_model)
-        self.classifier = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
-
-    @staticmethod
-    def _normalize_mask(attn_mask: Optional[torch.Tensor], L: int, device: torch.device) -> torch.Tensor:
-        """
-        Return: mask [B, L] bool, True=valid.
-        """
-        if attn_mask is None:
-            return torch.ones(1, L, device=device, dtype=torch.bool)  # will broadcast later if needed
-
-        if attn_mask.dim() == 2:
-            # [B, L] with 1/0
-            return attn_mask.to(device=device).bool()
-
-        if attn_mask.dim() == 4:
-            # [B,1,1,L] -> [B,L]
-            return attn_mask[:, 0, 0, :].to(device=device).bool()
-
-        raise ValueError(f"Unsupported attn_mask shape: {tuple(attn_mask.shape)}")
+        # ---- 6) head (shared) ----
+        # Construct LAST to preserve weight-init RNG order vs the original inline norm+classifier.
+        self._build_head(d_model, dropout)
 
     def forward(
         self,
@@ -123,16 +101,8 @@ class PairSetTransformerAggregator(nn.Module):
         if Din != self.in_dim:
             raise ValueError(f"Expected in_dim={self.in_dim}, but got {Din}")
 
-        # mask: [B, L] True=valid
-        mask = self._normalize_mask(attn_mask, L, x.device)
-        if mask.size(0) == 1 and B > 1:
-            mask = mask.expand(B, -1)
-
-        # 防止“全 padding”导致 attention softmax 全 -inf -> NaN
-        empty = (mask.sum(dim=1) == 0)
-        if empty.any():
-            mask = mask.clone()
-            mask[empty, 0] = True
+        # mask: [B, L] True=valid (normalize + broadcast + all-pad guard)
+        mask = self._prep_mask(attn_mask, B, L, x.device)
 
         x = x.to(dtype=self.input_proj.weight.dtype)
 
