@@ -39,9 +39,10 @@ esac
 
 # ---- 3. 满效率开关 ----
 export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-1} PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}
-# ml.pni2 = 每 GPU 14 vCPU。num_workers≈12 喂满（留 ~2 给主进程/系统）；OMP 调小防 12 worker 过订阅 14 核。
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
-NW=${NW:-12}   # 每个 DDP 进程（=每张卡）的 DataLoader worker 数；按 14 vCPU/GPU 拉满
+# 专属计算任务：整节点独占，不为系统/主进程预留。ml.pni2 = 每 GPU 14 vCPU → 每张卡开满 14 worker，
+# OMP=1 让 14 worker 与 14 核 1:1，无线程过订阅。主进程训练时基本 GPU-bound、几乎不占核。
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+NW=${NW:-14}   # 每个 DDP 进程（=每张卡）的 DataLoader worker 数 = 满 vCPU/GPU；想更激进可 NW=16
 
 # ---- 4. 参数 ----
 MODE=${MODE:-reuse}
