@@ -58,9 +58,8 @@ from src.utils.ddp_sampler import (
 )
 
 
-def _apply_sync_batchnorm(model: torch.nn.Module) -> torch.nn.Module:
-    """Convert BatchNorm1d layers to SyncBatchNorm for DDP training."""
-    return nn.SyncBatchNorm.convert_sync_batchnorm(model)
+# SyncBatchNorm conversion consolidated into src.utils.ddp.apply_sync_batchnorm.
+from src.utils.ddp import apply_sync_batchnorm as _apply_sync_batchnorm  # noqa: E402
 
 
 def _resolve_path(p: Optional[str], orig_cwd: Path) -> Optional[Path]:

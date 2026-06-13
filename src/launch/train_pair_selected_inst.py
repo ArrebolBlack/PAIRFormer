@@ -38,9 +38,8 @@ from src.utils.ddp import setup_ddp, cleanup_ddp, is_ddp, is_rank0, get_rank, ge
 from src.utils.ddp_sampler import get_ddp_sampler, set_epoch_for_sampler, disable_persistent_workers_if_ddp
 
 
-def _apply_sync_batchnorm(model: torch.nn.Module) -> torch.nn.Module:
-    """Convert BatchNorm1d layers to SyncBatchNorm for DDP training."""
-    return nn.SyncBatchNorm.convert_sync_batchnorm(model)
+# SyncBatchNorm conversion consolidated into src.utils.ddp.apply_sync_batchnorm.
+from src.utils.ddp import apply_sync_batchnorm as _apply_sync_batchnorm  # noqa: E402
 
 
 def _resolve_ckpt(path_str: str | None, orig_cwd: Path | None) -> Path | None:

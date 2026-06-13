@@ -100,6 +100,17 @@ def barrier() -> None:
         dist.barrier()
 
 
+def apply_sync_batchnorm(model):
+    """Convert BatchNorm layers to SyncBatchNorm for DDP training.
+
+    Consolidated from the identical per-launcher _apply_sync_batchnorm copies
+    (train_em.py / train_pair_selected_inst.py). Behavior is exactly
+    nn.SyncBatchNorm.convert_sync_batchnorm(model).
+    """
+    import torch.nn as nn
+    return nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+
 # =============================================================================
 # Tensor Operations
 # =============================================================================
