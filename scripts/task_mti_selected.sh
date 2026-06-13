@@ -76,10 +76,18 @@ if [ "$MODE" = "reuse" ]; then
   [ -n "${KMAX_TRUNC:-}" ] && KMAX=$KMAX_TRUNC      # 可选：截断到更小 K
   RUNDIR=${RUNDIR:-$VEP/runs/mti_$(basename "$CACHE_DIR")}; mkdir -p "$RUNDIR"
   echo "[$(date)] MODE=reuse cache=$CACHE_DIR meta(kmax=${AUTO%% *},in_dim=$INDIM) → train kmax=$KMAX rundir=$RUNDIR"
-  # 吞吐关键：vePFS 随机读慢 → 缓存搬 /dev/shm（内存盘，实测 1.4T）。USE_SHM=0 可关。
-  if [ "${USE_SHM:-1}" = "1" ]; then
+  # /dev/shm 是 RAM 盘：搬整份缓存（含很大的 selected_raw）会撑爆容器内存→被 OOM kill(-9)。
+  # 默认关（直接读 vePFS，14 worker 并行 + OS 页缓存，稳）；USE_SHM=1 时只搬 selected_inst（训练真正读的）。
+  if [ "${USE_SHM:-0}" = "1" ]; then
     SHM=/dev/shm/$(basename "$CACHE_DIR")
-    [ -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ] || { echo "[$(date)] 复制缓存到内存盘 $SHM ..."; mkdir -p "$SHM" && cp -r "$CACHE_DIR/selected_pair_cache" "$SHM/"; }
+    if [ ! -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ]; then
+      echo "[$(date)] 复制 selected_inst（不含 selected_raw）到内存盘 $SHM ..."
+      for sp in train val test; do
+        [ -d "$CACHE_DIR/selected_pair_cache/$sp/selected_inst" ] && \
+          mkdir -p "$SHM/selected_pair_cache/$sp" && \
+          cp -r "$CACHE_DIR/selected_pair_cache/$sp/selected_inst" "$SHM/selected_pair_cache/$sp/"
+      done
+    fi
     CACHE_DIR="$SHM"
   fi
   CKPT=$RUNDIR/checkpoints/last.pt
