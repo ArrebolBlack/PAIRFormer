@@ -38,14 +38,21 @@ F2 rebuttal 子配置（已是薄覆盖范式）随其父被抽取自动受益�
 - 死配置归档见 `configs/_legacy/README.md`。
 - "按数据集缺键"模式（bench、DeepMirTar cache_root）统一用"基类不含该键、含的成员各自添加"处理，保 0-diff。
 
-### 待完成：F8 MTI-scalable 家族（~15-18 个配置）
-共享 `MTI_train_selected_inst` 那套 ~133 行 selected-inst/scalable body（task=pair_train_selected_inst，
-用 trainer_pair_selected + scalable + token_provider），分支为：
-- 聚合器消融（PairCNN/GNN/MoE）：仅 `model` 块（arch 相关键，含缺键）+ name 不同；
-- build/train/eval：`run.mode` + trainer 块有无；
-- window-shard / selected_raw / shard 变体：更偏一次性运维配置。
-计划：抽 `_base/mti_scalable_inst_core`（不含 model 块，避免聚合器缺键问题），各成员补 model+mode。
-这是 L1 剩余的独立子任务（每个 130+ 键，缺键子坑多），单独一轮做。
+### 已完成：F8 评估 + 聚合器消融去重（commit L1.5）
+- **聚合器消融**（真复制子族）：`_base/mti_agg_ablation_core.yaml`（共享 selected-inst body）+
+  MTI_PairGNNAggregator/PairCNNAggregator/PairGNNMoEAggregator 三个薄覆盖（仅 model 块 + name）。
+- **其余 MTI-scalable 配置经 cfgdiff 评估为"运维上彼此不同，非复制粘贴"，刻意保持独立**：
+  - `MTI_build_selected_inst` 相对 train **删 57 键**（建缓存、无训练）；`MTI_eval_selected_inst`
+    按 run.mode + 代码路径不同（删 17 加 5）；selected_raw / window-shard / shard 变体各是
+    不同 run.mode 的独立操作。强行继承只会降低可读性而几乎不消除真实重复 → 不并入。
+  - 单例 `experiment_sirna`、`DeepMirTar_Transformer` 与 F6 链根 `miRAW_TargetNet_baseline`
+    保持原样。
+- `experiment_name` 在所有合成结果里都是 `${experiment.name}`（由 config.yaml 的 `_self_`
+  最后覆盖），故薄覆盖成员只需设 `experiment.name`。
+
+## L1 配置层 —— 完成
+6 个复制家族去重（EM / pair-agg / window-TNopt / cheap / 聚合器消融）+ 死配置归档，
+**全程 cfgdiff --dir golden = 77/77 0 differ**。配置去重目标（消除复制粘贴家族）达成。
 
 ## 已知 bug / 历史值（保留以保等价，规范化属后续 bugfix 层）
 
