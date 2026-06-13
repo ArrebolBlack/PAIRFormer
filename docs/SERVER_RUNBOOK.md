@@ -20,7 +20,7 @@
 | 区域 | cn-beijing-b；CUDA 12.2 / 驱动 535 |
 | torchrun 注入变量 | `$MLP_WORKER_NUM`(--nnodes) `$MLP_WORKER_GPU`(--nproc_per_node) `$MLP_ROLE_INDEX`(--node_rank) `$MLP_WORKER_0_HOST/_PORT`(--master_addr/port) |
 
-约定：`$VEP=/vepfs-mlp2/queue010/20252203765`；代码 `$VEP/PAIRFormer`、conda `$VEP/envs/pairformer`、
+约定：`$VEP=/vepfs-mlp2/queue010/20252203765`；代码 `$VEP/PAIRFormer`、conda env `myenv`（base `$VEP/miniconda3`，开发机实测）、
 缓存/输出/ckpt 全写 `$VEP/...`（**不要写云盘、不要直读 TOS fuse**）。
 
 ---
@@ -37,9 +37,12 @@ git lfs install && git lfs pull            # 拉 checkpoints/* 与 data/* 真实
 git submodule update --init                # external/Mimosa, external/TargetNet（仅 E1 baseline 需要）
 
 # conda（建在 vePFS，开发机和任务容器共用同一份）
-conda create -p $VEP/envs/pairformer python=3.10 -y && conda activate $VEP/envs/pairformer
-pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.in             # 已修 hydra 错包、补 eval 依赖（见 README）
+# 开发机已有 env `myenv`（base 在 $VEP/miniconda3）；直接用它，先核对依赖齐不齐：
+source $VEP/miniconda3/etc/profile.d/conda.sh && conda activate myenv
+python -c "import torch,Bio,hydra,sklearn,pandas; print('torch',torch.__version__, torch.cuda.is_available())"
+# 缺包才补（torch 2.4.1 + 见 requirements.in）：
+# pip install -r requirements.in   # 已修 hydra 错包、补 eval 依赖（见 README）
+# 若 myenv 想另起干净环境：conda create -n pairformer python=3.10 -y 再装；本手册统一用 myenv
 ```
 
 ### 1.1 前置产物自检（不齐就先补，否则 EM pipeline 起不来）
@@ -137,7 +140,7 @@ train_em 的缓存（cheap→selection→instance memmap）**默认随训练 ran
 ## 4. 开发机 debug（单卡 1×A100，照抄）
 
 ```bash
-conda activate $VEP/envs/pairformer && cd $VEP/PAIRFormer
+source $VEP/miniconda3/etc/profile.d/conda.sh && conda activate myenv && cd $VEP/PAIRFormer
 export PF_EFFICIENT_ATTN=1 PF_DETERMINISTIC=0     # debug 也可拉满；要对等价基线时不设这两个
 
 # —— E3 MTI 单卡小步确认（再提 8 卡）——

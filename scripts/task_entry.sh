@@ -27,7 +27,11 @@ df -h /dev/shm || true
 cd "$REPO"
 
 # ---- 1. conda 环境（建在 vePFS，开发机/任务容器共用）----
-source activate "$VEP/envs/pairformer" 2>/dev/null || conda activate "$VEP/envs/pairformer"
+# 开发机实测：base conda 在 $VEP/miniconda3，PAIRFormer 用的 env 名为 `myenv`。
+CONDA_SH=${CONDA_SH:-$VEP/miniconda3/etc/profile.d/conda.sh}
+PF_ENV=${PF_ENV:-myenv}
+# shellcheck disable=SC1090
+source "$CONDA_SH" && conda activate "$PF_ENV"
 
 # ---- 2. 防镜像 PYTHONPATH 劫持（坑②）：强制 src 解析到本仓库，并自检 ----
 export PYTHONPATH=$REPO
