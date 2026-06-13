@@ -1,0 +1,30 @@
+# MTI selected-inst —— 任务A：复用 exp8 已建好的 ST 选择器缓存（最快）
+# 提交：volc ml_task submit -c deploy/volc/task-mti-reuse.yaml
+# 入口 scripts/task_mti_selected.sh MODE=reuse → src.launch.train_pair_selected_inst
+# 真实值来自《开发指南 09》；CLI 报字段名错时按别名换（ImageUrl/Flavor/ResourceQueueID/Entrypoint），值不变。
+Name: pf-mti-st05-reuse
+ImageSpec: {Type: Custom, Url: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest}
+EntrypointPath: "bash scripts/task_mti_selected.sh"
+Framework: PyTorchDDP
+ResourceQueueId: q-20260318205115-lvfng
+Priority: 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,     Value: reuse, IsPrivate: false}
+  - {Name: KMAX,     Value: "512", IsPrivate: false}
+  - {Name: BATCH,    Value: "64",  IsPrivate: false}   # 每卡；8 卡全局 512
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_st05_retrain_r4_v3relbl, IsPrivate: false}
+  # 复现 exp8 主结果再加（按 exp8 模型规模/轮数）：
+  # - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.n_layers=4", IsPrivate: false}
+TaskRoleSpecs:
+  - {RoleName: worker, RoleReplicas: 1, ResourceSpecId: ml.pni2.28xlarge}   # 单机 8 卡（UI 确认规格名）
+Storages:
+  - {Type: Vepfs, VepfsId: vepfs-cnbj2c98dea54433, MountPath: /vepfs-mlp2/queue010/20252203765, SubPath: queue010/20252203765, ReadOnly: false}
+Preemptible: true
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]

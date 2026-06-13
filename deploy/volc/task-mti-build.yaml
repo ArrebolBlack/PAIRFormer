@@ -1,0 +1,32 @@
+# MTI selected-inst —— 任务B：重建缓存再训练（对照组，验证预建缓存可复用 + 本次重构对该缓存等价）
+# 提交：volc ml_task submit -c deploy/volc/task-mti-build.yaml
+# 入口 scripts/task_mti_selected.sh MODE=build → build_selected_pair_cache → build_selected_inst_cache → train
+# 跑完与任务A比 $RUNDIR 下 test 指标：一致 = 预建缓存可放心复用。
+Name: pf-mti-st05-build
+ImageSpec: {Type: Custom, Url: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest}
+EntrypointPath: "bash scripts/task_mti_selected.sh"
+Framework: PyTorchDDP
+ResourceQueueId: q-20260318205115-lvfng
+Priority: 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,       Value: build, IsPrivate: false}
+  - {Name: KMAX,       Value: "512", IsPrivate: false}
+  - {Name: BATCH,      Value: "64",  IsPrivate: false}
+  - {Name: CACHE_ROOT, Value: /vepfs-mlp2/queue010/20252203765/runs/mti_build/cache, IsPrivate: false}
+  # build 需 MTI cheap/instance ckpt：脚本默认用 exp8 sharded 真身；如 exp8 有同名也可覆盖：
+  # - {Name: CHEAP_CKPT, Value: checkpoints/MTI_CheapCTSNet_shard_v1_compact_r4/best.pt, IsPrivate: false}
+  # - {Name: INST_CKPT,  Value: checkpoints/MTI_TargetNet_Optimized_shard_v2_relabel_top4/best.pt, IsPrivate: false}
+  # - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.n_layers=4", IsPrivate: false}
+TaskRoleSpecs:
+  - {RoleName: worker, RoleReplicas: 1, ResourceSpecId: ml.pni2.28xlarge}
+Storages:
+  - {Type: Vepfs, VepfsId: vepfs-cnbj2c98dea54433, MountPath: /vepfs-mlp2/queue010/20252203765, SubPath: queue010/20252203765, ReadOnly: false}
+Preemptible: true
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]

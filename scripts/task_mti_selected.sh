@@ -53,6 +53,8 @@ mkdir -p "$RUNDIR"
 CHEAP_CKPT=${CHEAP_CKPT:-checkpoints/MTI_CheapCTSNet_shard_v1_compact_r4/best.pt}
 INST_CKPT=${INST_CKPT:-checkpoints/MTI_TargetNet_Optimized_shard_v2_relabel_top4/best.pt}
 CKPT_OVR="cheap_ckpt_path=$CHEAP_CKPT instance_ckpt_path=$INST_CKPT"
+# 任意额外 Hydra override 透传（如复现 exp8 主结果：EXTRA="run.num_epochs=100 model.d_model=1024 model.n_layers=4 run.batch_size=64"）
+EXTRA=${EXTRA:-}
 
 NPROC=${MLP_WORKER_GPU:-8}
 DDP="torchrun --nnodes=${MLP_WORKER_NUM:-1} --nproc_per_node=$NPROC \
@@ -71,7 +73,7 @@ if [ "$MODE" = "reuse" ]; then
     run.kmax=$KMAX run.batch_size=$BATCH trainer_pair_selected.use_amp=true \
     scalable.cache_root="$CACHE_DIR" $CKPT_OVR \
     run.eval_test_after_train=true run.eval_test_with_last=true \
-    hydra.run.dir="$RUNDIR" $RESUME
+    hydra.run.dir="$RUNDIR" $RESUME $EXTRA
 
 elif [ "$MODE" = "build" ]; then
   # ---- 5b. 重建缓存再训练 ----
@@ -91,7 +93,7 @@ elif [ "$MODE" = "build" ]; then
     run.kmax=$KMAX run.batch_size=$BATCH trainer_pair_selected.use_amp=true \
     scalable.cache_root="$CROOT" $CKPT_OVR \
     run.eval_test_after_train=true run.eval_test_with_last=true \
-    hydra.run.dir="$RUNDIR" $RESUME
+    hydra.run.dir="$RUNDIR" $RESUME $EXTRA
 else
   echo "[FATAL] 未知 MODE=$MODE（reuse|build）"; exit 2
 fi
