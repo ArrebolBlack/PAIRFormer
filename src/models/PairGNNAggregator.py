@@ -27,6 +27,10 @@ class PairGNNAggregator(nn.Module):
         forward(x [B, K, D_in], attn_mask=[B,K], pos=None) -> [B]
     """
 
+    # None => plain FFN inside each GATBlock (original PairGNNAggregator behavior).
+    # Subclasses (PairGNNMoEAggregator) override to enable Soft-MoE FFN.
+    DEFAULT_NUM_EXPERTS = None
+
     def __init__(self, model_cfg: DictConfig, data_cfg: Optional[DataConfig] = None):
         super().__init__()
         p = model_cfg
@@ -41,11 +45,15 @@ class PairGNNAggregator(nn.Module):
         dropout: float = float(p.get("dropout", 0.1))
         ff_activation: str = str(p.get("ff_activation", "gelu")).lower()
         self.num_neighbors: int = int(p.get("num_neighbors", 8))
+        # num_experts absent => plain FFN (no kwarg passed, == original PairGNN).
+        # present => Soft-MoE FFN (== original PairGNNMoEAggregator).
+        num_experts = p.get("num_experts", self.DEFAULT_NUM_EXPERTS)
+        gat_kwargs = {} if num_experts is None else {"num_experts": int(num_experts)}
 
         self.input_proj = nn.Linear(self.in_dim, d_model)
 
         self.encoder = nn.ModuleList([
-            GATBlock(d_model, n_heads, dim_ff, dropout, ff_activation)
+            GATBlock(d_model, n_heads, dim_ff, dropout, ff_activation, **gat_kwargs)
             for _ in range(self.n_layers)
         ])
 
