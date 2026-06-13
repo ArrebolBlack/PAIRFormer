@@ -176,26 +176,18 @@ bash   scripts/rebuttal/rel_distill_ablation/run_all.sh
 
 ## 5. 提交 8 卡自定义任务
 
-### 5.1 入口脚本 `scripts/task_entry.sh`（幂等续训，已随仓库）
+### 5.1 入口脚本 `scripts/task_entry.sh`（已随仓库，已按踩坑实录加固）
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-VEP=/vepfs-mlp2/queue010/20252203765
-cd $VEP/PAIRFormer && source activate $VEP/envs/pairformer
-export PF_EFFICIENT_ATTN=1 PF_DETERMINISTIC=0 OMP_NUM_THREADS=8 NCCL_DEBUG=WARN
-EXP=${EXP:-MTI_EM_K512}; KMAX=${KMAX:-512}
-RUNDIR=$VEP/runs/$EXP-k$KMAX; CKPT=$RUNDIR/checkpoints/last.pt
-RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"   # 幂等续训
-torchrun --nnodes=$MLP_WORKER_NUM --nproc_per_node=$MLP_WORKER_GPU \
-  --node_rank=$MLP_ROLE_INDEX --master_addr=$MLP_WORKER_0_HOST --master_port=$MLP_WORKER_0_PORT \
-  -m src.launch.train_em experiment=$EXP run.kmax=$KMAX \
-  trainer_em.use_amp=true run.num_workers=8 run.batch_size=128 \
-  run.train_instance_mode=cached run.val_instance_mode=cached \
-  logging.wandb.enabled=false hydra.run.dir=$RUNDIR $RESUME
-```
-> `run.batch_size` 是**每卡**；8 卡全局=×8。首次会自动建缓存（rank0）；想避免可先在开发机建好缓存放 `$VEP`，
-> 再追加 `em.bootstrap.enabled=false`（见 §2.5）。简单交互式多卡也可直接 `bash scripts/run_ddp_train_em.sh 8 <EXP> <overrides...>`。
+直接用仓库里的 `scripts/task_entry.sh`（已 `bash -n` 通过）。它已内置《开发指南 10》的四条教训：
+- **⚠️ 防镜像 PYTHONPATH 劫持**：`yjq:latest` 镜像把旧 openpi 烤在 `/app` 并内置 `PYTHONPATH=/app/src`；
+  PAIRFormer 用 `python -m src.launch...`（顶层 `src` 命名空间包，无 `__init__.py`、未 pip 安装），
+  **会被 `/app/src` 干扰**。脚本里 `export PYTHONPATH=$REPO` 覆盖 + import 自检，解析错就 `exit 3` 早停。
+- **日志落 vePFS**：入口第一件事 `tee` 到 `$VEP/task_logs/<task>.log` + `nvidia-smi -L`/`df -h /dev/shm` 体检，开发机 `tail -f` 看全量 Traceback。
+- **幂等续训**：检测到 `last.pt` 就 `run.resume=true`，配合 Preemptible+Retry 自动续。
+- **缓存提速**：`USE_SHM=1` 时把缓存放 `/dev/shm`（实测 1.4T RAM 盘）。
+
+通过 `Envs` 传参：`EXP`/`KMAX`/`BATCH`/`USE_SHM`/`WANDB`。`run.batch_size` 是**每卡**，8 卡全局=×8。
+> 简单交互式多卡（非任务）也可直接 `bash scripts/run_ddp_train_em.sh 8 <EXP> <overrides...>`。
 
 ### 5.2 任务 YAML `task-mti-k512.yaml`（控制台 GetJob 格式，来自指南 09）
 
