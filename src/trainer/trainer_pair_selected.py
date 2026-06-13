@@ -13,6 +13,7 @@ from torch.optim.swa_utils import AveragedModel
 from src.evaluator.metrics import compute_metrics
 from src.models.extractors import get_embedding_and_logit
 from src.trainer.loss import BinaryClassificationLoss
+from src.utils.ddp import is_ddp, save_on_rank0, gather_tensors, get_local_rank, all_reduce_tensor
 
 
 @dataclass
@@ -77,6 +78,7 @@ class PairSelectedTrainer:
         use_esa: bool = True,
         use_pos: bool = True,
         train_instance_model: bool = True,
+        local_rank: int = -1,
     ):
         self.cfg = cfg
         self.device = device
@@ -131,6 +133,20 @@ class PairSelectedTrainer:
         if self.swa_enabled:
             self.swa_model = AveragedModel(self.agg_model)
             self.swa_model.to(device)
+
+        # DDP: wrap agg_model for the training forward (mirrors trainer_em). The un-wrapped
+        # self.agg_model is kept for optimizer / state_dict / SWA, so checkpoints carry no
+        # 'module.' prefix and stay single<->multi-card compatible. opt_agg (built above on
+        # self.agg_model.parameters()) sees DDP-synced grads since DDP wraps the same module.
+        # The launcher uses train_instance_model=False, so only agg_model needs DDP here.
+        self.local_rank = int(local_rank)
+        if is_ddp():
+            dev_id = self.local_rank if self.local_rank >= 0 else get_local_rank()
+            self.agg_model_ddp: torch.nn.Module = torch.nn.parallel.DistributedDataParallel(
+                self.agg_model, device_ids=[dev_id], output_device=dev_id,
+            )
+        else:
+            self.agg_model_ddp = self.agg_model
 
         self.best_metric = -1e9 if cfg.greater_is_better else 1e9
         self.epoch = 0
@@ -278,7 +294,7 @@ class PairSelectedTrainer:
                     # update attn_mask accordingly
                     mask = mask & (token_keep_mask.squeeze(-1) > 0)
 
-                logits = self.agg_model(tokens, attn_mask=mask).view(-1)
+                logits = self.agg_model_ddp(tokens, attn_mask=mask).view(-1)
                 loss = self.crit.compute(logits, y.view(-1).float())
                 loss_to_backward = loss / float(grad_accum)
 
@@ -371,10 +387,24 @@ class PairSelectedTrainer:
             all_logits.append(logits.detach().cpu())
             all_labels.append(y.detach().cpu())
 
+        # DDP: reduce the running loss across ranks (global val loss) and gather all
+        # logits/labels so metrics — and hence best-model selection — use the full
+        # validation set instead of one rank's shard. (Note: DistributedSampler pads the
+        # last batch, so a few samples may be counted twice; this matches trainer_em.)
+        if is_ddp():
+            ls = all_reduce_tensor(torch.tensor(
+                [total_loss, float(total_seen)], dtype=torch.float64, device=self.device))
+            total_loss, total_seen = float(ls[0].item()), int(ls[1].item())
+
         metrics: Dict[str, float] = {"loss": total_loss / max(1, total_seen)}
         if all_labels:
-            logits_np = torch.cat(all_logits).numpy()
-            labels_np = torch.cat(all_labels).numpy()
+            logits_t = torch.cat(all_logits)
+            labels_t = torch.cat(all_labels)
+            if is_ddp():
+                logits_t = torch.cat(gather_tensors(logits_t))
+                labels_t = torch.cat(gather_tensors(labels_t))
+            logits_np = logits_t.numpy()
+            labels_np = labels_t.numpy()
             cm = compute_metrics(labels_np, logits_np, self.task_cfg)
             for k, v in cm.items():
                 try:
@@ -435,6 +465,11 @@ class PairSelectedTrainer:
         return self.best_metric != old
 
     def save_checkpoint(self, path: str) -> None:
+        # rank0-gated: under DDP only rank 0 writes, avoiding a write race. The un-wrapped
+        # self.agg_model is saved (no 'module.' prefix) so ckpts are single<->multi compatible.
+        save_on_rank0(self._save_checkpoint_impl, path)
+
+    def _save_checkpoint_impl(self, path: str) -> None:
         ckpt = {
             "agg_state_dict": self.agg_model.state_dict(),
             "inst_state_dict": self.instance_model.state_dict() if self.instance_model is not None else None,
