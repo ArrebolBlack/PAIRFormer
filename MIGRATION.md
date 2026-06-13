@@ -30,9 +30,22 @@ miRAW/deepTargetPro/MTI_EM_Pipeline、MTI_EM_K512/K1024、miRAW_EM_Pipeline_spli
 k1ratio05。每个的覆盖键集由 `cfgdiff golden_configs/<base> golden_configs/<member>` 精确抽取。
 F2 rebuttal 子配置（已是薄覆盖范式）随其父被抽取自动受益，合成不变。
 
-### 待完成：F5 pair_agg / F7 window-TNopt / F8 MTI-scalable / F9 cheap + 死配置归档
-注意已识别的"按数据集缺键"模式（如 DeepMirTar_pair_agg_baseline 不含
-`data.pair.cache_root`）—— 与 bench 同理，用"基类不含该键、含的成员各自添加"处理，保 0-diff。
+### 已完成：F5 pair_agg / F7 window-TNopt / F9 cheap（commit L1.3）+ 死配置归档（commit L1.4）
+- `_base/pair_agg_core`（把 `data.pair.cache_root` 抽出，让 DeepMirTar 可不含它）、
+  `_base/window_tnopt_core`、`_base/cheap_core`。8 个配置改薄覆盖。
+- `miRAW_pair_agg_set_transformer` 保持独立（架构本就不同，非复制）。
+- MTI_TargetNet_Optimized 的 `task.threshold` 由标量 0.5 → dict（含 sweep），覆盖时整节点替换（OmegaConf 语义），已验证等价。
+- 死配置归档见 `configs/_legacy/README.md`。
+- "按数据集缺键"模式（bench、DeepMirTar cache_root）统一用"基类不含该键、含的成员各自添加"处理，保 0-diff。
+
+### 待完成：F8 MTI-scalable 家族（~15-18 个配置）
+共享 `MTI_train_selected_inst` 那套 ~133 行 selected-inst/scalable body（task=pair_train_selected_inst，
+用 trainer_pair_selected + scalable + token_provider），分支为：
+- 聚合器消融（PairCNN/GNN/MoE）：仅 `model` 块（arch 相关键，含缺键）+ name 不同；
+- build/train/eval：`run.mode` + trainer 块有无；
+- window-shard / selected_raw / shard 变体：更偏一次性运维配置。
+计划：抽 `_base/mti_scalable_inst_core`（不含 model 块，避免聚合器缺键问题），各成员补 model+mode。
+这是 L1 剩余的独立子任务（每个 130+ 键，缺键子坑多），单独一轮做。
 
 ## 已知 bug / 历史值（保留以保等价，规范化属后续 bugfix 层）
 
