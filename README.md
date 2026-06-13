@@ -34,14 +34,25 @@ miRNA-mRNA pair
 git clone --recursive https://github.com/ArrebolBlack/PAIRFormer.git
 cd PAIRFormer
 
-# Install dependencies (Python 3.10+, CUDA 12.x)
-pip install -r requirements.txt
+# Create env (Python 3.10) + install PyTorch 2.4.1 (CUDA 12.1)
+conda create -n pairformer python=3.10 -y && conda activate pairformer
+pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
+# Then the rest (hydra-core, biopython, eval stack, ...)
+pip install -r requirements.in
 
 # Pull checkpoint files (Git LFS)
 git lfs pull
 ```
 
-**Key dependencies**: PyTorch 2.4.1, Hydra 1.3.2, wandb, timm, BioPython
+- `requirements.in` is the canonical pinned source. (The old `hydra==2.5` line was the WRONG
+  PyPI package and has been removed; the eval deps scikit-learn/pandas/matplotlib/seaborn,
+  imported by `src/evaluator` but missing from the original freeze, were added.)
+- `requirements.txt` / `requirements.lock` are the original Linux conda freezes (they contain
+  `@ file://` refs that do not `pip install` cleanly off-host) — kept for provenance.
+- **Windows**: the Linux-only `nvidia-*-cu12` wheels in `requirements.in` are unnecessary (the
+  Windows torch wheel bundles its CUDA dlls); a validated Windows env lock is `requirements.win.lock`.
+
+**Key dependencies**: PyTorch 2.4.1, Hydra-core 1.3.2, wandb, timm, BioPython, scikit-learn
 
 ## Data
 

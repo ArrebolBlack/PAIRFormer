@@ -1,0 +1,42 @@
+# Windows-validated lock for refactor/2026-06 (conda env 'pairformer', py3.10).
+# torch 2.4.1+cu121 installed from the pytorch cu121 index; rest from PyPI. This is the
+# exact env that produced the bit-identical miRAW baseline (see baseline/run/BASELINE.md).
+# Linux/server: use requirements.in (cu121). See README.
+antlr4-python3-runtime==4.9.3
+biopython==1.83
+colorama==0.4.6
+contourpy==1.3.2
+cycler==0.12.1
+filelock==3.29.0
+fonttools==4.63.0
+fsspec==2026.4.0
+hydra-core==1.3.2
+hydra-joblib-launcher==1.2.0
+Jinja2==3.1.6
+joblib==1.5.3
+kiwisolver==1.5.0
+MarkupSafe==3.0.3
+matplotlib==3.7.5
+mpmath==1.3.0
+networkx==3.4.2
+numpy==1.24.4
+omegaconf==2.3.0
+packaging==26.0
+pandas==2.0.3
+pillow==12.2.0
+psutil==7.0.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+pytz==2026.2
+PyYAML==6.0.2
+scikit-learn==1.3.2
+scipy==1.10.1
+seaborn==0.13.2
+six==1.17.0
+sympy==1.14.0
+threadpoolctl==3.6.0
+torch==2.4.1+cu121
+torchvision==0.19.1+cu121
+tqdm==4.67.1
+typing_extensions==4.15.0
+tzdata==2026.2
