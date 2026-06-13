@@ -1036,55 +1036,8 @@ class Trainer:
 
 
 
-    def _binary_focal_loss(
-        self,
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        sample_weight: torch.Tensor = None,
-        pos_weight: torch.Tensor = None,
-    ) -> torch.Tensor:
-        """
-        稳定版 Binary Focal Loss，支持 soft label + sample_weight + pos_weight。
-
-        logits : (N,)
-        labels : (N,)  已经做过 label smoothing 的 target（在 [0,1]）
-        """
-        logits = logits.view(-1)
-        labels = labels.view(-1).float()
-
-        gamma = float(getattr(self.train_cfg, "focal_gamma", 2.0))
-        alpha = float(getattr(self.train_cfg, "focal_alpha", 0.25))
-
-        # 1) 先用官方 BCEWithLogitsLoss 做“稳定的 CE”（不做 reduction）
-        #    这里可以同时考虑 pos_weight
-        ce = F.binary_cross_entropy_with_logits(
-            logits,
-            labels,
-            pos_weight=pos_weight,
-            reduction="none",
-        )  # [N]
-
-        # 2) 计算 p 和 soft-label 意义下的 p_t
-        p = torch.sigmoid(logits)              # [N]
-        # soft p_t: “对”的概率
-        p_t = p * labels + (1.0 - p) * (1.0 - labels)
-        p_t = p_t.clamp(min=1e-6, max=1.0 - 1e-6)
-
-        # 3) alpha_t 同样用 soft label 做插值
-        alpha_t = alpha * labels + (1.0 - alpha) * (1.0 - labels)
-
-        # 4) focal 因子
-        focal_factor = alpha_t * (1.0 - p_t).pow(gamma)   # [N]
-
-        # 5) 组合：focal-weighted CE
-        loss = focal_factor * ce                          # [N]
-
-        # 6) 可选：sample_weight（如 ESA 权重）
-        if sample_weight is not None:
-            sample_weight = sample_weight.view_as(loss)
-            loss = loss * sample_weight                   # [N]
-
-        return loss.mean()
+    # _binary_focal_loss removed: its logic now lives in src/trainer/loss.py
+    # (BinaryClassificationLoss), the single source of truth for the binary loss.
 
     def _compute_esa_sample_weight(self, esa_scores: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -1113,118 +1066,21 @@ class Trainer:
 
 
     def _compute_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        根据 problem_type + train 配置计算 loss。
+        """根据 problem_type 计算 loss。
 
-        Stage 0.1:
-          - class weighting (pos_weight)
-          - label smoothing (smooth_pos / smooth_neg)
-
-        Stage 0.2:
-          - loss_type: "bce" / "focal" / "bce_focal"
-            * "bce"      : 只用 BCE（兼容 Stage 0.1 行为）
-            * "focal"    : 只用 Focal loss
-            * "bce_focal": BCE + lambda_focal * Focal
+        binary_classification 分支委托给共享实现
+        src.trainer.loss.BinaryClassificationLoss —— 与原内联 _compute_loss/_binary_focal_loss
+        逐位等价（见 tests/test_loss_equivalence.py，24/24 配置组合一致）。
+        regression 分支保持不变。
         """
         problem_type = getattr(self.task_cfg, "problem_type", "binary_classification")
 
         if problem_type == "binary_classification":
-            # 展平成一维，和以前行为一致
-            logits_flat = logits.view(-1)
-            labels_flat = labels.view(-1).float()
+            from src.trainer.loss import BinaryClassificationLoss
 
-            # 取出 ESA-based per-sample weight（如果有）
-            sample_weight = getattr(self, "_current_sample_weight", None)
-            if sample_weight is not None:
-
-                # print("[DEBUG] sample_weight min/max:",
-                #     sample_weight.min().item(),
-                #     sample_weight.max().item())
-                
-                # 防止 train 残留到 val，长度对不上时直接忽略
-                if sample_weight.numel() != logits_flat.numel():
-                    sample_weight = None
-                else:
-                    sample_weight = sample_weight.view_as(logits_flat)
-
-            # -------- Label smoothing -------- #
-            use_smoothing = bool(getattr(self.train_cfg, "label_smoothing", False))
-            if use_smoothing:
-                smooth_pos = float(getattr(self.train_cfg, "smooth_pos", 0.9))
-                smooth_neg = float(getattr(self.train_cfg, "smooth_neg", 0.1))
-
-                labels_smooth = torch.where(
-                    labels_flat > 0.5,
-                    torch.full_like(labels_flat, smooth_pos),
-                    torch.full_like(labels_flat, smooth_neg),
-                )
-            else:
-                labels_smooth = labels_flat
-
-            # -------- Class weighting (pos_weight) -------- #
-            pos_weight_val = float(getattr(self.train_cfg, "pos_weight", 1.0))
-            if abs(pos_weight_val - 1.0) < 1e-8:
-                pos_weight_tensor = None  # 和普通 BCE 完全等价
-            else:
-                pos_weight_tensor = torch.tensor(
-                    pos_weight_val,
-                    dtype=logits_flat.dtype,
-                    device=logits_flat.device,
-                )
-
-            # -------- 根据 loss_type 决定怎么用这些东西 -------- #
-                        # -------- 根据 loss_type 决定怎么用这些东西 -------- #
-            loss_type = str(getattr(self.train_cfg, "loss_type", "bce")).lower()
-
-
-            if loss_type == "bce":
-                # ✅ 完全保留 Stage 0.1 的行为：BCE + (可选) pos_weight + (可选) smoothing
-                loss = F.binary_cross_entropy_with_logits(
-                    logits_flat,
-                    labels_smooth,
-                    weight=sample_weight,
-                    pos_weight=pos_weight_tensor,
-                )
-                return loss
-
-            elif loss_type == "focal":
-                return self._binary_focal_loss(
-                    logits_flat,
-                    labels_smooth,
-                    sample_weight=sample_weight,
-                    pos_weight=pos_weight_tensor,
-                )
-
-            elif loss_type == "bce_focal":
-                # 1) BCE 部分：保留原有 pos_weight + sample_weight 行为
-                bce_loss = F.binary_cross_entropy_with_logits(
-                    logits_flat,
-                    labels_smooth,
-                    weight=sample_weight,
-                    pos_weight=pos_weight_tensor,
-                )
-
-                if torch.isnan(logits).any() or torch.isinf(logits).any():
-                    print("[WARN] logits contains NaN/Inf in focal loss!")
-
-                # 2) Focal 部分：用稳定版实现 + 同样的 pos_weight / sample_weight
-                focal_loss = self._binary_focal_loss(
-                    logits_flat,
-                    labels_smooth,
-                    sample_weight=sample_weight,
-                    pos_weight=pos_weight_tensor,
-                )
-
-                lambda_focal = float(getattr(self.train_cfg, "focal_lambda", 1.0))
-                lambda_bce = float(getattr(self.train_cfg, "bce_lambda", 1.0))
-                            
-                # print(f"[DEBUG] bce_loss={bce_loss} focal_loss={focal_loss}")
-
-                return lambda_bce * bce_loss + lambda_focal * focal_loss
-
-
-            else:
-                raise ValueError(f"Unknown loss_type for binary_classification: {loss_type}")
+            bcl = BinaryClassificationLoss(self.train_cfg)
+            bcl.set_sample_weight(getattr(self, "_current_sample_weight", None))
+            return bcl.compute(logits, labels)
 
         elif problem_type == "regression":
             assert self.criterion_reg is not None
@@ -1232,8 +1088,6 @@ class Trainer:
 
         else:
             raise ValueError(f"Unknown problem_type: {problem_type}")
-
-
 
     def _apply_mil_reduction(
         self,
