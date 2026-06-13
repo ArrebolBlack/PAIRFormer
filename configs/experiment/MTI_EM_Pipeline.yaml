@@ -1,56 +1,7 @@
 # @package _global_
-# MTI EM pipeline — inherits _base/em_core, overrides ONLY the keys that differ from
-# miRAW (extracted via cfgdiff against the golden snapshots: 28 keys = 4 added + 24 changed).
-# Note: instance_mode is overridden back to the clean "hybrid" (em_core preserves the
-# original miRAW value with full-width quotes for equivalence; MTI's original used the
-# clean value). Composed result unchanged vs pre-refactor snapshot (cfgdiff = 0).
+# MTI EM pipeline = mti_em_core + bench params. Composes identically to the original
+# MTI_EM_Pipeline (cfgdiff = 0).
 defaults:
-  - _base/em_core
+  - _base/mti_em_core
+  - _base/em_bench
   - _self_
-
-experiment:
-  name: MTI_EM_Pipeline
-
-data:
-  name: mirna_MTI
-  split_column: 6
-  col_mirna_seq: 4
-  col_mrna_seq: 2
-  col_label: 5
-  split_map:
-    test: "test"
-  path:
-    train: "data/MTI/MTI_pair_random_split.txt"
-    val: "data/MTI/MTI_pair_random_split.txt"
-    test: "data/MTI/MTI_pair_random_split.txt"
-
-cheap_ckpt_path: "checkpoints/MTI_CheapCTSNet/checkpoints/best.pt"
-instance_ckpt_path: "checkpoints/MTI_TargetNet_Optimized/checkpoints/best.pt"
-
-em:
-  inst_emb_dim: 1536
-  policy:
-    instance_mode: "hybrid"
-    warmup_epochs: 40
-
-instance_model:
-  num_channels: [64, 64, 128, 128]
-  num_blocks: [3, 3, 3, 3]
-  multi_scale: true
-  use_bn: true
-
-run:
-  batch_size: 32
-  num_workers: 8
-  num_epochs: 80
-  eval_test_after_train: false
-
-trainer_em:
-  monitor: "f1"
-  greater_is_better: true
-
-logging:
-  wandb:
-    project: "MTI_EXP8_PipelineA"
-    group: "MTI_RandomSplit"
-    tags: ["EXP8", "PipelineA", "MTI", "EM"]

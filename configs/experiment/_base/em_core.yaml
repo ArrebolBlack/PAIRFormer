@@ -111,19 +111,8 @@ run:
   # refresh_instance_after_update: false
 
 
-  # benchmark inference
-  bench_split: "test"
-  bench_num_pairs_subset: 1024
-  bench_warmup_iters: 20
-  bench_measure_iters: 100
-  bench_repeats: 3
-  bench_amp: false
-  bench_sync_cuda: True
-  bench_cheap_chunk_size: 8192
-  bench_csv_path: None # 走默认
-  bench_pair_ids_path: None
-  bench_profile_sections: True
-  bench_profile_sync_cuda: false
+  # benchmark inference params moved to _base/em_bench.yaml
+  # (only read by src.launch.bench_compute_vs_k; included by EM configs that had them)
   
   
 

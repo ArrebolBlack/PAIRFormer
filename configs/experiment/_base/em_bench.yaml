@@ -1,0 +1,18 @@
+# @package _global_
+# Benchmark-inference params (Fig 4, consumed only by src.launch.bench_compute_vs_k).
+# Factored out of em_core so EM configs that originally omitted them (split_sensitivity,
+# K-scaling variants) compose identically without them. Included only by configs that
+# originally carried these keys.
+run:
+  bench_split: "test"
+  bench_num_pairs_subset: 1024
+  bench_warmup_iters: 20
+  bench_measure_iters: 100
+  bench_repeats: 3
+  bench_amp: false
+  bench_sync_cuda: True
+  bench_cheap_chunk_size: 8192
+  bench_csv_path: None
+  bench_pair_ids_path: None
+  bench_profile_sections: True
+  bench_profile_sync_cuda: false

@@ -4,6 +4,7 @@
 # Composed result unchanged vs pre-refactor snapshot (cfgdiff = 0).
 defaults:
   - _base/em_core
+  - _base/em_bench
   - _self_
 
 experiment:

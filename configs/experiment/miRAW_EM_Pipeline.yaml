@@ -5,4 +5,5 @@
 # snapshot (verified by tools/refactor_verify, cfgdiff = 0).
 defaults:
   - _base/em_core
+  - _base/em_bench
   - _self_
