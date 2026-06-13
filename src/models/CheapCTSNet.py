@@ -1,5 +1,5 @@
 # src/models/CheapCTSNet.py
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union  # noqa: F401
 
 import torch
 import torch.nn as nn
@@ -15,8 +15,66 @@ def _same_pad_1d(k: int) -> Tuple[int, int]:
     return p // 2, p - (p // 2)
 
 
+class BaseCheapCTSNet(nn.Module):
+    """Shared scaffolding for the cheap CTS encoders (TinyConv / StatsMLP).
+
+    Subclasses build their own content encoder + set self.emb_head / self.logit_head (in that
+    order, LAST in __init__, to preserve weight-init RNG order), set self.meta_mode /
+    self.meta_dropout / self.emb_dim, then call self._init_weights(). Their forward computes a
+    content feature z_content and delegates the meta/emb/logit/normalize tail to
+    self._head_forward(...). Consolidates the previously-duplicated _get_meta / _init_weights /
+    forward-tail (verified bit-identical by tests/test_stage1_models_golden.py).
+    """
+
+    _VALID_META = ("none", "logit_only", "emb_and_logit")
+
+    def _check_meta_mode(self, meta_mode: str) -> str:
+        if meta_mode not in self._VALID_META:
+            raise ValueError(f"meta_mode must be one of {list(self._VALID_META)}, got {meta_mode}")
+        return meta_mode
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _get_meta(self, esa_scores: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        meta = torch.stack([esa_scores, pos], dim=-1).float()  # [B,2]
+        if self.meta_dropout > 0:
+            meta = F.dropout(meta, p=self.meta_dropout, training=self.training)
+        return meta
+
+    def _head_forward(self, z_content, esa_scores, pos, return_normalized_emb, return_emb_raw):
+        """Given a content feature [B, D], apply meta + emb/logit heads + optional normalize."""
+        need_meta_logit = self.meta_mode in ("logit_only", "emb_and_logit")
+        need_meta_emb = self.meta_mode == "emb_and_logit"
+
+        meta = None
+        if need_meta_logit or need_meta_emb:
+            if esa_scores is None or pos is None:
+                raise ValueError(f"meta_mode={self.meta_mode} requires esa_scores and pos.")
+            meta = self._get_meta(esa_scores, pos)
+
+        emb_in = z_content if not need_meta_emb else torch.cat([z_content, meta], dim=-1)
+        emb_raw = self.emb_head(emb_in)  # [B,emb_dim]
+
+        logit_in = z_content if not need_meta_logit else torch.cat([z_content, meta], dim=-1)
+        logit = self.logit_head(logit_in).squeeze(-1)  # [B]
+
+        emb = F.normalize(emb_raw, p=2, dim=-1) if return_normalized_emb else emb_raw
+        if return_emb_raw:
+            return emb, logit, emb_raw
+        return emb, logit
+
+
 @register_model("CheapCTSNet_TinyConv")
-class CheapCTSNet_TinyConv(nn.Module):
+class CheapCTSNet_TinyConv(BaseCheapCTSNet):
     """
     TinyConv cheap encoder:
       z_content = Conv1d(x) -> Conv1d(x) -> pool
@@ -47,10 +105,7 @@ class CheapCTSNet_TinyConv(nn.Module):
         s2 = int(p.get("s2", 2))
         dropout = float(p.get("dropout", 0.0))
 
-        self.meta_mode = str(p.get("meta_mode", "logit_only"))
-        if self.meta_mode not in ("none", "logit_only", "emb_and_logit"):
-            raise ValueError(f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}")
-
+        self.meta_mode = self._check_meta_mode(str(p.get("meta_mode", "logit_only")))
         self.meta_dropout = float(p.get("meta_dropout", 0.0))
         self.emb_dim = emb_dim
 
@@ -89,23 +144,6 @@ class CheapCTSNet_TinyConv(nn.Module):
 
         self._init_weights()
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def _get_meta(self, esa_scores: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
-        meta = torch.stack([esa_scores, pos], dim=-1).float()  # [B,2]
-        if self.meta_dropout > 0:
-            meta = F.dropout(meta, p=self.meta_dropout, training=self.training)
-        return meta
-
     def forward(
         self,
         x: torch.Tensor,  # [B,C,L] float one-hot
@@ -113,36 +151,16 @@ class CheapCTSNet_TinyConv(nn.Module):
         pos: Optional[torch.Tensor] = None,         # [B]
         return_normalized_emb: bool = True,
         return_emb_raw: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ):
         z = self.conv1(x)
         z = self.conv2(z)
         z = self.pool(z).squeeze(-1)  # [B,c2]
         z = self.dropout(z)
-        z_content = z
-
-        need_meta_logit = self.meta_mode in ("logit_only", "emb_and_logit")
-        need_meta_emb = self.meta_mode == "emb_and_logit"
-
-        meta = None
-        if need_meta_logit or need_meta_emb:
-            if esa_scores is None or pos is None:
-                raise ValueError(f"meta_mode={self.meta_mode} requires esa_scores and pos.")
-            meta = self._get_meta(esa_scores, pos)
-
-        emb_in = z_content if not need_meta_emb else torch.cat([z_content, meta], dim=-1)
-        emb_raw = self.emb_head(emb_in)  # [B,emb_dim]
-
-        logit_in = z_content if not need_meta_logit else torch.cat([z_content, meta], dim=-1)
-        logit = self.logit_head(logit_in).squeeze(-1)  # [B]
-
-        emb = F.normalize(emb_raw, p=2, dim=-1) if return_normalized_emb else emb_raw
-        if return_emb_raw:
-            return emb, logit, emb_raw
-        return emb, logit
+        return self._head_forward(z, esa_scores, pos, return_normalized_emb, return_emb_raw)
 
 
 @register_model("CheapCTSNet_StatsMLP")
-class CheapCTSNet_StatsMLP(nn.Module):
+class CheapCTSNet_StatsMLP(BaseCheapCTSNet):
     """
     极限速度版本：统计特征 + MLP。
     同样支持 meta_mode（用于统一消融与训练脚本）。
@@ -159,18 +177,17 @@ class CheapCTSNet_StatsMLP(nn.Module):
         use_diff = bool(p.get("use_diff", True))
         dropout = float(p.get("dropout", 0.0))
 
-        self.meta_mode = str(p.get("meta_mode", "logit_only"))
-        if self.meta_mode not in ("none", "logit_only", "emb_and_logit"):
-            raise ValueError(f"meta_mode must be one of ['none','logit_only','emb_and_logit'], got {self.meta_mode}")
-
+        self.meta_mode = self._check_meta_mode(str(p.get("meta_mode", "logit_only")))
         self.meta_dropout = float(p.get("meta_dropout", 0.0))
         self.use_diff = use_diff
+        self.emb_dim = emb_dim
 
         base_feat = in_channels * (3 if use_diff else 2)  # mean,max,(diff)
         meta_dim = 2
 
+        # NOTE: emb head named emb_head (was emb_mlp) so the shared _head_forward can use it.
         emb_in = base_feat + (meta_dim if self.meta_mode == "emb_and_logit" else 0)
-        self.emb_mlp = nn.Sequential(
+        self.emb_head = nn.Sequential(
             nn.Linear(emb_in, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
@@ -190,19 +207,6 @@ class CheapCTSNet_StatsMLP(nn.Module):
 
         self._init_weights()
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def _get_meta(self, esa_scores: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
-        meta = torch.stack([esa_scores, pos], dim=-1).float()
-        if self.meta_dropout > 0:
-            meta = F.dropout(meta, p=self.meta_dropout, training=self.training)
-        return meta
-
     def forward(
         self,
         x: torch.Tensor,  # [B,C,L] float one-hot
@@ -218,23 +222,4 @@ class CheapCTSNet_StatsMLP(nn.Module):
             diff = (x[..., 1:] - x[..., :-1]).abs().mean(dim=-1)
             feats.append(diff)
         f = torch.cat(feats, dim=-1)  # [B, base_feat]
-
-        need_meta_logit = self.meta_mode in ("logit_only", "emb_and_logit")
-        need_meta_emb = self.meta_mode == "emb_and_logit"
-
-        meta = None
-        if need_meta_logit or need_meta_emb:
-            if esa_scores is None or pos is None:
-                raise ValueError(f"meta_mode={self.meta_mode} requires esa_scores and pos.")
-            meta = self._get_meta(esa_scores, pos)
-
-        emb_in = f if not need_meta_emb else torch.cat([f, meta], dim=-1)
-        emb_raw = self.emb_mlp(emb_in)
-
-        logit_in = f if not need_meta_logit else torch.cat([f, meta], dim=-1)
-        logit = self.logit_head(logit_in).squeeze(-1)
-
-        emb = F.normalize(emb_raw, p=2, dim=-1) if return_normalized_emb else emb_raw
-        if return_emb_raw:
-            return emb, logit, emb_raw
-        return emb, logit
+        return self._head_forward(f, esa_scores, pos, return_normalized_emb, return_emb_raw)
