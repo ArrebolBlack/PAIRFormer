@@ -118,7 +118,7 @@ train_em 的缓存（cheap→selection→instance memmap）**默认随训练 ran
 |---|---|---|---|
 | E1 | miRAW 10-fold 主结果 | **8 卡** | `scripts/rebuttal/tuning/plan_D_10fold_final.sh`；baseline `scripts/rebuttal/baselines/eval_{targetnet,mimosa,maxpool_10fold}.py`（开发机）|
 | E2 | deepTargetPro 外部验证 | **8 卡** | `scripts/rebuttal/tuning/plan_D_deepTargetPro_10fold.sh` / `plan_deepTargetPro_full_pipeline.sh`；transfer `scripts/run_seed{2025,2026}_ext150.sh` |
-| E3 | 大规模 MTI K∈{64..1024} | **8 卡（重点）** | `bash scripts/run_ddp_train_em.sh 8 MTI_EM_K512`；K1024 用 `scripts/auto_resume_k1024.sh`（改路径） |
+| E3 | 大规模 MTI K∈{64..1024}（**主线 selected-inst**） | **8 卡（重点）** | `bash scripts/task_mti_selected.sh`（MODE=reuse/build；入口 `train_pair_selected_inst`，**非 train_em**，缓存不自动建）；dense 备选 `run_ddp_train_em.sh 8 MTI_EM_K512`（会自动建 em_cache）|
 | E4 | K-sweep retrain/truncate | **8 卡** | `scripts/rebuttal/tuning/plan_A_k_sweep.sh`；truncate `scripts/rebuttal/k_sensitivity/run_k_sensitivity.sh` |
 | E5 | robustness vs n（eval-only） | **开发机** | `scripts/run_robustness_vs_n.sh 0 512 <MTI_K512_ckpt>`（需 MTI 训好的 ckpt）|
 | E6 | 运行时/显存 bench | **开发机** | `python -m src.launch.bench_compute_vs_k`（§4）|
@@ -190,7 +190,28 @@ bash   scripts/rebuttal/rel_distill_ablation/run_all.sh
 - **缓存提速**：`USE_SHM=1` 时把缓存放 `/dev/shm`（实测 1.4T RAM 盘）。
 
 通过 `Envs` 传参：`EXP`/`KMAX`/`BATCH`/`USE_SHM`/`WANDB`。`run.batch_size` 是**每卡**，8 卡全局=×8。
-> 简单交互式多卡（非任务）也可直接 `bash scripts/run_ddp_train_em.sh 8 <EXP> <overrides...>`。
+> ⚠️ `task_entry.sh` 走 **dense EM**（`train_em`，自动建 em_cache）——适用 miRAW/deepTargetPro/`MTI_EM_K512`。
+> **MTI 主线 `MTI_train_selected_inst` 入口不同**（`train_pair_selected_inst`，缓存不自动建）→ 用下面 §5.1b。
+> 简单交互式多卡也可：dense `bash scripts/run_ddp_train_em.sh 8 <EXP>`；selected `bash scripts/run_ddp_train_pair_selected.sh 8 MTI_train_selected_inst <overrides>`。
+
+### 5.1b MTI 主线（selected-inst）+ 你的"复用 vs 重建"双任务对照
+
+`MTI_train_selected_inst` 走 `src.launch.train_pair_selected_inst`，读 `scalable.cache_root/selected_pair_cache/<split>/selected_inst`，
+**缺则报错、不自动建**。仓库已加 `scripts/task_mti_selected.sh`（MODE=reuse|build，bash -n 过）。
+
+先把 40G 预建缓存从 TOS 拉到 vePFS（**内网 endpoint，多一个 i**；注意 TOS 那层同名嵌套）：
+```bash
+tosutil config -e=tos-cn-beijing.ivolces.com -re=cn-beijing -i=<AK> -k=<SK>
+tosutil cp -r -j 32 -p 16 -u tos://tos-mlp-zgci/yinjiaqi/cache_mti_full_st05/cache_mti_full_st05/ \
+  $VEP/cache/mti_st05/      # 这层含 selected_pair_cache/
+```
+- **任务 A（复用）**：Envs `MODE=reuse KMAX=512 CACHE_DIR=$VEP/cache/mti_st05`。
+- **任务 B（重建）**：Envs `MODE=build KMAX=512 CACHE_ROOT=$VEP/runs/mti_build/cache`（脚本跑 build_selected_pair_cache→build_selected_inst_cache→训练）。
+- 两任务跑完比 `$RUNDIR` 下 test 指标 → **一致即证明预建缓存可复用**（也顺带验证本次重构对该缓存的等价性）。
+
+> **MTI 建缓存 ckpt 坑**：config 写死的 `checkpoints/MTI_CheapCTSNet/best.pt`、`MTI_TargetNet_Optimized/best.pt`
+> **仓库里没有**。脚本默认覆盖成 exp8 真身（`MTI_CheapCTSNet_shard_v1_compact_r4`、`MTI_TargetNet_Optimized_shard_v2_relabel_top4`，仓库有）。
+> 若 exp8 vePFS 上有同名 ckpt，传 `CHEAP_CKPT`/`INST_CKPT` 覆盖即可。复用模式下嵌入已烤进缓存，一般用不到这俩。
 
 ### 5.2 任务 YAML `task-mti-k512.yaml`（控制台 GetJob 格式，来自指南 09）
 
