@@ -13,7 +13,7 @@
 - **首跑缓存**：EM/CTS 路径首跑会从 raw txt 现建缓存（Biopython ESA，较慢）；scalable 路径需先
   build cache（见各实验）。
 - **外部 baseline 子模块**（E1 的 TargetNet/Mimosa）：`git submodule update --init`（external/ 当前未初始化）。
-- **关键 checkpoint**（EXPERIMENT_REPORT.md App A）：MTI K=512 `checkpoints/MTI_v3_K512_expG/best.pt`；
+- **关键 checkpoint**（docs/reports/EXPERIMENT_REPORT.md App A）：MTI K=512 `checkpoints/MTI_v3_K512_expG/best.pt`；
   SWA `checkpoints/MTI_v3_SWA_K512/best.pt`；instance `checkpoints/MTI_v3_xlarge_resume/best.pt`；
   cheap `checkpoints/MTI_CheapCTSNet_shard_v1_compact_r4/best.pt`；miRAW BR-MIL `checkpoints/BR-MIL/checkpoints/best.pt`（本机已存在）。
 - **多卡启动约定**：`torchrun --nproc_per_node=N -m src.launch.<entry> experiment=<NAME> ...`，或
@@ -27,11 +27,11 @@
 | ID | 实验 | 论文位置 | 配置/脚本 | 单卡命令 | 多卡命令 | 预期指标 | 资源 | 状态 |
 |---|---|---|---|---|---|---|---|---|
 | E1 | miRAW 10-fold 主结果（vs TargetNet/Mimosa/MaxPool） | Table 1 §6.2 | `miRAW_EM_Pipeline`(K=64)；baseline `scripts/rebuttal/baselines/eval_{targetnet,mimosa,maxpool_10fold}.py` | `python -m src.launch.train_em experiment=miRAW_EM_Pipeline run.kmax=64` | `bash scripts/run_ddp_train_em.sh 2 miRAW_EM_Pipeline run.kmax=64` | PAIR-Former PR-AUC 0.869±0.031, F1 0.840±0.022；TN 0.779；Mimosa 0.788；MaxPool 0.798 | 2×A100 数小时/fold | 待跑 |
-| E2 | deepTargetPro 外部验证（transfer+full） | Table 2 §6.2 | `deepTargetPro_EM_Pipeline`/`_ext150`；transfer `run_seed{2025,2026}_ext150.sh` | `python -m src.launch.train_em experiment=deepTargetPro_EM_Pipeline` | `bash scripts/run_ddp_train_em.sh 2 deepTargetPro_EM_Pipeline` | transfer F1 83.9±3.9%, full 83.2±3.2%；>TEC-miTarget 79.11% | 2×A100 | 待跑 |
+| E2 | deepTargetPro 外部验证（transfer+full） | Table 2 §6.2 | `deepTargetPro_EM_Pipeline`/`_ext150`；transfer `scripts/run_seed{2025,2026}_ext150.sh` | `python -m src.launch.train_em experiment=deepTargetPro_EM_Pipeline` | `bash scripts/run_ddp_train_em.sh 2 deepTargetPro_EM_Pipeline` | transfer F1 83.9±3.9%, full 83.2±3.2%；>TEC-miTarget 79.11% | 2×A100 | 待跑 |
 | E3 | 大规模 MTI（K∈{64,128,256,512}） | §6.2 Fig3(a) | `MTI_train_selected_inst`(+`MTI_EM_K512/K1024`) | `python -m src.launch.train_em experiment=MTI_train_selected_inst run.kmax=512` | `bash scripts/run_ddp_train_em.sh 8 MTI_train_selected_inst run.kmax=512` | K=512 F1 0.792, PR-AUC 0.874；K=64 F1 0.771 | 8×A100 ~30min/epoch | 待跑 |
 | E4 | K-sweep retrain@K vs truncate@Kmax | Fig3(a) §6.3 | `MTI_EM_K512`(truncate, st_selector_prefix)+per-K；`scripts/rebuttal/k_sensitivity/run_k_sensitivity.sh` | retrain: `... run.kmax=$K`；truncate: 用 prefix selector 在更小 kmax 评 K512 ckpt | `bash scripts/run_ddp_train_em.sh 8 MTI_train_selected_inst run.kmax=$K` | 单调饱和，retrain≥truncate；F1 ~0.74(K1)→0.792(K512) | 8×A100 | 待跑 |
 | E5 | Robustness vs 可见池 n（固定 K*=64） | Fig3(b) §6.3 | `MTI_train_selected_inst` + `em.selection_cache.candidate_pool_size`；`EXP_PLAN_1_Robustness_2xA100.md` | eval-only：`eval_pair_selected ... candidate_pool_size={64..2048} run.kmax=512`（用 K512 ckpt） | 同上 torchrun | n=64 F1~0.76 → n≥512 饱和 0.7914/PR-AUC 0.8729 | 2×A100（eval） | 待跑 |
-| E6 | 运行时/显存（online inference vs K） | Fig4 §6.3 | 入口 `src.launch.bench_compute_vs_k`；输出 `bench_fig3/*.csv`（已存在） | `python -m src.launch.bench_compute_vs_k experiment=miRAW_EM_Pipeline run.bench_pair_ids_path=bench_fig3/pair_ids_test_1024.json` | —（单卡基准） | K=64 BRMIL≈TargetNet-like 延迟/吞吐；CPU gather 主导 | 单卡 | 数据已在 bench_fig3/ |
+| E6 | 运行时/显存（online inference vs K） | Fig4 §6.3 | 入口 `src.launch.bench_compute_vs_k`；输出 `paper/figures/bench_fig3/*.csv`（已存在） | `python -m src.launch.bench_compute_vs_k experiment=miRAW_EM_Pipeline run.bench_pair_ids_path=paper/figures/bench_fig3/pair_ids_test_1024.json` | —（单卡基准） | K=64 BRMIL≈TargetNet-like 延迟/吞吐；CPU gather 主导 | 单卡 | 数据已在 paper/figures/bench_fig3/ |
 
 ## 2. 消融（Table 3 §6.4）
 
