@@ -87,10 +87,22 @@ F2 rebuttal 子配置（已是薄覆盖范式）随其父被抽取自动受益�
 freeze 缺失的 `scikit-learn/pandas/matplotlib/seaborn`（与 numpy 1.24.4/py3.10 兼容，不影响训练数值）。
 本机 Windows 安装：cu121 index 装 torch 2.4.1 → 按 pin 装纯 python 依赖（见 baseline/run/BASELINE.md）。
 
+### ✅ L3 PairSelected 单/多卡 DDP（commit bdd7865）—— 已对抗复核
+`PairSelectedTrainer` 接受 `local_rank`（修原 launcher 传它导致的单卡/多卡 TypeError 崩溃）；
+`is_ddp()` 时把 agg_model 包 DDP 用于训练前向、未包装引用留给 optimizer/state_dict/SWA
+（ckpt 无 `module.` 前缀、单↔多卡互通）；validate 跨 rank gather + all_reduce loss；save rank0-gate。
+镜像 `trainer_em` 模式。
+- **对抗复核**（25 agent，4 视角 + 逐条核验）：**0 个确认 bug**。agg_model 的 DDP 接线、
+  clip_grad_norm、AMP+DDP、ckpt 互通、val gather 均确认正确。
+- **已知非 bug 观察**（记此供后续）：`train_pair_selected_raw.py` 未传 `train_instance_model`
+  → 默认 True 会训练 instance_model，但该 launcher 是单卡（不调 setup_ddp）→ instance 梯度无需同步，
+  当前无问题。若未来让 inst launcher 在 DDP 下训练 instance，需照 `trainer_em` 加 instance 梯度 all_reduce。
+- **验证**：单卡 `tests/test_pair_selected_smoke.py` 通过；真多卡用 `scripts/verify_ddp_pair_selected.sh`
+  在服务器跑。**本机 Windows 无法本地起多进程 DDP**（torch 2.4.1 Windows 构建缺 libuv → torchrun
+  rendezvous 失败；mp.spawn 亦不稳）—— 故多卡一律服务器验证。EM 路径 DDP 早已可用。
+
 ## 待办（后续层）
-- **L2b** DDP launcher 样板收口到 `src/utils/ddp.py`；**L3** 修 PairSelected 崩溃
-  （launcher 传 local_rank 给无此参数的 trainer）+ 加 DDP 梯度同步。EM/pair 路径本机缺 ckpt
-  难复跑 → import/结构校验 + 服务器 DDP=1/多卡 + Workflow 对抗核验。
-- **L4 续**：`evaluate_test_abc_once` 收编三处 A/B/C 手抄；trainer.py 注释死代码。
-- **L5** 数值优化开关（AMP/compile，默认关）；**L6 续** requirements lock 重生 + README 安装更新 +
-  EXPERIMENTS.md（阶段4）。每层等价闸门见 refactor_plan.md。
+- **L2b** DDP launcher 样板收口到 `src/utils/ddp.py`（3 个 launcher 的 setup/device/SyncBN/
+  sampler/rank0 去重，行为保持）；**L4 续** `evaluate_test_abc_once` 收编三处 A/B/C 手抄、trainer.py
+  注释死代码；**L5** 数值优化开关（AMP/compile，默认关）；**L6 续** lock 重生 + README。
+- **阶段4** EXPERIMENTS.md（见仓库 EXPERIMENTS.md）+ 逐条总验收。每层等价闸门见 refactor_plan.md。
