@@ -49,13 +49,15 @@ MODE=${MODE:-reuse}
 KMAX=${KMAX:-512}
 BATCH=${BATCH:-32}                              # 每卡（selected-inst 默认 32）
 EXP=${EXP:-MTI_train_selected_inst}
-RUNDIR=${RUNDIR:-$VEP/runs/mti_selected_${MODE}_k${KMAX}}
-mkdir -p "$RUNDIR"
+RUNDIR=${RUNDIR:-}   # 留空；reuse 按缓存名、build 按 k 值在各分支内设默认
 # MTI 建缓存所需 cheap/instance ckpt：config 写死的 MTI_CheapCTSNet/MTI_TargetNet_Optimized 仓库里没有，
 # 用 exp8 真身（sharded）覆盖；复用模式下嵌入已烤进缓存，一般用不到，仍传上去更稳。
 CHEAP_CKPT=${CHEAP_CKPT:-checkpoints/MTI_CheapCTSNet_shard_v1_compact_r4/best.pt}
 INST_CKPT=${INST_CKPT:-checkpoints/MTI_TargetNet_Optimized_shard_v2_relabel_top4/best.pt}
-CKPT_OVR="cheap_ckpt_path=$CHEAP_CKPT instance_ckpt_path=$INST_CKPT"
+# ⚠️ selected-inst 训练 config 只有 instance_ckpt_path（无 cheap_ckpt_path）→ 训练只传 INST_OVR；
+# 建缓存阶段（build_*）才两者都要 → BUILD_OVR。
+INST_OVR="instance_ckpt_path=$INST_CKPT"
+BUILD_OVR="cheap_ckpt_path=$CHEAP_CKPT instance_ckpt_path=$INST_CKPT"
 # 任意额外 Hydra override 透传（如复现 exp8 主结果：EXTRA="run.num_epochs=100 model.d_model=1024 model.n_layers=4 run.batch_size=64"）
 EXTRA=${EXTRA:-}
 
@@ -64,46 +66,50 @@ DDP="torchrun --nnodes=${MLP_WORKER_NUM:-1} --nproc_per_node=$NPROC \
   --node_rank=${MLP_ROLE_INDEX:-0} --master_addr=${MLP_WORKER_0_HOST:-127.0.0.1} --master_port=${MLP_WORKER_0_PORT:-29500}"
 
 if [ "$MODE" = "reuse" ]; then
-  # ---- 5a. 复用预建缓存 ----
-  CACHE_DIR=${CACHE_DIR:?需指定 CACHE_DIR=已拉到 vePFS、含 selected_pair_cache/ 的那层（TOS cache_mti_full_st05 的内层同名目录）}
-  if [ ! -f "$CACHE_DIR/selected_pair_cache/train/selected_inst/meta.json" ]; then
-    echo "[FATAL] $CACHE_DIR/selected_pair_cache/train/selected_inst/meta.json 不存在 —— CACHE_DIR 指错层？"; exit 4
-  fi
-  # 吞吐关键：vePFS 随机读很慢 → 把缓存搬到 /dev/shm（内存盘，实测 1.4T）再训。USE_SHM=0 可关。
+  # ---- 5a. 复用预建缓存（kmax/in_dim 自动从 meta 读，一套脚本通吃任意 selected_inst 缓存）----
+  CACHE_DIR=${CACHE_DIR:?需指定 CACHE_DIR=含 selected_pair_cache/ 的那层}
+  META="$CACHE_DIR/selected_pair_cache/train/selected_inst/meta.json"
+  [ -f "$META" ] || { echo "[FATAL] $META 不存在 —— CACHE_DIR 指错层？"; exit 4; }
+  # token = inst_emb(+1 if has_inst_logit) + esa + pos → in_dim 自动；kmax 用缓存自带值
+  AUTO=$(python -c "import json;m=json.load(open('$META'));print(m['kmax'], m['inst_emb_dim']+(1 if m.get('has_inst_logit') else 0)+2)")
+  KMAX=${AUTO%% *}; INDIM=${AUTO##* }
+  [ -n "${KMAX_TRUNC:-}" ] && KMAX=$KMAX_TRUNC      # 可选：截断到更小 K
+  RUNDIR=${RUNDIR:-$VEP/runs/mti_$(basename "$CACHE_DIR")}; mkdir -p "$RUNDIR"
+  echo "[$(date)] MODE=reuse cache=$CACHE_DIR meta(kmax=${AUTO%% *},in_dim=$INDIM) → train kmax=$KMAX rundir=$RUNDIR"
+  # 吞吐关键：vePFS 随机读慢 → 缓存搬 /dev/shm（内存盘，实测 1.4T）。USE_SHM=0 可关。
   if [ "${USE_SHM:-1}" = "1" ]; then
     SHM=/dev/shm/$(basename "$CACHE_DIR")
-    if [ ! -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ]; then
-      echo "[$(date)] 复制缓存到内存盘 $SHM（一次性，~1-2 分钟）..."
-      mkdir -p "$SHM" && cp -r "$CACHE_DIR/selected_pair_cache" "$SHM/"
-    fi
+    [ -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ] || { echo "[$(date)] 复制缓存到内存盘 $SHM ..."; mkdir -p "$SHM" && cp -r "$CACHE_DIR/selected_pair_cache" "$SHM/"; }
     CACHE_DIR="$SHM"
   fi
-  echo "[$(date)] MODE=reuse  cache=$CACHE_DIR  kmax=$KMAX"
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
     run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
-    scalable.cache_root="$CACHE_DIR" $CKPT_OVR \
+    scalable.cache_root="$CACHE_DIR" $INST_OVR model.in_dim=$INDIM \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
 
 elif [ "$MODE" = "build" ]; then
   # ---- 5b. 重建缓存再训练 ----
-  CROOT=${CACHE_ROOT:-$RUNDIR/cache}
-  mkdir -p "$CROOT"
-  echo "[$(date)] MODE=build  cache_root=$CROOT  kmax=$KMAX"
+  KMAX=${KMAX:-512}
+  RUNDIR=${RUNDIR:-$VEP/runs/mti_build_k${KMAX}}; mkdir -p "$RUNDIR"
+  CROOT=${CACHE_ROOT:-$RUNDIR/cache}; mkdir -p "$CROOT"
+  echo "[$(date)] MODE=build  cache_root=$CROOT  kmax=$KMAX  rundir=$RUNDIR"
   echo "[$(date)] step1: build selected_raw (build_selected_pair_cache / MTI_EM_Scalable_selected_raw)"
   python -m src.launch.build_selected_pair_cache experiment=MTI_EM_Scalable_selected_raw \
-    paths.cache_root="$CROOT" run.kmax=$KMAX $CKPT_OVR
+    paths.cache_root="$CROOT" run.kmax=$KMAX $BUILD_OVR
   echo "[$(date)] step2: build selected_inst (build_selected_inst_cache / MTI_build_selected_inst)"
   python -m src.launch.build_selected_inst_cache experiment=MTI_build_selected_inst \
-    paths.cache_root="$CROOT" run.kmax=$KMAX $CKPT_OVR
+    paths.cache_root="$CROOT" run.kmax=$KMAX $BUILD_OVR
   echo "[$(date)] step3: train (DDP)"
+  META="$CROOT/selected_pair_cache/train/selected_inst/meta.json"
+  INDIM=$(python -c "import json;m=json.load(open('$META'));print(m['inst_emb_dim']+(1 if m.get('has_inst_logit') else 0)+2)")
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
     run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
-    scalable.cache_root="$CROOT" $CKPT_OVR \
+    scalable.cache_root="$CROOT" $INST_OVR model.in_dim=$INDIM \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
 else
