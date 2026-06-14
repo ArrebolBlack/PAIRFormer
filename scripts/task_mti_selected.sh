@@ -39,10 +39,10 @@ esac
 
 # ---- 3. 满效率开关 ----
 export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-1} PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}
-# 专属计算任务：整节点独占，不为系统/主进程预留。ml.pni2 = 每 GPU 14 vCPU → 每张卡开满 14 worker，
-# OMP=1 让 14 worker 与 14 核 1:1，无线程过订阅。主进程训练时基本 GPU-bound、几乎不占核。
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
-NW=${NW:-14}   # 每个 DDP 进程（=每张卡）的 DataLoader worker 数 = 满 vCPU/GPU；想更激进可 NW=16
+# ⚠️ worker 不是越多越好：spawn 模式下每个 worker 都重新 import torch+Biopython(~1-1.5GB)，
+# 14×8=112 个一起 spawn 会在首 batch 启动时把内存峰值顶爆 → OOM(实测)。memmap 读很快，每卡 4 个足以喂满 GPU。
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+NW=${NW:-4}    # 每张卡 DataLoader worker 数；memmap 读 4 个够用，别再调大（会 spawn-OOM）
 
 # ---- 4. 参数 ----
 MODE=${MODE:-reuse}
