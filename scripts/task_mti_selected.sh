@@ -100,7 +100,7 @@ if [ "$MODE" = "reuse" ]; then
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
-    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
+    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=${AMP:-false} \
     scalable.cache_root="$CACHE_DIR" $INST_OVR model.in_dim=$INDIM \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
@@ -123,7 +123,7 @@ elif [ "$MODE" = "build" ]; then
   CKPT=$RUNDIR/checkpoints/last.pt
   RESUME=""; [ -f "$CKPT" ] && RESUME="run.resume=true run.checkpoint=$CKPT"
   $DDP -m src.launch.train_pair_selected_inst experiment=$EXP \
-    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=true \
+    run.kmax=$KMAX run.batch_size=$BATCH run.num_workers=$NW trainer_pair_selected.use_amp=${AMP:-false} \
     scalable.cache_root="$CROOT" $INST_OVR model.in_dim=$INDIM \
     run.eval_test_after_train=true run.eval_test_with_last=true \
     hydra.run.dir="$RUNDIR" $RESUME $EXTRA
