@@ -23,6 +23,9 @@ LOG=$VEP/task_logs/${MLP_TASK_ID:-manual}_mti_w${MLP_ROLE_INDEX:-0}.log
 exec > >(tee -a "$LOG") 2>&1
 echo "[$(date)] === MTI selected-inst task === log=$LOG"
 nvidia-smi -L || true; df -h /dev/shm || true
+# 内存预算诊断：容器 RAM 上限（cgroup）+ 当前可用，便于判断 /dev/shm 能塞多大
+echo "[mem] free -g:"; free -g || true
+echo "[mem] cgroup limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
 cd "$REPO"
 
 # ---- 1. conda（myenv，开发机实测）----
@@ -76,10 +79,14 @@ if [ "$MODE" = "reuse" ]; then
   [ -n "${KMAX_TRUNC:-}" ] && KMAX=$KMAX_TRUNC      # 可选：截断到更小 K
   RUNDIR=${RUNDIR:-$VEP/runs/mti_$(basename "$CACHE_DIR")}; mkdir -p "$RUNDIR"
   echo "[$(date)] MODE=reuse cache=$CACHE_DIR meta(kmax=${AUTO%% *},in_dim=$INDIM) → train kmax=$KMAX rundir=$RUNDIR"
-  # /dev/shm 是 RAM 盘：搬整份缓存（含很大的 selected_raw）会撑爆容器内存→被 OOM kill(-9)。
-  # 默认关（直接读 vePFS，14 worker 并行 + OS 页缓存，稳）；USE_SHM=1 时只搬 selected_inst（训练真正读的）。
-  if [ "${USE_SHM:-0}" = "1" ]; then
+  # 关键（印证用户记忆 + docs/DDP_Multi_GPU_Plan.md §12.3）：vePFS 大文件 mmap 会触发
+  # page-cache dirty_ratio / D-state、把内存吃爆 → 必须把训练真正读的 selected_inst（**不含 selected_raw**）
+  # 放 /dev/shm 本地内存盘。K=64 的 selected_inst 仅几十 GB，轻松放下。USE_SHM=0 才强制读 vePFS（不推荐）。
+  if [ "${USE_SHM:-1}" = "1" ]; then
     SHM=/dev/shm/$(basename "$CACHE_DIR")
+    NEED=$(du -sBG "$CACHE_DIR"/selected_pair_cache/*/selected_inst 2>/dev/null | awk '{s+=$1}END{print s+0}')
+    AVAIL=$(df -BG --output=avail /dev/shm 2>/dev/null | tail -1 | tr -dc '0-9')
+    echo "[$(date)] selected_inst 约需 ${NEED}G，/dev/shm 可用 ${AVAIL}G"
     if [ ! -f "$SHM/selected_pair_cache/train/selected_inst/meta.json" ]; then
       echo "[$(date)] 复制 selected_inst（不含 selected_raw）到内存盘 $SHM ..."
       for sp in train val test; do
