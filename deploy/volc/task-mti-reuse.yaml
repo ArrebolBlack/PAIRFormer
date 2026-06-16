@@ -14,7 +14,7 @@ Envs:
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_st05_retrain_r4_v3relbl}
   # 论文 Exp.G(Val F1 0.7353)真配方：xlarge SAB d1024/L4/H16/ff4096 + lr_agg=1e-4 + 恒定 lr + AMP 关。
   # in_dim/kmax 由脚本从 meta 自动读，不要在这里写。
-  - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none"}
+  - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none trainer_pair_selected.clip_grad_norm=1.0"}
 TaskRoleSpecs:
   - RoleName: worker
     RoleReplicas: 1

@@ -4,7 +4,7 @@
 # 每个缓存一个任务；kmax/in_dim 由 task_mti_selected.sh 从各缓存 meta 自动读取。
 set -euo pipefail
 VEP=/vepfs-mlp2/queue010/20252203765 ; EX=$VEP/PAIRFormer_exp8_final
-ARCH="run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none"
+ARCH="run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none trainer_pair_selected.clip_grad_norm=1.0"
 
 # topk K-sweep 缓存（base≈k64 + k32/128/256/512）。想加 st05 就把它的目录名也列进来。
 CACHES=(
