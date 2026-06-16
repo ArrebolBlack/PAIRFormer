@@ -41,9 +41,11 @@ case "$(python -c 'import src.launch.train_em as m; print(m.__file__)')" in
   *) echo "[FATAL] src 解析到了非本仓库路径（镜像 /app/src 劫持）！中止。"; exit 3 ;;
 esac
 
-# ---- 3. 硬件效率开关（满效率；改数值，仅真实训练用）----
-export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-1}     # FlashAttention/SDPA
-export PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}       # TF32 + cudnn.benchmark
+# ---- 3. 硬件效率开关 ----
+# 数值忠实基线默认：SDPA/FlashAttention 关（≠论文手写 softmax）；TF32 拆成 PF_TF32（默认关，见 src/utils）。
+# cudnn.benchmark 仍开（PF_DETERMINISTIC=0，fp32 不改数值、提速）。效率实验再显式开 PF_EFFICIENT_ATTN=1 / PF_TF32=1。
+export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-0}     # FlashAttention/SDPA（改数值→默认关）
+export PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}       # 0=cudnn.benchmark 开（fp32）；TF32 另由 PF_TF32 控制
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}           # 防意外联网（本项目不需 HF）

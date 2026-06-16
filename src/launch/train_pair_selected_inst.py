@@ -113,9 +113,11 @@ def main(cfg: DictConfig) -> None:
         shuffle=False,
     )
 
-    # Build DataLoaders with proper DDP support
-    train_sampler = get_ddp_sampler(train_ds, shuffle=True)
-    val_sampler = get_ddp_sampler(val_ds, shuffle=False)
+    # Build DataLoaders with proper DDP support.
+    # 传入 seed（=cfg.seed，默认 2020）保持与论文一致的 DistributedSampler 洗牌序列；
+    # 早先漏传 → ddp_sampler 把 None 兜成 0，等于把基种子从 2020 改成 0（数据顺序偏离论文）。
+    train_sampler = get_ddp_sampler(train_ds, shuffle=True, seed=seed)
+    val_sampler = get_ddp_sampler(val_ds, shuffle=False, seed=seed)
 
     use_persistent = persistent_workers and (num_workers > 0)
 

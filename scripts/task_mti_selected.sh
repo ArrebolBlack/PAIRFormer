@@ -41,7 +41,10 @@ case "$(python -c 'import src.launch.train_pair_selected_inst as m; print(m.__fi
 esac
 
 # ---- 3. 满效率开关 ----
-export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-1} PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}
+# 数值忠实基线默认：SDPA/FlashAttention 关（论文是手写 softmax 路径，SDPA reduction 不 bit-equal）；
+# TF32 也已在 src/utils 拆成 PF_TF32 默认关。cudnn.benchmark 仍开（PF_DETERMINISTIC=0，不改数值、提速）。
+# 要做效率实验再显式 PF_EFFICIENT_ATTN=1 / PF_TF32=1。
+export PF_EFFICIENT_ATTN=${PF_EFFICIENT_ATTN:-0} PF_DETERMINISTIC=${PF_DETERMINISTIC:-0}
 # ⚠️ worker 不是越多越好：spawn 模式下每个 worker 都重新 import torch+Biopython(~1-1.5GB)，
 # 14×8=112 个一起 spawn 会在首 batch 启动时把内存峰值顶爆 → OOM(实测)。memmap 读很快，每卡 4 个足以喂满 GPU。
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2} NCCL_DEBUG=${NCCL_DEBUG:-WARN} HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
