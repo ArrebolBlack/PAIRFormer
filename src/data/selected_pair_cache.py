@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import json
+import mmap as _mmap
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
 import torch
+
+
+def _advise_random(arr) -> None:
+    """Tell the kernel these mmap pages are accessed RANDOMLY (no readahead).
+
+    Pair access during training is shuffled, and over vePFS (a network FS) the default
+    sequential readahead pulls huge useless chunks into page cache on every scattered read
+    -> CPU pinned + host memory thrash + long stalls (and, under DDP, hang-detector kills).
+    MADV_RANDOM makes each read fault in only the pages it needs. No-op where unsupported
+    (e.g. Windows / non-mmap arrays); never raises.
+    """
+    if arr is None:
+        return
+    try:
+        mm = getattr(arr, "_mmap", None)
+        if mm is not None and hasattr(mm, "madvise") and hasattr(_mmap, "MADV_RANDOM"):
+            mm.madvise(_mmap.MADV_RANDOM)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -264,6 +284,12 @@ class SelectedPairCacheReader:
                 self.inst_logit = np.memmap(self.cache_dir / "inst_logit.f16.mmap", mode="r", dtype=np.float16, shape=(P, K))
         else:
             raise ValueError(f"Unknown selected pair cache_type: {self.meta.cache_type}")
+
+        # 随机访问提示：关闭顺序 readahead，避免 vePFS 网络盘上乱序读把页缓存反复撑爆
+        # （CPU 满载 + 内存涨落 + epoch 间长卡顿 + 多卡 hang 检测误杀的根因）。详见 _advise_random。
+        for _a in (self.label, self.sel_len, self.esa, self.pos, self.X,
+                   self.cheap_logit, self.cheap_emb, self.inst_emb, self.inst_logit):
+            _advise_random(_a)
 
     def __len__(self) -> int:
         return int(self.meta.num_pairs)
