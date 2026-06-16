@@ -26,11 +26,14 @@ def get_ddp_sampler(
     if not is_ddp():
         return None
 
+    # DistributedSampler.__iter__ does `self.seed + self.epoch`; passing seed=None
+    # (the previous default) makes that None+int -> TypeError on the first batch.
+    # Coerce to DistributedSampler's own default (0) when unset.
     return DistributedSampler(
         dataset,
         shuffle=shuffle,
         drop_last=drop_last,
-        seed=seed,
+        seed=(0 if seed is None else int(seed)),
     )
 
 
