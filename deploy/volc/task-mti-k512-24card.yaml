@@ -1,0 +1,42 @@
+# =============================================================================
+# MTI selected-inst —— K=512 大 kmax,3 节点 × 8 卡 = 24 卡 多机 DDP over RDMA
+# 提交:volc ml_task submit -c deploy/volc/task-mti-k512-24card.yaml
+# 与 task-mti-k512-{32,48}card.yaml 同款,只差 RoleReplicas=3(24 卡)+ 随之 全局batch/lr。
+# 用途:24/32/48 三档赛跑——24 卡只需 3 台 hpcpni2、最易先排上,谁先 Running 等谁、其余关掉。
+# 预期 ~50min/epoch(8卡)→ ~17min/epoch(24卡,3×)。
+# =============================================================================
+TaskName: pf-mti-k512-24card
+ImageUrl: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest
+Entrypoint: "bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected_16card.sh"
+Framework: PyTorchDDP
+ResourceQueueID: q-20260318205115-lvfng
+Priority: 6                         # 用户指定;若报 "user is not queue admin" 降回 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,      Value: reuse}
+  - {Name: BATCH,     Value: "48"}         # 每卡;24 卡全局 1152。kmax512 每卡 ~63GB
+  # _k512 缓存 744G;hpcpni2 每节点 1.4T /dev/shm 塞得下 → 默认 USE_SHM=1。3 节点各拷一次(一次性)。
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v3relbl_k512}
+  # d2048/L8 + kmax512 + 全局1152 + lr2.25e-4(=1e-4×1152/512)+ warmup100(≤每epoch步数~289)+ cosine + 裁剪;150 epoch
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=2.25e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=100"}
+  - {Name: NCCL_IB_TIMEOUT,   Value: "23"}
+  - {Name: NCCL_IB_RETRY_CNT, Value: "7"}
+  # 首跑验 RDMA:临时加 {Name: NCCL_DEBUG, Value: "INFO"},日志找 "NET/IB...RoCE / Using network IB"
+TaskRoleSpecs:
+  - RoleName: worker
+    RoleReplicas: 3                 # 3 台机器 × 8 卡 = 24 卡。MLP_WORKER_NUM 注入为 3
+    Flavor: ml.hpcpni2.28xlarge     # hpc/RDMA 机型(8×A100-80G + 4×200Gbps RoCE)
+Storages:
+  - Type: Vepfs
+    VepfsId: vepfs-cnbj2c98dea54433
+    MountPath: /vepfs-mlp2/queue010/20252203765
+    SubPath: queue010/20252203765
+    ReadOnly: false
+Preemptible: true                  # 24 卡需队列里恰好 3 台空闲 hpcpni2
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, MachineFailure, VecclHangDetectionFailed]   # 只对抢占/硬件/NCCL挂重试;代码bug直接失败不重试
