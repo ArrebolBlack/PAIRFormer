@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import copy
+import functools
 import json
 import numpy as np
 from torch.utils.data import DataLoader
@@ -33,8 +34,9 @@ def build_selected_loader(
         max_pairs=max_pairs,
     )
 
-    def _collate(batch):
-        return selected_pair_collate(batch, truncate_k=truncate_k)
+    # 必须用模块级 partial，不能用局部闭包：spawn 启动的 DataLoader worker 要 pickle collate_fn，
+    # 局部闭包 build_selected_loader.<locals>._collate 不可 pickle → 训后 test 评估会 spawn 失败崩溃。
+    collate = functools.partial(selected_pair_collate, truncate_k=truncate_k)
 
     loader = DataLoader(
         ds,
@@ -43,7 +45,7 @@ def build_selected_loader(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
-        collate_fn=_collate,
+        collate_fn=collate,
         drop_last=False,
     )
     return ds, loader
