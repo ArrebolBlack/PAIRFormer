@@ -80,7 +80,10 @@ if [ "$MODE" = "reuse" ]; then
   AUTO=$(python -c "import json;m=json.load(open('$META'));print(m['kmax'], m['inst_emb_dim']+(1 if m.get('has_inst_logit') else 0)+2)")
   KMAX=${AUTO%% *}; INDIM=${AUTO##* }
   [ -n "${KMAX_TRUNC:-}" ] && KMAX=$KMAX_TRUNC      # 可选：截断到更小 K
-  RUNDIR=${RUNDIR:-$VEP/runs/mti_$(basename "$CACHE_DIR")}; mkdir -p "$RUNDIR"
+  # rundir 必须按"实验"区分,不能只按 cache:否则同一 cache 上不同模型/lr/seed 的 job 会写同一目录、
+  # 互相覆盖 ckpt 并从不兼容的 last.pt 续训。附 EXTRA 的哈希 → 不同配置 → 不同 rundir(无碰撞)。
+  # 显式传 RUNDIR(如矩阵给可读名 pf-scl-d768...)则优先用之。
+  RUNDIR=${RUNDIR:-$VEP/runs/mti_$(basename "$CACHE_DIR")_$(printf '%s' "${EXTRA:-}" | md5sum | cut -c1-8)}; mkdir -p "$RUNDIR"
   echo "[$(date)] MODE=reuse cache=$CACHE_DIR meta(kmax=${AUTO%% *},in_dim=$INDIM) → train kmax=$KMAX rundir=$RUNDIR"
   # 关键（印证用户记忆 + docs/DDP_Multi_GPU_Plan.md §12.3）：vePFS 大文件 mmap 会触发
   # page-cache dirty_ratio / D-state、把内存吃爆 → 必须把训练真正读的 selected_inst（**不含 selected_raw**）

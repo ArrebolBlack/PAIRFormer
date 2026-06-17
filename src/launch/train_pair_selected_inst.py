@@ -274,6 +274,9 @@ def main(cfg: DictConfig) -> None:
         if improved:
             trainer.save_checkpoint(str(ckpt_dir / "best.pt"))
 
+    # ---- Harvest collector: 每个 run 往自己 rundir 写一份机读 results.json,便于后续统一汇总 ----
+    harvest_test: dict = {}   # 由下面 run_test_eval 填充(若 eval 开启)
+
     # ---- Post-training evaluation (rank0 only) ----
     # DDP 下各 rank 模型已同步 → rank0 的 test 指标即正确的全量指标。只让 rank0 评估，避免 8 个 rank
     # 同时 mmap 打开 test 缓存(vePFS 争用 / 内存峰值；且 test 的 selected_inst 若缺失会让每个 rank
@@ -349,6 +352,10 @@ def main(cfg: DictConfig) -> None:
                             prefix=f"test/{sp}/{tag_prefix}/{name}",
                             metrics=metrics_by_strategy[name],
                         )
+                        harvest_test[f"{tag_prefix}/{sp}/{name}"] = {
+                            k: float(v) for k, v in metrics_by_strategy[name].items()
+                            if isinstance(v, (int, float))
+                        }
 
         # 训练已完成、ckpt 已存盘：test 评估再失败(如 test 缓存缺失/任意异常)也绝不该浪费整个 run。
         try:
@@ -362,6 +369,45 @@ def main(cfg: DictConfig) -> None:
             import traceback
             print(f"[train_pair_selected_inst][WARN] 训后 test 评估失败(训练与 ckpt 已安全保存，不影响已得结果): {_e}")
             traceback.print_exc()
+
+    # ---- 写 rundir/results.json(rank0):config + best_val + test 指标,供 harvest_results.py 汇总 ----
+    if is_rank0():
+        try:
+            import json as _json
+            def _g(node, key, default, cast):
+                try:
+                    return cast(node.get(key, default))
+                except Exception:
+                    return default
+            _tps = cfg.get("trainer_pair_selected", {})
+            _res = {
+                "experiment_name": str(cfg.get("experiment_name", "")),
+                "rundir": str(run_dir),
+                "epochs_completed": int(getattr(trainer, "epoch", 0)) + 1,
+                "monitor": str(_g(_tps, "monitor", "f1", str)),
+                "best_val_metric": float(getattr(trainer, "best_metric", float("nan"))),
+                "config": {
+                    "d_model": _g(cfg.model, "d_model", 0, int),
+                    "n_layers": _g(cfg.model, "n_layers", 0, int),
+                    "dim_ff": _g(cfg.model, "dim_ff", 0, int),
+                    "n_heads": _g(cfg.model, "n_heads", 0, int),
+                    "block_type": _g(cfg.model, "block_type", "", str),
+                    "in_dim": _g(cfg.model, "in_dim", 0, int),
+                    "kmax": _g(cfg.run, "kmax", 0, int),
+                    "batch_size": _g(cfg.run, "batch_size", 0, int),
+                    "num_epochs": _g(cfg.run, "num_epochs", 0, int),
+                    "lr_agg": _g(_tps, "lr_agg", 0.0, float),
+                    "use_amp": _g(_tps, "use_amp", False, bool),
+                    "seed": _g(cfg, "seed", 0, int),
+                    "cache_root": str(cache_root),
+                },
+                "test": harvest_test,
+            }
+            with open(run_dir / "results.json", "w") as _fh:
+                _json.dump(_res, _fh, indent=2, default=float, ensure_ascii=False)
+            print_on_rank0(f"[train_pair_selected_inst] results.json -> {run_dir / 'results.json'} (best_val={_res['best_val_metric']:.4f})")
+        except Exception as _e2:
+            print(f"[train_pair_selected_inst][WARN] results.json 写出失败(不影响训练): {_e2}")
 
     # ---- Cleanup ----
     if wandb_run is not None:

@@ -73,6 +73,8 @@ ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
   - {Name: BATCH,     Value: "64"}
+  # 每个 job 独立 rundir(可读名),避免同 cache 不同模型/seed 写同目录互相覆盖;结果落 runs/pf-$name/results.json
+  - {Name: RUNDIR,    Value: $VEP/runs/pf-$name}
   # 单卡机型 /dev/shm 仅 172G,大 K(k128/256/512)selected_inst 有 531G+ 塞不下 → 直接读 vePFS(lazy-mmap 按页读、内存安全)
   - {Name: USE_SHM,   Value: "0"}
   - {Name: CACHE_DIR, Value: $c}
