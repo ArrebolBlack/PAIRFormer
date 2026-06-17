@@ -33,20 +33,27 @@ Priority: 4
 ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
-  # 实测(fp32):d4096/L8 是真·20 亿参数,激活跨 8 层累积 ~106MB/样本 → batch640 和 448 都 OOM
-  # (448 撑到 PMA 才崩、~79GB)。fp32 这个巨模型只能塞 batch~256,太小。
-  # → 用 AMP(fp16)把激活减半(且走 tensor core 更快),巨模型才能上像样的 batch。
-  # AMP 下 d4096/L8 @ batch640 ≈ ~70GB,稳填;想更满探到 768(同步把 lr 提到 ~1.2e-3)。
-  - {Name: BATCH,     Value: "640"}        # 每卡;8 卡全局 5120。改这里要同步改 EXTRA 的 lr_agg
-  - {Name: NW,        Value: "6"}          # 大模型计算重、数据不是瓶颈;6 worker 足够喂满
-  - {Name: PYTORCH_CUDA_ALLOC_CONF, Value: "expandable_segments:True"}   # 抗碎片,挤出额外 1~2GB
+  # 三轮探针结论:d4096/L8 = 2B 模型,光参数态(fp32+AdamW)~35GB(占半张卡),AMP batch640 也 OOM(PMA ~80GB)
+  #   → 2B 模型在 80G 上 batch 只能 ~384,是"大模型"但不是"大batch"。
+  # 「大模型 + 大batch + 填满」三者兼得的甜点:d2048/L8(4.9 亿,7× 基线),状态仅 ~8GB,batch 能上 ~1024。
+  # 本文件默认走 d2048/L8(fp32 干净);想要 2B 巨模型见文末 §giant(d4096+AMP+batch≤384)。
+  - {Name: BATCH,     Value: "768"}        # 每卡;8 卡全局 6144。先探针,有余量往上加(1024/1152→~70GB),同步改 lr
+  - {Name: NW,        Value: "6"}
+  - {Name: PYTORCH_CUDA_ALLOC_CONF, Value: "expandable_segments:True"}   # 抗碎片
   # scaling 用 base/topk cache(与 d1024 基线同一份 → 结果可比);也可换 st05_v3relbl
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v2relbl}
   # d4096/L8 巨模型 + 全局 5120 + lr 1e-3 + warmup50(≤每epoch步数~65)+ cosine 衰减 + 裁剪;150 epoch(更多)
-  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=4096 model.dim_ff=16384 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.use_amp=true trainer_pair_selected.lr_agg=1e-3 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
-  # ⚠️ AMP 是 fp16(无 bf16 路径)+ 巨模型 + 高 lr → 有 NaN 风险。已配 clip=1.0 + warmup50 兜底;
-  #    GradScaler 会自动跳过 inf 步(但无显式日志),盯 train_loss 别长时间不降/突然 nan。
-  # 不想用 fp16 的纯净 fp32 替代:把 use_amp 去掉、d_model=2048/dim_ff=8192(~5 亿参数)、BATCH=512 左右。
+  # d2048/L8/ff8192/H32(4.9 亿)+ 全局6144 + lr1.2e-3 + warmup + cosine + 裁剪;150 epoch;fp32(无 NaN 风险)
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1.2e-3 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
+  # 想更深/更宽的 fp32 scaling 点:d2048/L12(~7 亿,batch 降到 ~512)或 d3072/L8。
+  #
+  # ───────────────────────────── §giant:2B 巨模型(d4096/L8)──────────────────────────────
+  # 只有它必须 AMP(fp16)且 batch≤384(状态 35GB)。把上面 BATCH 改 384、EXTRA 换成:
+  #   "run.num_epochs=150 model.d_model=4096 model.dim_ff=16384 model.n_layers=8 model.n_heads=32 \
+  #    model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 \
+  #    trainer_pair_selected.use_amp=true trainer_pair_selected.lr_agg=6e-4 \
+  #    trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"
+  #   (lr=6e-4=1e-4×(8×384)/512;fp16 无 bf16 有 NaN 风险,clip+warmup 兜底,盯 loss)。先单卡探针 batch384 确认不 OOM。
 TaskRoleSpecs:
   - RoleName: worker
     RoleReplicas: 1

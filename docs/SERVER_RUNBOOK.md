@@ -272,3 +272,39 @@ EM 路径（train_em）多卡早已可用。
 - override 键：`run.{kmax,batch_size,num_workers,pin_memory,persistent_workers,num_epochs,resume,checkpoint,force_overwrite_bootstrap,train_instance_mode,val_instance_mode,test_instance_mode}`、
   `trainer_em.{use_amp,num_epochs,monitor,greater_is_better}`、`em.{cheap_cache.amp,instance_cache.use_amp,bootstrap.enabled,selection_cache.candidate_pool_size}`、`em_cache_root`、`paths.cache_root`、`model.{d_model,n_layers,n_heads,dim_ff,block_type}`
 - ckpt（EM bootstrap 依赖）：`checkpoints/CheapCTSNet/checkpoints/last.pt`、`checkpoints/miRAW_TargetNet_Optimized_dp-0.1/checkpoints/last.pt`、`checkpoints/BR-MIL/checkpoints/best.pt`
+
+---
+
+## 8. MTI selected-inst 实战要点 + Scaling/集群（2026-06 实测，务必先读）
+
+### 8.1 论文复现的地面真相（别再踩）
+- **0.7353 = 论文 EXP_G**：单卡 + cache `cache_mti_full_topk_retrain_r4_v2relbl`（**topk + v2relbl**，不是 st05_v3relbl！），d1024/L4/ff4096/H16/sab，lr 1e-4，**恒定 lr**（`scheduler_agg=none`，等价论文 cosine_warmup 被静默忽略），batch 512，**AMP 关、无裁剪**。单卡已复现稳到 val_f1 0.72→0.73。
+- **真身代码** = 服务器 `/vepfs-mlp2/mlp-public/haoce/yjq/PAIRFormer`（≠ git `main`，main 早已偏离）。
+- **三处反向优化已修**（默认关，commit b510130）：`PF_EFFICIENT_ATTN`(SDPA/FlashAttn，改数值)→默认 0；`PF_DETERMINISTIC=0` 顺带的 TF32 → 拆成独立 `PF_TF32`（默认关），`cudnn.benchmark` 仍开（fp32 提速不改数值）；DistributedSampler seed 2020 恢复传入。
+- **训后 test 评估崩溃已修**：`build_selected_loader` 的局部闭包 collate 在 spawn 下不可 pickle → 改 `functools.partial`；评估改 rank0-only + try/except（缺 test 缓存只告警不丢已训 ckpt）。`topk_v2relbl` **无 test/selected_inst 缓存** → test 评估会优雅跳过（val 才是论文报的指标）。
+
+### 8.2 机型 flavor（实测，全 A100-80G）
+| 卡数 | flavor | vCPU/内存 |
+|---|---|---|
+| 1 | `ml.pni2.3xlarge` | 14 / 245G |
+| 2 | `ml.pni2.7xlarge` | 28 / 490G |
+| 4 | `ml.pni2.14xlarge` | 56 / 980G |
+| 8 | `ml.pni2.28xlarge` | 112 / 1960G（NVLink） |
+| 8+RDMA(多机) | `ml.hpcpni2.28xlarge` | 同上 + 4×200Gbps RoCE |
+
+### 8.3 大模型显存 / batch / LR（三轮 OOM 实测）
+- **激活受限**（kmax=64 小）。参数态 = 16 B/参数（fp32+AdamW）。实测每样本激活：d4096/L8 **~108MB(fp32) / ~70MB(AMP)**；激活跨所有层累积,峰值在 PMA。
+- **OOM 实测**：d4096/L8(2B,状态~35GB)→ fp32 batch448/640 OOM；**AMP batch640 也 OOM**；2B 模型在 80G 上 batch 只能 ~384。
+- **要"大模型+大batch+填满"三者兼得 → d2048/L8**（4.9 亿,状态~8GB,fp32 batch 能上 ~1024,填 ~70GB,无 fp16 NaN 风险）。
+- **LR 不自动随 batch 放大**！手动 `lr_agg = 1e-4 × (8×每卡batch) / 512`。如全局 6144→1.2e-3。
+- **warmup_steps**：基础 YAML 没有此键 → 必须 `+trainer_pair_selected.warmup_steps=N` 加；且**按 epoch 计、有一次性 latch**，保持 `N ≤ 每epoch步数`（否则只在 epoch0 ramp/会重触发）。
+- `scheduler_t_max` 默认 = `${run.num_epochs}` 自动跟随；`in_dim/kmax/batch_size` 由入口脚本注入,**EXTRA 里别写**（重复→Hydra 报错）。AMP 仅 fp16（无 bf16 路径）。
+- **探针**（单卡定 batch，估值 ±25% 会 OOM）：`run.num_epochs=1 +scalable.max_train_pairs=20000`、`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，逐步加 batch 看 `nvidia-smi` 峰值落 70~78GB。
+
+### 8.4 部署文件（deploy/volc/）
+- `task-mti-reuse.yaml`：8 卡论文复现（topk_v2relbl，val 0.7353）。
+- `task-mti-scaling.yaml`：8 卡填显存 scaling（默认 d2048/L8 fp32 batch768；文末 §giant 给 d4096+AMP 2B 档）。
+- `task-mti-scaling-k512.yaml`：大 kmax（512）序列长度轴，用 `_k512` 缓存，显存最猛、batch 最小。
+- `submit_mti_matrix.sh`：把 ~50 卡拆成一堆**单卡 job**（小模型单卡满效率 + 巨模型 8 卡 + K-sweep 并行，聚合效率 ~85% vs 全 8 卡 DDP 的 ~19%）。
+- `task-mti-16card.yaml` + `scripts/task_mti_selected_16card.sh`：2 节点×8=16 卡多机 DDP over RDMA（hpcpni2，入口自愈 libibverbs + NCCL_IB_*）。
+- **小模型别用多卡 DDP**：本模型小,单 run 8 卡 DDP 只 ~1.5×(per-card batch 太小,固定开销占满);吃满集群靠"多个独立单卡 job"。
