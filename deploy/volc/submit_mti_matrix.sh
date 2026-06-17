@@ -18,7 +18,8 @@ F1="ml.pni2.3xlarge"       # 1 卡 A100-80G(14 vCPU/245G)→ MLP_WORKER_GPU=1
 F2="ml.pni2.7xlarge"       # 2 卡 A100-80G(28 vCPU/490G)→ MLP_WORKER_GPU=2
 F8="ml.pni2.28xlarge"      # 8 卡 A100-80G(112 vCPU/1960G)→ MLP_WORKER_GPU=8
 # (4 卡 = ml.pni2.14xlarge,如需可加 F4)
-BASE=cache_mti_full_topk_retrain_r4_v2relbl   # K=64 base(论文 cache;可比 0.7353)
+BASE=cache_mti_full_topk_retrain_r4_v2relbl   # scaling 用:论文 cache(可比 0.7353),K=64
+KBASE=cache_mti_full_topk_retrain_r4_v3relbl  # K-sweep 用:v3relbl 同族,_k32/_k128/_k256/_k512 + base(=k64)
 
 # 论文 d1024/L4 配方(供 K-sweep & d1024 scaling 点复用)
 A_PAPER="run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none"
@@ -37,16 +38,16 @@ JOBS=(
   "scl-d1536L6-s2021|$F2|$BASE|1|run.num_epochs=120 model.d_model=1536 model.dim_ff=6144  model.n_layers=6 model.n_heads=24 model.block_type=sab model.num_seeds=1 seed=2021 trainer_pair_selected.lr_agg=2e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0"
   # 巨模型那档建议直接用 deploy/volc/task-mti-scaling.yaml(BATCH=640、lr=1e-3 已配好),不在此矩阵里塞
 
-  # ── (b) K-sweep:每个 K cache 一个单卡 job(论文 arch,KMAX/in_dim 自动从 meta 读)──
-  "ksw-k64 |$F1|$BASE|1|$A_PAPER seed=2020"
-  "ksw-k32 |$F1|${BASE/_v2relbl/_v3relbl}_k32 |1|$A_PAPER seed=2020"
-  "ksw-k128|$F1|${BASE/_v2relbl/_v3relbl}_k128|1|$A_PAPER seed=2020"
-  "ksw-k256|$F1|${BASE/_v2relbl/_v3relbl}_k256|1|$A_PAPER seed=2020"
-  "ksw-k512|$F1|${BASE/_v2relbl/_v3relbl}_k512|1|$A_PAPER seed=2020"
+  # ── (b) K-sweep:每个 K cache 一个单卡 job(全 v3relbl 同一重标注、只变 K;KMAX/in_dim 自动从 meta 读)──
+  "ksw-k64 |$F1|$KBASE     |1|$A_PAPER seed=2020"
+  "ksw-k32 |$F1|${KBASE}_k32 |1|$A_PAPER seed=2020"
+  "ksw-k128|$F1|${KBASE}_k128|1|$A_PAPER seed=2020"
+  "ksw-k256|$F1|${KBASE}_k256|1|$A_PAPER seed=2020"
+  "ksw-k512|$F1|${KBASE}_k512|1|$A_PAPER seed=2020"
 
   # ── (c) 填卡余量:加种子(单卡)。按需增删,跑前看脚本末尾累计卡数 ──
-  "ksw-k64-s2021 |$F1|$BASE|1|$A_PAPER seed=2021"
-  "ksw-k64-s2022 |$F1|$BASE|1|$A_PAPER seed=2022"
+  "ksw-k64-s2021 |$F1|$KBASE|1|$A_PAPER seed=2021"
+  "ksw-k64-s2022 |$F1|$KBASE|1|$A_PAPER seed=2022"
 )
 
 mkdir -p /tmp/mti_matrix
