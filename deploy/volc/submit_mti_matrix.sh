@@ -73,6 +73,8 @@ ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
   - {Name: BATCH,     Value: "64"}
+  # 单卡机型 /dev/shm 仅 172G,大 K(k128/256/512)selected_inst 有 531G+ 塞不下 → 直接读 vePFS(lazy-mmap 按页读、内存安全)
+  - {Name: USE_SHM,   Value: "0"}
   - {Name: CACHE_DIR, Value: $c}
   - {Name: EXTRA,     Value: "$extra"}
 TaskRoleSpecs:
