@@ -40,8 +40,9 @@ Envs:
 TaskRoleSpecs:
   - RoleName: worker
     RoleReplicas: 2                 # [CHG] 1 → 2:2 台机器,每台 8 卡 = 16 卡。MLP_WORKER_NUM 注入为 2
-    Flavor: ml.hpcpni2.28xlarge     # [CHG] 多机必须 hpc/RDMA 机型(pni2 仅 NVLink、跨机无 RDMA → ~2.3GB/s 会拖死)
-                                    # 名以官方机型页 /docs/6459/96563 为准;UI 下拉若无此名,选带 hpc 字样的 8 卡 A100 规格
+    Flavor: ml.pni2.28xlarge        # [CHG] 你的机型表里没有 hpcpni2,用确认存在的 pni2.28xlarge×2 节点。
+                                    # 该规格跨节点网络栏标 32 Gbit/s(应为 RoCE);首跑 NCCL_DEBUG=INFO 看 NET/IB 是否生效,
+                                    # 退化成 NET/Socket(TCP)也能跑、只是慢。本模型参数小(~74M),跨机 all-reduce 压力不大。
 Storages:
   - Type: Vepfs
     VepfsId: vepfs-cnbj2c98dea54433

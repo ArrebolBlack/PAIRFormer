@@ -13,10 +13,11 @@ set -euo pipefail
 VEP=/vepfs-mlp2/queue010/20252203765 ; EX=$VEP/PAIRFormer_exp8_final
 DRY=${DRY:-0}
 
-# ---- TODO:在 UI 下拉确认真实 flavor ID ----
-F1="ml.TODO-1gpu-a100"     # 单卡 A100 → MLP_WORKER_GPU=1
-F2="ml.TODO-2gpu-a100"     # 2 卡 A100 → MLP_WORKER_GPU=2
-F8="ml.pni2.28xlarge"      # 8 卡 A100(已知可用)→ MLP_WORKER_GPU=8
+# ---- flavor ID(实测,A100-80G)----
+F1="ml.pni2.3xlarge"       # 1 卡 A100-80G(14 vCPU/245G)→ MLP_WORKER_GPU=1
+F2="ml.pni2.7xlarge"       # 2 卡 A100-80G(28 vCPU/490G)→ MLP_WORKER_GPU=2
+F8="ml.pni2.28xlarge"      # 8 卡 A100-80G(112 vCPU/1960G)→ MLP_WORKER_GPU=8
+# (4 卡 = ml.pni2.14xlarge,如需可加 F4)
 BASE=cache_mti_full_topk_retrain_r4_v2relbl   # K=64 base(论文 cache;可比 0.7353)
 
 # 论文 d1024/L4 配方(供 K-sweep & d1024 scaling 点复用)
@@ -53,7 +54,7 @@ total=0
 for row in "${JOBS[@]}"; do
   IFS='|' read -r name flavor cache nodes extra <<<"$row"
   name="$(echo "$name" | tr -d ' ')"; flavor="$(echo "$flavor" | tr -d ' ')"; cache="$(echo "$cache" | tr -d ' ')"; nodes="$(echo "$nodes" | tr -d ' ')"
-  case "$flavor" in *1gpu*) g=1;; *2gpu*) g=2;; ml.pni2.28xlarge|*28xlarge*) g=8;; *) g=8;; esac
+  case "$flavor" in *.3xlarge) g=1;; *.7xlarge) g=2;; *.14xlarge) g=4;; *.28xlarge) g=8;; *) g=8;; esac
   total=$(( total + g*nodes ))
   c="$EX/$cache"
   if [ ! -f "$c/selected_pair_cache/train/selected_inst/meta.json" ]; then

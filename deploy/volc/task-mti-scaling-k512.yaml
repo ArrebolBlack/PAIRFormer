@@ -35,6 +35,7 @@ Envs:
   - {Name: MODE,      Value: reuse}
   - {Name: BATCH,     Value: "96"}         # 每卡;全局 768。kmax512 极吃显存,先探针!改这里同步改 lr
   - {Name: NW,        Value: "6"}
+  - {Name: PYTORCH_CUDA_ALLOC_CONF, Value: "expandable_segments:True"}   # kmax512 碎片重,务必开
   # kmax=512 的缓存(K-sweep 的 _k512;kmax 由 meta 自动读 = 512)
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v3relbl_k512}
   # 大模型 d2048/L8/ff8192/H32 + kmax512 + 全局768 + lr1.5e-4 + warmup + cosine + 裁剪;150 epoch

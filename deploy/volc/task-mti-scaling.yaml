@@ -33,12 +33,15 @@ Priority: 4
 ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
-  - {Name: BATCH,     Value: "640"}        # 每卡;8 卡全局 5120。改这里要同步改 EXTRA 的 lr_agg
+  # 实测:d4096/L8 @ batch640 → OOM(forward 就要 ~81GB)。每样本 ~78MB、参数态 ~31GB →
+  # batch 448 ≈ 31 + 448×0.078 ≈ 66GB(forward),含 backward 峰值约 ~72GB,稳填。想更满可探到 480/512。
+  - {Name: BATCH,     Value: "448"}        # 每卡;8 卡全局 3584。改这里要同步改 EXTRA 的 lr_agg
   - {Name: NW,        Value: "6"}          # 大模型计算重、数据不是瓶颈;6 worker 足够喂满
+  - {Name: PYTORCH_CUDA_ALLOC_CONF, Value: "expandable_segments:True"}   # 抗碎片,挤出额外 1~2GB
   # scaling 用 base/topk cache(与 d1024 基线同一份 → 结果可比);也可换 st05_v3relbl
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v2relbl}
   # d4096/L8 巨模型 + 全局 5120 + lr 1e-3 + warmup50(≤每epoch步数~65)+ cosine 衰减 + 裁剪;150 epoch(更多)
-  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=4096 model.dim_ff=16384 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-3 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=4096 model.dim_ff=16384 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=7e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
   # 想再快(A100 tensor core ~2×)可加 use_amp;但 fp16+巨模型+高 lr 有 NaN 风险(无 bf16 路径),先确认 fp32 收敛再开:
   #   把上面 EXTRA 末尾加 " trainer_pair_selected.use_amp=true"(开了显存降~40%,可再上调 BATCH 填回 75GB)
 TaskRoleSpecs:
