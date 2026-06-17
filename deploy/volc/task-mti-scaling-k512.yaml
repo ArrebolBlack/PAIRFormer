@@ -1,0 +1,67 @@
+# =============================================================================
+# MTI selected-inst —— 8 卡 SCALING:大 kmax(512)× 大模型(序列长度这条轴)
+# 提交:volc ml_task submit -c deploy/volc/task-mti-scaling-k512.yaml
+#
+# ── 为什么单独一个文件 ───────────────────────────────────────────────────────
+#  kmax 从 64→512,SAB 注意力图 [H,L,L] 从 [H,64,64]→[H,512,512],单样本激活 ~19×
+#  (此时 L² 注意力项压过 FF 项)。所以「填满 80G」要靠 大模型 + 大 kmax + 很小 batch,
+#  和 task-mti-scaling.yaml(kmax64、d4096、batch640)是两条不同的 scaling 轴,合在一起最猛。
+#
+# ── 必须用「按该 kmax 建好的」缓存 ──────────────────────────────────────────
+#  selected_inst 缓存的 kmax 是建缓存时定死的,运行期 kmax 由脚本从 meta 自动读、不能超。
+#  · kmax=512 → 用 K-sweep 的 _k512 缓存(下方 CACHE_DIR)。
+#  · kmax=1024 → 需要一份 kmax=1024 的缓存;没有就得先建(见文末)。
+#  先确认存在:
+#    ls $EX/cache_mti_full_topk_retrain_r4_v3relbl_k512/selected_pair_cache/train/selected_inst/meta.json
+#
+# ── 显存:务必先单卡探针!kmax512 是所有配置里最吃显存、估值最不准的 ──────────────
+#  粗估 d2048/L8 @ kmax512:参数态 ~7.8GB + 单样本激活 ~650MB → 填 ~70GB 约 batch 96/卡(全局 768)。
+#  这是非常粗的估计,极可能 OOM。单卡探针(num_epochs=1 + max_train_pairs=20000,逐步加 batch)定值后再提。
+#  OOM → BATCH 砍半;有余量 → 往上加,并同步改 lr。开 use_amp=true 可把 batch 翻倍(注意 fp16 NaN)。
+#
+# ── LR 随全局 batch 线性放大(代码不自动)──────────────────────────────────────
+#  lr_agg = 1e-4 × (8×BATCH)/512。BATCH=96 → 全局768 → lr≈1.5e-4。改 BATCH 必同步改 lr。
+#
+# 注:in_dim/kmax/batch_size 由 task_mti_selected.sh 注入,EXTRA 勿写;warmup_steps 要 + 前缀。
+# =============================================================================
+TaskName: pf-mti-scaling-d2048L8-k512
+ImageUrl: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest
+Entrypoint: "bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected.sh"
+Framework: PyTorchDDP
+ResourceQueueID: q-20260318205115-lvfng
+Priority: 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,      Value: reuse}
+  - {Name: BATCH,     Value: "96"}         # 每卡;全局 768。kmax512 极吃显存,先探针!改这里同步改 lr
+  - {Name: NW,        Value: "6"}
+  # kmax=512 的缓存(K-sweep 的 _k512;kmax 由 meta 自动读 = 512)
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v3relbl_k512}
+  # 大模型 d2048/L8/ff8192/H32 + kmax512 + 全局768 + lr1.5e-4 + warmup + cosine + 裁剪;150 epoch
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1.5e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
+  # 想用 ISAB 把 kmax512 的 O(L²) 降成 O(L·m)(诱导点 m)以省显存/提速,可在 EXTRA 加:
+  #   model.block_type=isab model.num_inducing_points=64   (注意这改了架构,不再是论文 SAB)
+TaskRoleSpecs:
+  - RoleName: worker
+    RoleReplicas: 1
+    Flavor: ml.pni2.28xlarge
+Storages:
+  - Type: Vepfs
+    VepfsId: vepfs-cnbj2c98dea54433
+    MountPath: /vepfs-mlp2/queue010/20252203765
+    SubPath: queue010/20252203765
+    ReadOnly: false
+Preemptible: true
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
+# =============================================================================
+# kmax=1024:若没有 k1024 缓存,先建(MODE=build 会从 selected_raw → selected_inst 重建):
+#   提交一个 MODE=build 任务,Envs 设 KMAX=1024、CACHE_ROOT=$VEP/.../cache_mti_full_topk_r4_k1024,
+#   建完再把本文件 CACHE_DIR 指过去、BATCH 进一步下调(kmax1024 ≈ kmax512 的 ~4× 显存)。
+# ISAB(block_type=isab)在大 kmax 下是把注意力从 O(L²) 降到 O(L·m) 的正路,值得作为对照档。
+# =============================================================================

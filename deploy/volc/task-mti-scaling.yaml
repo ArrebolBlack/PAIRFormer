@@ -1,0 +1,61 @@
+# =============================================================================
+# MTI selected-inst —— 8 卡「填满显存」大模型大 batch SCALING 实验
+# 提交:volc ml_task submit -c deploy/volc/task-mti-scaling.yaml
+# 目的:把 8×A100-80G 显存吃到 ~75GB/卡,最大化单 run 8 卡利用率(非论文复现,自由调)。
+#
+# ── 选型(来自显存模型分析)────────────────────────────────────────────────
+#  本任务是「激活受限」(kmax=64 很小),填显存最稳的办法是「大模型 + 中等 batch」,
+#  而不是「小模型 + 超大 batch」(后者全局 batch 上万、AdamW 无 LAMB,易掉点)。
+#  Config C(本文件):d4096 / L8 / ff16384 / H32 ≈ 20 亿参数,batch 640/卡 → 估 ~75GB。
+#    · 参数态(fp32+AdamW)≈ 31GB,激活 ≈ 640×68MB ≈ 44GB,合计 ~75GB(±25%,务必先探针)。
+#  备选(改 EXTRA 的 d_model/n_layers + 下方 BATCH/lr 即可):
+#    A 宽:d2048/L8/ff8192/H16, BATCH=1792, 全局14336, lr=2.8e-3(偏 batch 重,慎用)
+#    B 深:d2048/L12/ff8192/H16, BATCH=1280, 全局10240, lr=2e-3
+#
+# ── LR 必须手动随全局 batch 线性放大(代码不自动)────────────────────────────
+#    lr_agg = 1e-4 × (8×BATCH) / 512 。本文件 BATCH=640 → 全局5120 → lr=1e-3。
+#    若你改 BATCH,务必同步改 EXTRA 里的 lr_agg,否则 LR 偏小、静默不报错。
+#
+# ── 显存务必先探针(单卡)再正式提!估值 ±25%,可能 OOM ──────────────────────
+#    见 docs / 我给的探针命令:单卡跑 num_epochs=1 + scalable.max_train_pairs=20000,
+#    逐步加 run.batch_size,watch nvidia-smi 找峰值落在 70~78GB 的最大 batch。
+#    OOM → BATCH 降到 512(lr=8e-4);有余量 → 升到 768(lr≈1.2e-3)。
+#
+# 注:in_dim / kmax / run.batch_size 由 task_mti_selected.sh 注入,EXTRA 里不要再写(重复会 Hydra 报错)。
+#     scheduler_t_max 默认 = ${run.num_epochs} 自动跟随,无需写。warmup_steps 不在基础 YAML,必须用 + 前缀。
+# =============================================================================
+TaskName: pf-mti-scaling-d4096L8
+ImageUrl: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest
+Entrypoint: "bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected.sh"
+Framework: PyTorchDDP
+ResourceQueueID: q-20260318205115-lvfng
+Priority: 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,      Value: reuse}
+  - {Name: BATCH,     Value: "640"}        # 每卡;8 卡全局 5120。改这里要同步改 EXTRA 的 lr_agg
+  - {Name: NW,        Value: "6"}          # 大模型计算重、数据不是瓶颈;6 worker 足够喂满
+  # scaling 用 base/topk cache(与 d1024 基线同一份 → 结果可比);也可换 st05_v3relbl
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v2relbl}
+  # d4096/L8 巨模型 + 全局 5120 + lr 1e-3 + warmup50(≤每epoch步数~65)+ cosine 衰减 + 裁剪;150 epoch(更多)
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=4096 model.dim_ff=16384 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-3 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
+  # 想再快(A100 tensor core ~2×)可加 use_amp;但 fp16+巨模型+高 lr 有 NaN 风险(无 bf16 路径),先确认 fp32 收敛再开:
+  #   把上面 EXTRA 末尾加 " trainer_pair_selected.use_amp=true"(开了显存降~40%,可再上调 BATCH 填回 75GB)
+TaskRoleSpecs:
+  - RoleName: worker
+    RoleReplicas: 1
+    Flavor: ml.pni2.28xlarge     # 单机 8 卡(NVLink);scaling 单 run 不跨节点
+Storages:
+  - Type: Vepfs
+    VepfsId: vepfs-cnbj2c98dea54433
+    MountPath: /vepfs-mlp2/queue010/20252203765
+    SubPath: queue010/20252203765
+    ReadOnly: false
+Preemptible: true
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]

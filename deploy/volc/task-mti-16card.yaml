@@ -1,0 +1,75 @@
+# =============================================================================
+# MTI selected-inst —— 2 节点 × 8 卡 = 16 卡 多机 DDP(复用 exp8 ST 选择器缓存)
+# 提交:volc ml_task submit -c deploy/volc/task-mti-16card.yaml
+# 基线:deploy/volc/task-mti-reuse.yaml(单机 8 卡)
+# 多机依据:火山云指南 10-任务化踩坑实录-openpi案例.md §6(L4 双机 16 卡实测)、
+#           02-自定义任务提交指南.md §4.3、templates/task-ddp-multinode.yaml、09-我的平台环境.md
+#
+# 与单机 8 卡 YAML 的全部差异(逐字段在注释里标了 [CHG]):
+#   1. TaskRoleSpecs.RoleReplicas: 1 → 2(2 台机器)
+#   2. TaskRoleSpecs.Flavor: ml.pni2.28xlarge → ml.hpcpni2.28xlarge(hpc/RDMA 机型;pni2 仅 NVLink 无跨机 RDMA)
+#   3. Entrypoint: 不再直接 bash task_mti_selected.sh,改 bash 多机自愈包装脚本
+#      task_mti_selected_16card.sh —— 它做两件单机脚本没做的事:
+#        (a) apt 补装 libibverbs1/ibverbs-providers/librdmacm1/ibverbs-utils(yjq:latest 镜像缺,跨机 NCCL 走不通)
+#        (b) export NCCL_IB_TIMEOUT/NCCL_IB_RETRY_CNT/NCCL_SOCKET_IFNAME 等 RDMA 环境变量
+#      然后 exec 原 task_mti_selected.sh(torchrun 那行本身已正确读 MLP_* 多机变量,无需改)
+#   4. 新增 Envs:NCCL_IB_TIMEOUT / NCCL_IB_RETRY_CNT(火山官方推荐防 RDMA 断链)
+#   5. BATCH 维持 64/卡 → 16 卡全局 1024(8 卡时全局 512);kmax/in_dim 仍由脚本从缓存 meta 自动读
+# =============================================================================
+TaskName: pf-mti-st05-reuse-16card
+ImageUrl: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest
+# [CHG] 入口改为多机自愈包装脚本(它最后 exec task_mti_selected.sh)。
+# 若该包装脚本尚未推到 vePFS,可临时把 Entrypoint 换成下面 §inline 版(见文件末尾注释)。
+Entrypoint: "bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected_16card.sh"
+Framework: PyTorchDDP
+ResourceQueueID: q-20260318205115-lvfng
+Priority: 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,      Value: reuse}
+  - {Name: BATCH,     Value: "64"}         # 每卡;16 卡全局 1024。kmax/in_dim 由脚本从缓存 meta 自动读
+  # 论文 EXP_G(0.7353)原装 cache = topk + v2relbl。
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v2relbl}
+  # 论文 Exp.G 真配方:xlarge SAB d1024/L4/H16/ff4096 + lr_agg=1e-4 + 恒定 lr + AMP 关。in_dim/kmax 自动读。
+  - {Name: EXTRA, Value: "run.num_epochs=100 model.d_model=1024 model.dim_ff=4096 model.n_layers=4 model.n_heads=16 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1e-4 trainer_pair_selected.scheduler_agg=none"}
+  # [CHG/NEW] 跨节点 NCCL over RDMA —— 火山 HPC 文档逐字推荐(防 RDMA 断链);指南 06 §6 / 02 §4.3
+  - {Name: NCCL_IB_TIMEOUT,  Value: "23"}
+  - {Name: NCCL_IB_RETRY_CNT, Value: "7"}
+  # NCCL_DEBUG 默认由脚本设 WARN;冒烟首跑想看 "NET/IB ... RoCE / Using network IB"(RDMA 生效铁证,
+  # 见指南 10 §6)时,临时加一行 {Name: NCCL_DEBUG, Value: "INFO"};生产关闭。
+TaskRoleSpecs:
+  - RoleName: worker
+    RoleReplicas: 2                 # [CHG] 1 → 2:2 台机器,每台 8 卡 = 16 卡。MLP_WORKER_NUM 注入为 2
+    Flavor: ml.hpcpni2.28xlarge     # [CHG] 多机必须 hpc/RDMA 机型(pni2 仅 NVLink、跨机无 RDMA → ~2.3GB/s 会拖死)
+                                    # 名以官方机型页 /docs/6459/96563 为准;UI 下拉若无此名,选带 hpc 字样的 8 卡 A100 规格
+Storages:
+  - Type: Vepfs
+    VepfsId: vepfs-cnbj2c98dea54433
+    MountPath: /vepfs-mlp2/queue010/20252203765
+    SubPath: queue010/20252203765
+    ReadOnly: false                # 两台机器挂同一份 vePFS:缓存/代码/ckpt 全局可见(多机 DDP 必需)
+Preemptible: true                  # 闲时资源;多机+闲时需资源组里恰好有同 hpc 规格空闲整机才起得来(指南 idle-resources §)
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
+
+# =============================================================================
+# §inline 备用 Entrypoint(若不想新建 task_mti_selected_16card.sh,直接把上面 Entrypoint 换成这段):
+# Entrypoint: |
+#   bash -c '
+#     set -e
+#     # (a) 镜像缺 RDMA 库 → apt 自愈(指南 10 §6,实测 ~9s;火山内网源)
+#     export DEBIAN_FRONTEND=noninteractive
+#     apt-get update -y && apt-get install -y libibverbs1 ibverbs-providers librdmacm1 ibverbs-utils || true
+#     # (b) RDMA NCCL 环境(IFNAME 用平台注入的 MLP_IFNAME;HCA/GID_INDEX 机型相关,先让 NCCL 自探)
+#     export NCCL_IB_TIMEOUT=23 NCCL_IB_RETRY_CNT=7
+#     export NCCL_SOCKET_IFNAME=${MLP_IFNAME:-eth0} GLOO_SOCKET_IFNAME=${MLP_IFNAME:-eth0}
+#     exec bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected.sh
+#   '
+# 注:CLI 报字段名错时按 09 §"两套 schema" 换别名
+#   (ImageUrl→ImageSpec.Url、Entrypoint→EntrypointPath、Flavor→ResourceSpecId、ResourceQueueID→ResourceQueueId)。
+# =============================================================================
