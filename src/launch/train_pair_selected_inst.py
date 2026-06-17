@@ -274,8 +274,11 @@ def main(cfg: DictConfig) -> None:
         if improved:
             trainer.save_checkpoint(str(ckpt_dir / "best.pt"))
 
-    # ---- Post-training evaluation ----
-    if bool(cfg.run.get("eval_test_after_train", False)):
+    # ---- Post-training evaluation (rank0 only) ----
+    # DDP 下各 rank 模型已同步 → rank0 的 test 指标即正确的全量指标。只让 rank0 评估，避免 8 个 rank
+    # 同时 mmap 打开 test 缓存(vePFS 争用 / 内存峰值；且 test 的 selected_inst 若缺失会让每个 rank
+    # 都在跑完整训练后抛错、把任务整体打挂)。其余 rank 直接到下方 barrier 等它。
+    if bool(cfg.run.get("eval_test_after_train", False)) and is_rank0():
         eval_with_last = bool(cfg.run.get("eval_test_with_last", True))
         eval_with_best = bool(cfg.run.get("eval_test_with_best", False))
         eval_fixed = bool(cfg.run.get("eval_fixed_threshold", True))
@@ -347,12 +350,18 @@ def main(cfg: DictConfig) -> None:
                             metrics=metrics_by_strategy[name],
                         )
 
-        if eval_with_last:
-            run_test_eval_for_current_trainer("last")
-        if eval_with_best and best_ckpt_path is not None and best_ckpt_path.exists():
-            trainer.load_checkpoint(str(best_ckpt_path), map_location=device)
-            print_on_rank0(f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}")
-            run_test_eval_for_current_trainer("best")
+        # 训练已完成、ckpt 已存盘：test 评估再失败(如 test 缓存缺失/任意异常)也绝不该浪费整个 run。
+        try:
+            if eval_with_last:
+                run_test_eval_for_current_trainer("last")
+            if eval_with_best and best_ckpt_path is not None and best_ckpt_path.exists():
+                trainer.load_checkpoint(str(best_ckpt_path), map_location=device)
+                print_on_rank0(f"[train_pair_selected_inst] Loaded BEST checkpoint for test eval: {best_ckpt_path}")
+                run_test_eval_for_current_trainer("best")
+        except Exception as _e:
+            import traceback
+            print(f"[train_pair_selected_inst][WARN] 训后 test 评估失败(训练与 ckpt 已安全保存，不影响已得结果): {_e}")
+            traceback.print_exc()
 
     # ---- Cleanup ----
     if wandb_run is not None:
@@ -363,6 +372,7 @@ def main(cfg: DictConfig) -> None:
             pass
 
     if is_ddp():
+        barrier()       # 其余 rank 在此等 rank0 跑完训后评估，再一起 destroy NCCL，避免提前拆进程组
         cleanup_ddp()
 
 
