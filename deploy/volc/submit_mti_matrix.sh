@@ -94,7 +94,7 @@ RetryOptions:
   MaxRetryTimes: 5
   IntervalSeconds: 120
   EnableReserveResourceOnRetry: true
-  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
+  PolicySets: [InstanceReclaimed, MachineFailure, VecclHangDetectionFailed]   # 只对抢占/硬件/NCCL挂重试;代码bug(Failed/Python/Log)直接失败不重试
 YAML
   if [ "$DRY" = "1" ]; then
     echo "[DRY] $name  flavor=$flavor cards=$((g*nodes)) cache=$cache"

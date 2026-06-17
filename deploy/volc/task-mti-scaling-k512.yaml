@@ -63,7 +63,7 @@ RetryOptions:
   MaxRetryTimes: 5
   IntervalSeconds: 120
   EnableReserveResourceOnRetry: true
-  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
+  PolicySets: [InstanceReclaimed, MachineFailure, VecclHangDetectionFailed]   # 只对抢占/硬件/NCCL挂重试;代码bug(Failed/Python/Log)直接失败不重试
 # =============================================================================
 # kmax=1024:若没有 k1024 缓存,先建(MODE=build 会从 selected_raw → selected_inst 重建):
 #   提交一个 MODE=build 任务,Envs 设 KMAX=1024、CACHE_ROOT=$VEP/.../cache_mti_full_topk_r4_k1024,

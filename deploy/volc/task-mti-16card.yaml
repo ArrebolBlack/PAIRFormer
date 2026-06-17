@@ -55,7 +55,7 @@ RetryOptions:
   MaxRetryTimes: 5
   IntervalSeconds: 120
   EnableReserveResourceOnRetry: true
-  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
+  PolicySets: [InstanceReclaimed, MachineFailure, VecclHangDetectionFailed]   # 只对抢占/硬件/NCCL挂重试;代码bug(Failed/Python/Log)直接失败不重试
 
 # =============================================================================
 # §inline 备用 Entrypoint(若不想新建 task_mti_selected_16card.sh,直接把上面 Entrypoint 换成这段):
