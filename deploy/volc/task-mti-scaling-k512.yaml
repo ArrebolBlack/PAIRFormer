@@ -33,15 +33,19 @@ Priority: 4
 ActiveDeadlineSeconds: 864000
 Envs:
   - {Name: MODE,      Value: reuse}
-  - {Name: BATCH,     Value: "96"}         # 每卡;全局 768。kmax512 极吃显存,先探针!改这里同步改 lr
+  # 校准:d2048/L8 @ kmax64 batch768 实测 73.8GB(86MB/样本)。kmax512 注意力 O(512²) → 每样本 ~19×
+  # ≈ 1.6GB → 填 ~70GB 只够 batch ~32(状态 ~8GB)。batch 96 会 OOM ~2×!先单卡探针 32,再微调。
+  - {Name: BATCH,     Value: "32"}         # 每卡;全局 256。kmax512 极吃显存,务必先探针!改这里同步改 lr
   - {Name: NW,        Value: "6"}
   - {Name: PYTORCH_CUDA_ALLOC_CONF, Value: "expandable_segments:True"}   # kmax512 碎片重,务必开
   # kmax=512 的缓存(K-sweep 的 _k512;kmax 由 meta 自动读 = 512)
   - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v3relbl_k512}
   # 大模型 d2048/L8/ff8192/H32 + kmax512 + 全局768 + lr1.5e-4 + warmup + cosine + 裁剪;150 epoch
-  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=1.5e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
-  # 想用 ISAB 把 kmax512 的 O(L²) 降成 O(L·m)(诱导点 m)以省显存/提速,可在 EXTRA 加:
-  #   model.block_type=isab model.num_inducing_points=64   (注意这改了架构,不再是论文 SAB)
+  # d2048/L8 + kmax512 + 全局256 + lr5e-5 + warmup + cosine + 裁剪;150 epoch。lr=1e-4×(8×32)/512=5e-5
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=5e-5 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=50"}
+  # ★ 强烈建议 kmax 大时用 ISAB:把注意力 O(L²)→O(L·m)(诱导点 m),显存/算力大降、batch 能上 ~4-8×。
+  #   EXTRA 把 model.block_type=sab 改成 "model.block_type=isab model.num_inducing_points=64"(改了架构,非论文 SAB,
+  #   但正是为长序列设计;batch 可从 32 提到 ~128+,先探针)。这是大 kmax 实验更实用的主力档。
 TaskRoleSpecs:
   - RoleName: worker
     RoleReplicas: 1
