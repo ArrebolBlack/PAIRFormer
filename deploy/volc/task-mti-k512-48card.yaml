@@ -1,0 +1,48 @@
+# =============================================================================
+# MTI selected-inst —— K=512 大 kmax,6 节点 × 8 卡 = 48 卡 多机 DDP over RDMA
+# 提交:volc ml_task submit -c deploy/volc/task-mti-k512-48card.yaml
+# 基线:task-mti-16card.yaml(你已验证 16 卡 st05 成功)→ 这里 RoleReplicas 2→6、cache 换 _k512。
+# 目的:8 卡跑 K512 太慢(~50min/epoch,K512 注意力 O(512²) 计算重)。每卡 batch 48 不变、卡数 ×6
+#       → 全局 batch 384→2304、步数/epoch ×1/6 → 约 ~8min/epoch(算力受限、RDMA 隐藏 all-reduce)。
+#
+# 多机依据:火山云指南 10-任务化踩坑实录-openpi案例.md §6(双机 16 卡 RDMA 实测)。
+#   入口 = scripts/task_mti_selected_16card.sh(通用多机包装:apt 补 libibverbs + NCCL_IB_*,
+#   再 exec task_mti_selected.sh;节点数由 RoleReplicas→MLP_WORKER_NUM 决定,与 16/48 无关)。
+# =============================================================================
+TaskName: pf-mti-k512-48card
+ImageUrl: cr-mlp-cn-beijing.cr.volces.com/public/yjq:latest
+Entrypoint: "bash /vepfs-mlp2/queue010/20252203765/PAIRFormer/scripts/task_mti_selected_16card.sh"
+Framework: PyTorchDDP
+ResourceQueueID: q-20260318205115-lvfng
+Priority: 6                         # 用户指定;若报 "user is not queue admin" 降回 4
+ActiveDeadlineSeconds: 864000
+Envs:
+  - {Name: MODE,      Value: reuse}
+  - {Name: BATCH,     Value: "48"}         # 每卡;48 卡全局 2304。kmax512 每卡 ~63GB(与单 8 卡 k512 同)
+  # _k512 缓存 744G;hpcpni2 每节点 1.4T /dev/shm 塞得下 → 默认 USE_SHM=1(本地内存盘快读,保证算力受限、卡数线性提速)。
+  # 6 节点各拷一次 744G(启动一次性 ~15-20min,150 epoch 摊薄)。若启动报 /dev/shm 空间不足,改 USE_SHM=0 直读 vePFS。
+  - {Name: CACHE_DIR, Value: /vepfs-mlp2/queue010/20252203765/PAIRFormer_exp8_final/cache_mti_full_topk_retrain_r4_v3relbl_k512}
+  # d2048/L8 + kmax512 + 全局2304 + lr4.5e-4(=1e-4×2304/512)+ warmup100(≤每epoch步数~145)+ cosine + 裁剪;150 epoch
+  - {Name: EXTRA, Value: "run.num_epochs=150 model.d_model=2048 model.dim_ff=8192 model.n_layers=8 model.n_heads=32 model.block_type=sab model.num_seeds=1 model.ff_activation=gelu model.dropout=0.1 trainer_pair_selected.lr_agg=4.5e-4 trainer_pair_selected.scheduler_agg=cosine trainer_pair_selected.clip_grad_norm=1.0 +trainer_pair_selected.warmup_steps=100"}
+  # 跨节点 NCCL over RDMA(火山官方推荐;入口脚本也兜底设了)
+  - {Name: NCCL_IB_TIMEOUT,   Value: "23"}
+  - {Name: NCCL_IB_RETRY_CNT, Value: "7"}
+  # 首跑想确认 RDMA 生效,临时加一行 {Name: NCCL_DEBUG, Value: "INFO"},日志找 "NET/IB...RoCE / Using network IB"
+TaskRoleSpecs:
+  - RoleName: worker
+    RoleReplicas: 6                 # 6 台机器 × 8 卡 = 48 卡。MLP_WORKER_NUM 注入为 6
+    Flavor: ml.hpcpni2.28xlarge     # hpc/RDMA 机型(8×A100-80G + 4×200Gbps RoCE);多机必须,普通 pni2 跨机无 RDMA
+Storages:
+  - Type: Vepfs
+    VepfsId: vepfs-cnbj2c98dea54433
+    MountPath: /vepfs-mlp2/queue010/20252203765
+    SubPath: queue010/20252203765
+    ReadOnly: false                # 6 台挂同一份 vePFS:缓存/代码/ckpt 全局可见(多机 DDP 必需)
+Preemptible: true                  # 闲时;48 卡需队列里恰好有 6 台空闲 hpcpni2,否则整组排队
+CacheType: Cloudfs
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  EnableReserveResourceOnRetry: true
+  PolicySets: [InstanceReclaimed, Failed, MachineFailure, VecclHangDetectionFailed, LogDetectionFailed, PythonDetectionFailed]
